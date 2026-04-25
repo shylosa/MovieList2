@@ -1,0 +1,556 @@
+:root {
+    --bg: #1e1f22;
+    --sidebar-bg: #2b2d30;
+    --sidebar-brd: #393b40;
+    --nav-active: #2e436e;
+    --nav-hover: #35373c;
+    --stat-bg: #2b2d30;
+    --text-primary: #dfe1e5;
+    --text-muted: #868a91;
+    --text-dim: #6f737a;
+    --ok-green: #59a869;
+    --warn-yellow: #e2b040;
+    --blue-text: #4db8ff;
+}
+
+* {
+    box-sizing: border-box;
+}
+
+/* Дуже важливо для правильної сітки */
+
+body,
+html {
+    margin: 0;
+    padding: 0;
+    font-family: 'Segoe UI', Tahoma, sans-serif;
+    background-color: var(--bg);
+    color: var(--text-primary);
+    height: 100vh;
+    overflow: hidden;
+}
+
+/* --- КАСТОМНИЙ ЗАГОЛОВОК --- */
+.titlebar {
+    height: 32px;
+    background-color: var(--bg);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    --wails-draggable: drag;
+    border-bottom: 1px solid var(--sidebar-brd);
+}
+
+.titlebar-title {
+    font-size: 12px;
+    color: var(--text-dim);
+    padding-left: 15px;
+    pointer-events: none;
+    display: flex;
+    align-items: center;
+}
+
+.titlebar-controls {
+    display: flex;
+    height: 100%;
+    --wails-draggable: no-drag;
+}
+
+.control-btn {
+    width: 46px;
+    height: 100%;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    cursor: pointer;
+    color: var(--text-muted);
+    font-size: 14px;
+    transition: background 0.2s, color 0.2s;
+}
+
+.control-btn:hover {
+    background-color: var(--nav-hover);
+    color: var(--text-primary);
+}
+
+.control-btn.close:hover {
+    background-color: #e81123;
+    color: white;
+}
+
+.layout {
+    display: flex;
+    height: calc(100vh - 32px);
+}
+
+/* --- САЙДБАР --- */
+.sidebar {
+    width: 220px;
+    flex-shrink: 0;
+    background-color: var(--sidebar-bg);
+    border-right: 1px solid var(--sidebar-brd);
+    display: flex;
+    flex-direction: column;
+}
+
+/* Контейнер хедера сайдбару */
+.sidebar-header {
+    height: 58px;
+    display: flex;
+    justify-content: flex-end;
+    /* Притискаємо прапорець до правого краю */
+    border-bottom: 1px solid var(--sidebar-brd);
+}
+
+/* Косий прапорець, що тягнеться */
+.header-flag {
+    height: 100%;
+    background-color: var(--nav-active);
+    /* Скошуємо тільки ліву сторону */
+    clip-path: polygon(25px 0%, 100% 0%, 100% 100%, 0% 100%);
+
+    display: inline-flex;
+    align-items: center;
+    padding-left: 45px;
+    /* Більше відступу зліва для компенсації скосу */
+    padding-right: 20px;
+
+    color: var(--blue-text);
+    font-weight: bold;
+    font-size: 1.1em;
+    white-space: nowrap;
+    /* Щоб текст не переносився */
+}
+
+/* Колір значків тепер такий же, як у текста */
+.nav-btn i,
+.nav-btn span.icon {
+    color: inherit;
+    /* Успадковує колір тексту кнопки */
+    font-size: 16px;
+}
+
+/* Футер сайдбару */
+.sidebar-footer {
+    margin-top: auto;
+    padding: 15px;
+    border-top: 1px solid var(--sidebar-brd);
+    font-size: 10px;
+    color: var(--text-dim);
+    text-align: center;
+}
+
+.sidebar-footer a {
+    color: var(--text-dim);
+    text-decoration: none;
+    transition: color 0.2s;
+}
+
+.sidebar-footer a:hover {
+    color: var(--blue-text);
+}
+
+/* --- СТИЛІ КНОПОК МЕНЮ --- */
+.nav-btn {
+    padding: 10px 15px;
+    margin: 5px 10px;
+    border-radius: 7px;
+    cursor: pointer;
+    color: var(--text-muted);
+    font-weight: bold;
+    transition: background 0.2s, color 0.2s;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.nav-btn:hover {
+    background-color: var(--nav-hover);
+    color: var(--text-primary);
+}
+
+.nav-btn.active {
+    background-color: var(--nav-active);
+    color: var(--text-primary);
+}
+
+/* Знебарвлюємо емоджі, щоб вони виглядали як монохромні іконки */
+/* Монохромні значки (якщо ти ще не додав це) */
+.nav-icon {
+    font-size: 16px;
+    filter: grayscale(100%) brightness(0.8) opacity(0.8);
+    transition: filter 0.2s;
+}
+
+.nav-btn:hover .nav-icon,
+.nav-btn.active .nav-icon {
+    filter: grayscale(100%) brightness(2) opacity(1);
+}
+
+/* --- ГОЛОВНА ЗОНА --- */
+.main-area {
+    flex-grow: 1;
+    min-width: 0;
+    /* ⬅️ Забороняємо контенту (довгим текстам) розпирати блок */
+    display: flex;
+    flex-direction: column;
+    padding: 20px;
+    overflow: hidden;
+}
+
+.panel {
+    display: none;
+    height: 100%;
+    flex-direction: column;
+}
+
+.panel.active {
+    display: flex;
+}
+
+/* Картки статистики */
+.cards {
+    display: flex;
+    gap: 15px;
+    margin-bottom: 5px;
+    flex-shrink: 0;
+}
+
+.card {
+    flex: 1;
+    background: var(--stat-bg);
+    border: 1px solid var(--sidebar-brd);
+    border-radius: 8px;
+    padding: 15px;
+}
+
+.card-title {
+    font-size: 0.8em;
+    font-weight: bold;
+    color: var(--text-dim);
+    margin-bottom: 10px;
+}
+
+.card-val {
+    font-size: 1.5em;
+    font-weight: bold;
+    margin-bottom: 5px;
+}
+
+.card-sub {
+    font-size: 0.85em;
+    color: var(--text-muted);
+}
+
+.console-outer {
+    flex-grow: 1;
+    background-color: #1c1c1c;
+    border: 1px solid var(--sidebar-brd);
+    border-radius: 8px;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.console-header {
+    background-color: var(--sidebar-bg);
+    padding: 5px 15px;
+    font-size: 0.85em;
+    flex-shrink: 0;
+    color: var(--text-dim);
+    border-bottom: 1px solid var(--sidebar-brd);
+    display: flex;
+    justify-content: space-between;
+}
+
+.console-body {
+    padding: 10px;
+    font-family: 'Consolas', 'Courier New', monospace;
+    font-size: 0.9em;
+    color: var(--text-primary);
+    overflow-y: auto;
+    flex-grow: 1;
+}
+
+.log-success {
+    color: var(--ok-green);
+}
+
+.log-warn {
+    color: var(--warn-yellow);
+}
+
+/* Скролбар */
+::-webkit-scrollbar {
+    width: 12px;
+    height: 12px;
+}
+
+::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+    background-color: #43454a;
+    border-radius: 6px;
+    border: 3px solid var(--bg);
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background-color: #5b5d63;
+}
+
+#panel-editor ::-webkit-scrollbar-thumb {
+    border: 3px solid var(--sidebar-bg);
+}
+
+/* =========================================
+   ПАНЕЛЬ РЕДАКТОРА (Виправлена сітка)
+   ========================================= */
+.editor-toolbar {
+    display: flex;
+    gap: 15px;
+    margin-bottom: 15px;
+    align-items: center;
+    flex-shrink: 0;
+    margin-right: 12px;
+}
+
+.editor-header {
+    display: flex;
+    align-items: center;
+    background-color: #35383f;
+    padding: 10px;
+    border-radius: 6px;
+    margin-bottom: 8px;
+    font-size: 12px;
+    font-weight: bold;
+    color: var(--text-primary);
+    flex-shrink: 0;
+    margin-right: 12px;
+}
+
+#search-input {
+    flex-grow: 1;
+    background-color: var(--sidebar-bg);
+    border: 1px solid var(--sidebar-brd);
+    color: var(--text-primary);
+    padding: 10px 15px;
+    border-radius: 6px;
+    font-size: 14px;
+    outline: none;
+}
+
+#search-input:focus {
+    border-color: var(--nav-active);
+}
+
+#btn-fix {
+    background-color: var(--nav-active);
+    color: var(--blue-text);
+    border: none;
+    padding: 10px 20px;
+    border-radius: 6px;
+    font-size: 13px;
+    font-weight: bold;
+    cursor: pointer;
+    transition: 0.2s;
+}
+
+#btn-fix:hover {
+    background-color: var(--nav-hover);
+    color: var(--text-primary);
+}
+
+.editor-header {
+    display: flex;
+    align-items: center;
+    background-color: #35383f;
+    padding: 10px;
+    border-radius: 6px;
+    margin-bottom: 8px;
+    font-size: 12px;
+    font-weight: bold;
+    color: var(--text-primary);
+    flex-shrink: 0;
+}
+
+.movie-row {
+    display: flex;
+    align-items: center;
+    background-color: var(--sidebar-bg);
+    padding: 6px 10px;
+    margin-bottom: 4px;
+    border-radius: 5px;
+    font-size: 13px;
+}
+
+.movie-row:nth-child(even) {
+    background-color: #242527;
+}
+
+/* Колонки сітки (Flexbox) */
+.col-cb {
+    width: 40px;
+    display: flex;
+    justify-content: center;
+    flex-shrink: 0;
+}
+
+.col-file {
+    width: 35%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-family: 'Consolas', monospace;
+    color: var(--text-primary);
+    padding-right: 15px;
+}
+
+.col-arr {
+    width: 30px;
+    text-align: center;
+    color: var(--text-dim);
+    flex-shrink: 0;
+}
+
+.col-title {
+    flex-grow: 1;
+    color: var(--blue-text);
+    font-weight: bold;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    padding-right: 15px;
+}
+
+.col-hint {
+    width: 220px;
+    display: flex;
+    justify-content: flex-end;
+    flex-shrink: 0;
+}
+
+/* Кастомні інпути та чекбокси */
+.hint-input {
+    width: 100%;
+    background-color: #393b40;
+    border: 1px solid var(--sidebar-brd);
+    color: var(--text-primary);
+    padding: 5px 10px;
+    border-radius: 4px;
+    outline: none;
+}
+
+.hint-input:focus {
+    border-color: var(--text-muted);
+}
+
+.row-cb {
+    appearance: none;
+    width: 16px;
+    height: 16px;
+    background-color: #393b40;
+    border: 1px solid var(--sidebar-brd);
+    border-radius: 3px;
+    cursor: pointer;
+    position: relative;
+    margin: 0;
+}
+
+.row-cb:checked {
+    background-color: var(--blue-text);
+    border-color: var(--blue-text);
+}
+
+.row-cb:checked::after {
+    content: '✔';
+    color: #1e1f22;
+    position: absolute;
+    font-size: 11px;
+    left: 2px;
+    top: -1px;
+    font-weight: bold;
+}
+
+.btn-danger {
+    background-color: #d11a2a;
+    color: white;
+    cursor: pointer;
+    border: 1px solid #b2070f;
+    border-radius: 4px;
+    padding: 5px 10px;
+}
+
+.btn-danger:hover {
+    background-color: #b2070f;
+}
+
+/* Контейнер */
+.scan-progress-area {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    width: 100%;
+    box-sizing: border-box;
+    margin-bottom: 3px;
+}
+
+/* Обгортка лінії */
+.progress-wrap {
+    flex-grow: 1;
+    /* Розтягує лінію на весь вільний простір */
+    min-width: 0;
+    /* Захист від виштовхування кнопки */
+    height: 6px;
+    /* КРИТИЧНО: без цього лінія зникне */
+    background: #333;
+    border-radius: 3px;
+    overflow: hidden;
+}
+
+/* Червона смужка */
+.progress-bar {
+    width: 0%;
+    height: 100%;
+    background: #e50914;
+    transition: width 0.3s ease;
+}
+
+/* Кнопка СТОП */
+.stop-btn {
+    flex-shrink: 0;
+    /* КРИТИЧНО: забороняє кнопці стискатися */
+    width: 28px;
+    height: 28px;
+    background: transparent;
+    border: none;
+    padding: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: color 0.3s ease, transform 0.1s ease;
+}
+
+/* Кольори кнопки (щоб не була чорною) */
+.stop-btn.disabled {
+    color: #555555;
+    pointer-events: none;
+}
+
+.stop-btn.active {
+    color: #e50914;
+    pointer-events: auto;
+}
+
+.stop-btn.active:hover {
+    color: #ff333d;
+    transform: scale(1.1);
+}
+
+.stop-btn.stopping {
+    color: #ffc107;
+    pointer-events: none;
+    cursor: wait;
+}
