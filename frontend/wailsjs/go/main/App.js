@@ -42,6 +42,10 @@ export function RunScan() {
   return window['go']['main']['App']['RunScan']();
 }
 
+export function SelectMediaFolder() {
+  return window['go']['main']['App']['SelectMediaFolder']();
+}
+
 export function StopScan() {
   return window['go']['main']['App']['StopScan']();
 }

@@ -1,6 +1,6 @@
 import './style.css';
 
-import { GetMovies, GetStats, RunScan, StopScan, GetAIModels, OpenLogs, FixSelected, SyncToCloud, OpenShowcase, OpenSheet, OpenURL, DeleteMovie } from '../wailsjs/go/main/App.js';
+import { GetMovies, GetStats, RunScan, StopScan, GetAIModels, OpenLogs, FixSelected, SyncToCloud, OpenShowcase, OpenSheet, OpenURL, DeleteMovie, SelectMediaFolder } from '../wailsjs/go/main/App.js';
 import { Quit, WindowMinimise, WindowToggleMaximise, EventsOn } from '../wailsjs/runtime/runtime.js';
 import logoUrl from './assets/images/appicon.png';
 
@@ -33,6 +33,7 @@ document.querySelector('#app').innerHTML = `
 
             <div class="nav-btn" id="btn-editor"><span class="nav-icon">✏️</span> Редактор</div>
             <div class="nav-btn" id="btn-models"><span class="nav-icon">🤖</span> Моделі ШІ</div>
+            <div class="nav-btn" id="btn-select-folder"><span class="nav-icon">📁</span> Вибрати папку</div>
             <div class="nav-btn" id="btn-logs"><span class="nav-icon">📁</span> Папка з логами</div>
         </div>
 
@@ -93,8 +94,9 @@ document.querySelector('#app').innerHTML = `
                 <div class="col-cb"></div>
                 <div class="col-file">Файл</div>
                 <div class="col-arr"></div>
+                <div class="col-year">Рік</div>
                 <div class="col-title">Розпізнано як</div>
-                <div class="col-hint">Рік / ID / URL (підказка)</div>
+                <div class="col-hint">Підказка</div>
             </div>
             <div id="movie-list" style="overflow-y: scroll; flex-grow: 1;">Завантаження...</div>
         </div>
@@ -188,6 +190,18 @@ document.getElementById('btn-editor').onclick = () => {
 };
 
 document.getElementById('btn-logs').onclick = OpenLogs;
+
+document.getElementById('btn-select-folder').onclick = async () => {
+    try {
+        const path = await SelectMediaFolder();
+        if (path) {
+            logToConsole(`📁 Вибрана папка: ${path}`, "log-info");
+            // Тут можна зберегти path у конфіг, але поки що просто лог
+        }
+    } catch (err) {
+        logToConsole(`❌ Помилка вибору папки: ${err}`, "log-error");
+    }
+};
 
 document.getElementById('btn-models').onclick = async () => {
     switchTab('overview', 'Моделі ШІ');
@@ -337,9 +351,10 @@ function renderMovies(movies) {
                 <div class="col-cb"><input type="checkbox" class="row-cb" data-filename="${m.filename}" ${isChecked}></div>
                 <div class="col-file" title="${m.filename}">${m.filename}</div>
                 <div class="col-arr">➜</div>
+                <div class="col-year">${m.year || '—'}</div>
                 <div class="col-title">
                     <span class="tmdb-link" data-url="${tmdbUrl}" style="color: #58a6ff; cursor: pointer; text-decoration: none; font-weight: 500;">
-                        ${title} (${m.year || '—'})
+                        ${title}
                     </span>
                 </div>
                 <div class="col-hint"><input type="text" class="hint-input" data-filename="${m.filename}" value="${hintVal}"></div>

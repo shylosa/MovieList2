@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"movielist-app/internal/ai"
 	"movielist-app/internal/config"
@@ -96,7 +97,7 @@ func (a *App) GetStats() map[string]interface{} {
 	}
 	lastScan := "Ніколи"
 	if info, err := os.Stat(a.cfg.DBPath); err == nil {
-		lastScan = info.ModTime().Format("02.01.2006 15:04")
+		lastScan = info.ModTime().Format("2006-01-02 15:04")
 	}
 	return map[string]interface{}{
 		"total": len(movies),
@@ -127,7 +128,15 @@ func (a *App) OpenLogs() {
 	_ = os.MkdirAll(path, 0755)
 	a.openInExplorer(path)
 }
-
+func (a *App) SelectMediaFolder() (string, error) {
+	path, err := wailsRuntime.OpenDirectoryDialog(a.ctx, wailsRuntime.OpenDialogOptions{
+		Title: "Виберіть папку з медіафайлами",
+	})
+	if err != nil {
+		return "", err
+	}
+	return path, nil
+}
 func (a *App) OpenSheet() {
 	if a.cfg.GoogleSheetURL == "" {
 		a.logFront("❌ URL таблиці не вказано у конфігурації")
@@ -284,8 +293,8 @@ func (a *App) RunScan() {
 
 		if info != nil && info.TitleEN != "" {
 			movie := movieFromTMDB(fname, info)
-			// 🟢 БУЛО: a.db.SaveMovie(a.ctx, movie)
-			// 🟢 СТАЛО: Базі даних теж передаємо локальний ctx
+			a.translateDataIfNeeded(ctx, &movie)
+
 			_ = a.db.SaveMovie(ctx, movie)
 			a.logFront(fmt.Sprintf("✅ TMDB: '%s' → '%s'", fname, info.TitleUA))
 		} else {
@@ -343,7 +352,7 @@ func (a *App) processGeminiQueue(ctx context.Context, filenames []string) {
 			for _, fname := range batch {
 				processed++
 				a.emitProgress(processed, total, "❌ Помилка: "+fname)
-				// 🟢 СТАЛО: Передаємо локальний ctx у базу даних
+
 				_ = a.db.SaveMovie(ctx, storage.Movie{Filename: fname})
 			}
 			continue
@@ -367,7 +376,8 @@ func (a *App) processGeminiQueue(ctx context.Context, filenames []string) {
 
 			a.emitProgress(processed, total, "🤖 Gemini: "+rec.ENTitle)
 			movie := a.mergeGeminiWithTMDB(fname, rec)
-			// 🟢 СТАЛО: Передаємо локальний ctx
+			a.translateDataIfNeeded(ctx, &movie)
+
 			_ = a.db.SaveMovie(ctx, movie)
 		}
 	}
@@ -541,6 +551,8 @@ func (a *App) UpdateMovie(filename, hint string) error {
 		}
 		if info != nil {
 			applyTMDBToMovie(existing, info)
+			a.translateDataIfNeeded(a.ctx, existing)
+
 			return a.db.SaveMovie(a.ctx, *existing)
 		}
 	}
@@ -711,4 +723,58 @@ func (a *App) openInExplorer(path string) {
 	if err := cmd.Start(); err != nil {
 		a.logFront(fmt.Sprintf("❌ Не вдалося відкрити: %v", err))
 	}
+}
+
+func (a *App) translateDataIfNeeded(ctx context.Context, movie *storage.Movie) {
+	aiClient := ai.NewClient(a.cfg)
+	madeChanges := false
+
+	// 1. Перевіряємо НАЗВУ
+	if needsTranslation(movie.TitleUA) {
+		a.logFront(fmt.Sprintf("🔄 Перекладаю назву '%s'...", movie.TitleUA))
+		translatedTitle := aiClient.TranslateTitle(ctx, movie.TitleUA)
+		if translatedTitle != "" {
+			movie.TitleUA = translatedTitle
+			madeChanges = true
+		}
+	}
+
+	// 2. Перевіряємо ОПИС
+	if needsTranslation(movie.Plot) {
+		a.logFront(fmt.Sprintf("🔄 Перекладаю опис для '%s'...", movie.TitleUA))
+		translatedPlot := aiClient.TranslatePlot(ctx, movie.Plot)
+		if translatedPlot != "" {
+			movie.Plot = translatedPlot
+			madeChanges = true
+		}
+	}
+
+	if madeChanges {
+		a.logFront(fmt.Sprintf("✅ Переклад завершено: '%s'", movie.TitleUA))
+	}
+}
+
+// needsTranslation повертає true, якщо текст треба перекласти (немає кирилиці АБО є специфічні російські літери)
+func needsTranslation(s string) bool {
+	if s == "" {
+		return false
+	}
+
+	hasCyrillic := false
+	hasRussian := false
+
+	for _, r := range s {
+		if unicode.Is(unicode.Cyrillic, r) {
+			hasCyrillic = true
+		}
+		// Перевірка на унікальні літери російської абетки
+		if r == 'ы' || r == 'э' || r == 'ъ' || r == 'ё' ||
+		   r == 'Ы' || r == 'Э' || r == 'Ъ' || r == 'Ё' {
+			hasRussian = true
+			break // Якщо знайшли російську літеру, далі можна не шукати
+		}
+	}
+
+	// Перекладаємо, якщо немає кирилиці (англійська) АБО є російські літери
+	return !hasCyrillic || hasRussian
 }

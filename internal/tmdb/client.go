@@ -26,15 +26,52 @@ type Client struct {
 	client     *http.Client
 	apiKey     string
 	postersDir string
+	rateLimiter *time.Ticker
 }
 
 func NewClient(cfg *config.Config) *Client {
 	os.MkdirAll(cfg.PostersDir, 0755)
 	return &Client{
-		client:     &http.Client{Timeout: 15 * time.Second},
-		apiKey:     cfg.TMDBAPIKey,
-		postersDir: cfg.PostersDir,
+		client:      &http.Client{Timeout: 15 * time.Second},
+		apiKey:      cfg.TMDBAPIKey,
+		postersDir:  cfg.PostersDir,
+		rateLimiter: time.NewTicker(500 * time.Millisecond), // 2 запити/сек
 	}
+}
+
+func (c *Client) waitForRateLimit(ctx context.Context) error {
+	select {
+	case <-c.rateLimiter.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (c *Client) doRequestWithRetry(ctx context.Context, url string, target any) error {
+	const maxRetries = 3
+	backoff := 1 * time.Second
+
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		err := c.doRequest(ctx, url, target)
+		if err == nil {
+			return nil
+		}
+
+		// Якщо це остання спроба або контекст скасований, повертаємо помилку
+		if attempt == maxRetries-1 || ctx.Err() != nil {
+			return err
+		}
+
+		log.Printf("[TMDB] Спроба %d/3 не вдалася: %v. Повтор через %v", attempt+1, err, backoff)
+		select {
+		case <-time.After(backoff):
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+		backoff *= 2 // експоненціальний backoff
+	}
+	return nil
 }
 
 // FetchFromFilename — точка входу для сирого імені файлу.
@@ -278,6 +315,10 @@ func isUpper(r rune) bool {
 // --- HTTP helpers ---
 
 func (c *Client) doRequest(ctx context.Context, url string, target any) error {
+	if err := c.waitForRateLimit(ctx); err != nil {
+		return err
+	}
+
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return fmt.Errorf("doRequest: %w", err)

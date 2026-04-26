@@ -327,7 +327,6 @@ html {
     font-weight: bold;
     color: var(--text-primary);
     flex-shrink: 0;
-    margin-right: 12px;
 }
 
 #search-input {
@@ -362,19 +361,6 @@ html {
     color: var(--text-primary);
 }
 
-.editor-header {
-    display: flex;
-    align-items: center;
-    background-color: #35383f;
-    padding: 10px;
-    border-radius: 6px;
-    margin-bottom: 8px;
-    font-size: 12px;
-    font-weight: bold;
-    color: var(--text-primary);
-    flex-shrink: 0;
-}
-
 .movie-row {
     display: flex;
     align-items: center;
@@ -383,6 +369,7 @@ html {
     margin-bottom: 4px;
     border-radius: 5px;
     font-size: 13px;
+    min-height: 32px;
 }
 
 .movie-row:nth-child(even) {
@@ -391,20 +378,20 @@ html {
 
 /* Колонки сітки (Flexbox) */
 .col-cb {
-    width: 40px;
+    width: 35px;
     display: flex;
     justify-content: center;
     flex-shrink: 0;
 }
 
 .col-file {
-    width: 35%;
+    width: 220px;
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
     font-family: 'Consolas', monospace;
     color: var(--text-primary);
-    padding-right: 15px;
+    flex-shrink: 0;
 }
 
 .col-arr {
@@ -412,22 +399,32 @@ html {
     text-align: center;
     color: var(--text-dim);
     flex-shrink: 0;
+    display: flex;
+    justify-content: center;
+}
+
+.col-year {
+    width: 60px;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    color: var(--text-muted);
+    flex-shrink: 0;
 }
 
 .col-title {
     flex-grow: 1;
+    min-width: 150px;
     color: var(--blue-text);
     font-weight: bold;
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-    padding-right: 15px;
 }
 
 .col-hint {
-    width: 220px;
+    width: 180px;
     display: flex;
-    justify-content: flex-end;
     flex-shrink: 0;
 }
 

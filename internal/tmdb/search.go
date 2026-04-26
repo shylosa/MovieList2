@@ -118,7 +118,7 @@ func (c *Client) searchAndFetch(
 	)
 
 	var resp tmdbSearchResponse
-	if err := c.doRequest(ctx, searchURL, &resp); err != nil {
+	if err := c.doRequestWithRetry(ctx, searchURL, &resp); err != nil {
 		return nil, err
 	}
 

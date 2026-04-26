@@ -22,6 +22,8 @@ export function OpenURL(arg1:string):Promise<void>;
 
 export function RunScan():Promise<void>;
 
+export function SelectMediaFolder():Promise<string>;
+
 export function StopScan():Promise<void>;
 
 export function SyncToCloud():Promise<void>;

@@ -12,3 +12,6 @@ frontend/dist/
 
 credentials.json
 .env
+index.html
+movies.db-shm
+movies.db-wal

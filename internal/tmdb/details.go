@@ -47,7 +47,7 @@ func (c *Client) getMovieDetails(ctx context.Context, id int, originalFilename s
 	// 1. Початковий запит УКРАЇНСЬКОЮ (з акторами)
 	urlUA := fmt.Sprintf("%s/movie/%d?api_key=%s&language=uk-UA&append_to_response=credits", baseURL, id, c.apiKey)
 	var d tmdbMovieDetails
-	if err := c.doRequest(ctx, urlUA, &d); err != nil {
+	if err := c.doRequestWithRetry(ctx, urlUA, &d); err != nil {
 		return nil, err
 	}
 
@@ -57,7 +57,7 @@ func (c *Client) getMovieDetails(ctx context.Context, id int, originalFilename s
 		if strings.TrimSpace(d.Overview) == "" || len(d.Credits.Cast) == 0 {
 			urlNext := fmt.Sprintf("%s/movie/%d?api_key=%s&language=%s&append_to_response=credits", baseURL, id, c.apiKey, lang)
 			var dNext tmdbMovieDetails
-			if err := c.doRequest(ctx, urlNext, &dNext); err == nil {
+			if err := c.doRequestWithRetry(ctx, urlNext, &dNext); err == nil {
 				// Дозаповнюємо тільки те, чого не вистачає
 				if strings.TrimSpace(d.Overview) == "" && dNext.Overview != "" {
 					d.Overview = dNext.Overview
@@ -96,7 +96,7 @@ func (c *Client) getMovieDetails(ctx context.Context, id int, originalFilename s
 func (c *Client) getTVDetails(ctx context.Context, id int, originalFilename string) (*MovieInfo, error) {
 	urlUA := fmt.Sprintf("%s/tv/%d?api_key=%s&language=uk-UA&append_to_response=credits", baseURL, id, c.apiKey)
 	var d tmdbTVDetails
-	if err := c.doRequest(ctx, urlUA, &d); err != nil {
+	if err := c.doRequestWithRetry(ctx, urlUA, &d); err != nil {
 		return nil, err
 	}
 
@@ -105,7 +105,7 @@ func (c *Client) getTVDetails(ctx context.Context, id int, originalFilename stri
 		if strings.TrimSpace(d.Overview) == "" || len(d.Credits.Cast) == 0 {
 			urlNext := fmt.Sprintf("%s/tv/%d?api_key=%s&language=%s&append_to_response=credits", baseURL, id, c.apiKey, lang)
 			var dNext tmdbTVDetails
-			if err := c.doRequest(ctx, urlNext, &dNext); err == nil {
+			if err := c.doRequestWithRetry(ctx, urlNext, &dNext); err == nil {
 				if strings.TrimSpace(d.Overview) == "" && dNext.Overview != "" {
 					d.Overview = dNext.Overview
 				}

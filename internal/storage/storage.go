@@ -55,7 +55,12 @@ func (db *DB) InitSchema(ctx context.Context) error {
 		plot TEXT,
 		poster_url TEXT,
 		local_poster_path TEXT
-	);`
+	);
+	CREATE INDEX IF NOT EXISTS idx_tmdb_id ON movies(tmdb_id);
+	CREATE INDEX IF NOT EXISTS idx_title_en ON movies(title_en);
+	PRAGMA journal_mode = WAL;
+	PRAGMA synchronous = NORMAL;
+	`
 	_, err := db.db.ExecContext(ctx, query)
 	return err
 }
