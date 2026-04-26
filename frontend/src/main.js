@@ -1,6 +1,6 @@
 import './style.css';
 
-import { GetMovies, GetStats, RunScan, StopScan, GetAIModels, OpenLogs, FixSelected, SyncToCloud, OpenShowcase, OpenSheet, OpenURL, DeleteMovie, SelectMediaFolder } from '../wailsjs/go/main/App.js';
+import { GetAppVersion, GetMovies, GetStats, RunScan, StopScan, GetAIModels, OpenLogs, FixSelected, SyncToCloud, OpenShowcase, OpenSheet, OpenURL, DeleteMovie, SelectMediaFolder } from '../wailsjs/go/main/App.js';
 import { Quit, WindowMinimise, WindowToggleMaximise, EventsOn } from '../wailsjs/runtime/runtime.js';
 import logoUrl from './assets/images/appicon.png';
 
@@ -8,7 +8,7 @@ document.querySelector('#app').innerHTML = `
   <div class="titlebar">
       <div class="titlebar-title" style="display: flex; align-items: center;">
           <img src="${logoUrl}" alt="logo" style="width: 16px; height: 16px; margin-right: 8px; border-radius: 4px; pointer-events: none;">
-          MovieList 2.0
+          MovieList <span id="app-version" style="margin-left: 8px; color: var(--text-dim); font-size: 11px;">?</span>
       </div>
       <div class="titlebar-controls">
           <div class="control-btn" id="btn-min">─</div>
@@ -512,8 +512,21 @@ document.getElementById('btn-delete-selected').onclick = async (e) => {
 };
 
 // Чекаємо на wails:ready перш ніж завантажувати дані
+async function loadAppVersion() {
+    try {
+        const version = await GetAppVersion();
+        const versionEl = document.getElementById('app-version');
+        if (versionEl && version) {
+            versionEl.innerText = version;
+        }
+    } catch (e) {
+        console.error("Не вдалося завантажити версію додатку:", e);
+    }
+}
+
 EventsOn('wails:ready', () => {
     console.log("⚡ wails:ready событие получено");
+    loadAppVersion();
     loadStats();
 });
 
@@ -521,5 +534,6 @@ EventsOn('wails:ready', () => {
 console.log("📍 Ініціалізація фронтенду...");
 setTimeout(() => {
     console.log("⏱️ Спроба завантажити статистику (через setTimeout)...");
+    loadAppVersion();
     loadStats();
 }, 500);

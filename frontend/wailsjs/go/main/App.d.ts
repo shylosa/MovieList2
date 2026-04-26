@@ -8,6 +8,8 @@ export function FixSelected(arg1:Array<Record<string, any>>):Promise<void>;
 
 export function GetAIModels():Promise<Array<string>>;
 
+export function GetAppVersion():Promise<string>;
+
 export function GetMovies():Promise<Array<storage.Movie>>;
 
 export function GetStats():Promise<Record<string, any>>;

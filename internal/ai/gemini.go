@@ -308,129 +308,105 @@ func parseResponse(body []byte) ([]RecognizedTitle, error) {
 	return nil, fmt.Errorf("масив результатів не знайдено у відповіді Gemini")
 }
 
-// TranslatePlot перекладає текст на українську мову за допомогою Gemini
+// translateWithRetry — універсальний метод перекладу з каскадом моделей та ретраями
+func (c *Client) translateWithRetry(ctx context.Context, prompt string, fallbackText string) string {
+	reqBody := map[string]interface{}{
+		"contents": []map[string]interface{}{
+			{"parts": []map[string]interface{}{{"text": prompt}}},
+		},
+		"generationConfig": map[string]interface{}{
+			"temperature": 0.2,
+		},
+	}
+	bodyBytes, _ := json.Marshal(reqBody)
+
+	// 🛠 ПРАВИЛЬНЕ ВИПРАВЛЕННЯ: Беремо моделі з нашого центрального конфігу
+	models := c.cfg.GeminiModels
+
+	// Якщо в .env нічого не вказали (або змінна порожня), ставимо безпечний дефолт
+	if len(models) == 0 {
+		models = []string{"gemini-2.5-flash", "gemini-2.5-pro", "gemini-flash-latest", "gemini-2.5-flash-lite"}
+	}
+
+	for _, model := range models {
+		url := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent?key=%s", model, c.cfg.GeminiAPIKey)
+
+		for attempt := 1; attempt <= 3; attempt++ {
+			_ = c.waitForRateLimit(ctx)
+
+			req, _ := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(bodyBytes))
+			req.Header.Set("Content-Type", "application/json")
+
+			resp, err := c.httpClient.Do(req)
+
+			// ⚡ Миттєва реакція на ліміти (429 Too Many Requests)
+			if resp != nil && resp.StatusCode == http.StatusTooManyRequests {
+				resp.Body.Close()
+				log.Printf("[GEMINI] ⏳ Ліміт запитів (429) для моделі %s. Перемикаємось далі...", model)
+				break // Виходимо з циклу спроб для цієї моделі і пробуємо наступну з конфігу
+			}
+
+			if err == nil && resp.StatusCode == http.StatusOK {
+				defer resp.Body.Close()
+				body, _ := io.ReadAll(resp.Body)
+
+				var googleResp struct {
+					Candidates []struct {
+						Content struct {
+							Parts []struct {
+								Text string `json:"text"`
+							} `json:"parts"`
+						} `json:"content"`
+					} `json:"candidates"`
+				}
+
+				if err := json.Unmarshal(body, &googleResp); err == nil && len(googleResp.Candidates) > 0 && len(googleResp.Candidates[0].Content.Parts) > 0 {
+					translated := strings.TrimSpace(googleResp.Candidates[0].Content.Parts[0].Text)
+					translated = strings.Trim(translated, `"'«»`)
+					if translated != "" {
+						return translated // Успішний переклад!
+					}
+				}
+			}
+
+			if resp != nil {
+				resp.Body.Close()
+			}
+
+			// Затримка перед повторною спробою для поточних (не 429) помилок
+			time.Sleep(time.Second * 2)
+		}
+		log.Printf("[GEMINI] ⚠️ Модель %s не змогла перекласти. Пробуємо наступну...", model)
+	}
+
+	log.Printf("[GEMINI] ❌ Усі спроби перекладу провалилися. Повертаю оригінал.")
+	return fallbackText
+}
+
+// TranslateTitle адаптує назву українською мовою.
+func (c *Client) TranslateTitle(ctx context.Context, title string, fallback string) string {
+	if title == "" {
+		return fallback
+	}
+
+	prompt := fmt.Sprintf("Переклади назву фільму українською мовою. Поверни ТІЛЬКИ переклад. Жодних пояснень, роздумів, лапок чи додаткових слів.\n\nНазва: %s", title)
+
+	translated := c.translateWithRetry(ctx, prompt, fallback)
+
+	lowerTrans := strings.ToLower(translated)
+	if len(translated) > 100 || strings.Contains(lowerTrans, "thought") || strings.Contains(lowerTrans, "original:") {
+		log.Printf("[GEMINI] ⚠️ ШІ видав монолог замість назви. Залишаємо оригінал: %s", fallback)
+		return fallback // ВИПРАВЛЕННЯ: Повертаємо оригінал (російський текст), а не англійський фолбек
+	}
+
+	return translated
+}
+
 func (c *Client) TranslatePlot(ctx context.Context, text string) string {
 	if text == "" {
 		return ""
 	}
 
 	prompt := "Переклади цей опис фільму на гарну літературну українську мову. Поверни ТІЛЬКИ перекладений текст, без жодних додаткових коментарів, лапок чи пояснень:\n\n" + text
-
-	reqBody := map[string]interface{}{
-		"contents": []map[string]interface{}{
-			{
-				"parts": []map[string]interface{}{
-					{"text": prompt},
-				},
-			},
-		},
-		"generationConfig": map[string]interface{}{
-			"temperature": 0.3, // Низька температура для точного та сухого перекладу
-		},
-	}
-
-	bodyBytes, _ := json.Marshal(reqBody)
-	url := "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=" + c.cfg.GeminiAPIKey
-
-	if err := c.waitForRateLimit(ctx); err != nil {
-		return text // У разі помилки повертаємо оригінал
-	}
-
-	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(bodyBytes))
-	if err != nil {
-		return text // У разі помилки повертаємо оригінал
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil || resp.StatusCode != http.StatusOK {
-		return text // У разі помилки повертаємо оригінал
-	}
-	defer resp.Body.Close()
-
-	body, _ := io.ReadAll(resp.Body)
-
-	// Швидкий парсинг відповіді (можеш використати свій існуючий парсер, але цей гарантовано витягне текст)
-	var googleResp struct {
-		Candidates []struct {
-			Content struct {
-				Parts []struct {
-					Text string `json:"text"`
-				} `json:"parts"`
-			} `json:"content"`
-		} `json:"candidates"`
-	}
-
-	if err := json.Unmarshal(body, &googleResp); err == nil && len(googleResp.Candidates) > 0 && len(googleResp.Candidates[0].Content.Parts) > 0 {
-		translated := strings.TrimSpace(googleResp.Candidates[0].Content.Parts[0].Text)
-		if translated != "" {
-			return translated
-		}
-	}
-
-	return text // Якщо щось пішло не так, залишаємо англійський опис
-}
-
-// TranslateTitle адаптує назву українською мовою
-func (c *Client) TranslateTitle(ctx context.Context, title string) string {
-	if title == "" {
-		return ""
-	}
-
-	prompt := "Переклади цю назву фільму/серіалу українською мовою. " +
-		"Якщо це власне ім'я чи специфічна назва, яку краще не перекладати (наприклад 'Landman' або 'Oculus'), транслітеруй її українськими літерами ('Лендмен', 'Окулус'). " +
-		"Поверни ТІЛЬКИ українську назву, без лапок і без пояснень:\n\n" + title
-
-	reqBody := map[string]interface{}{
-		"contents": []map[string]interface{}{
-			{
-				"parts": []map[string]interface{}{
-					{"text": prompt},
-				},
-			},
-		},
-		"generationConfig": map[string]interface{}{
-			"temperature": 0.2, // Дуже низька температура, щоб ШІ не фантазував
-		},
-	}
-
-	bodyBytes, _ := json.Marshal(reqBody)
-	url := "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=" + c.cfg.GeminiAPIKey
-
-	if err := c.waitForRateLimit(ctx); err != nil {
-		return ""
-	}
-
-	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(bodyBytes))
-	if err != nil {
-		return ""
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil || resp.StatusCode != http.StatusOK {
-		return ""
-	}
-	defer resp.Body.Close()
-
-	body, _ := io.ReadAll(resp.Body)
-	var googleResp struct {
-		Candidates []struct {
-			Content struct {
-				Parts []struct {
-				Text string `json:"text"`
-			} `json:"parts"`
-		} `json:"content"`
-	} `json:"candidates"`
-	}
-
-	if err := json.Unmarshal(body, &googleResp); err == nil && len(googleResp.Candidates) > 0 && len(googleResp.Candidates[0].Content.Parts) > 0 {
-		translated := strings.TrimSpace(googleResp.Candidates[0].Content.Parts[0].Text)
-		// Видаляємо випадкові лапки, якщо ШІ все ж їх додав
-		translated = strings.Trim(translated, `"'«»`)
-		if translated != "" {
-			return translated
-		}
-	}
-	return ""
+	return c.translateWithRetry(ctx, prompt, text)
 }

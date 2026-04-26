@@ -14,6 +14,10 @@ export function GetAIModels() {
   return window['go']['main']['App']['GetAIModels']();
 }
 
+export function GetAppVersion() {
+  return window['go']['main']['App']['GetAppVersion']();
+}
+
 export function GetMovies() {
   return window['go']['main']['App']['GetMovies']();
 }

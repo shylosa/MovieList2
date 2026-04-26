@@ -106,6 +106,10 @@ func (a *App) GetStats() map[string]interface{} {
 	}
 }
 
+func (a *App) GetAppVersion() string {
+	return a.cfg.AppVersion
+}
+
 func (a *App) DeleteMovie(filename string) error {
 	m, err := a.db.GetMovieByFilename(a.ctx, filename)
 	if err == nil && m != nil && m.LocalPosterPath != "" {
@@ -731,9 +735,15 @@ func (a *App) translateDataIfNeeded(ctx context.Context, movie *storage.Movie) {
 
 	// 1. Перевіряємо НАЗВУ
 	if needsTranslation(movie.TitleUA) {
-		a.logFront(fmt.Sprintf("🔄 Перекладаю назву '%s'...", movie.TitleUA))
-		translatedTitle := aiClient.TranslateTitle(ctx, movie.TitleUA)
-		if translatedTitle != "" {
+		log.Printf("[ПЕРЕКЛАД] 🔄 Перекладаю назву '%s'...", movie.TitleUA)
+
+		// ВИПРАВЛЕННЯ: Передаємо поточну назву (movie.TitleUA) як фолбек.
+		// Якщо ШІ впаде, назва залишиться російською, а не стане англійською.
+		fallback := movie.TitleUA
+
+		translatedTitle := aiClient.TranslateTitle(ctx, movie.TitleUA, fallback)
+
+		if translatedTitle != "" && translatedTitle != movie.TitleUA {
 			movie.TitleUA = translatedTitle
 			madeChanges = true
 		}
@@ -741,40 +751,60 @@ func (a *App) translateDataIfNeeded(ctx context.Context, movie *storage.Movie) {
 
 	// 2. Перевіряємо ОПИС
 	if needsTranslation(movie.Plot) {
-		a.logFront(fmt.Sprintf("🔄 Перекладаю опис для '%s'...", movie.TitleUA))
+		log.Printf("[ПЕРЕКЛАД] 🔄 Перекладаю опис для '%s'...", movie.TitleUA)
 		translatedPlot := aiClient.TranslatePlot(ctx, movie.Plot)
-		if translatedPlot != "" {
+		if translatedPlot != "" && translatedPlot != movie.Plot {
 			movie.Plot = translatedPlot
 			madeChanges = true
 		}
 	}
 
 	if madeChanges {
-		a.logFront(fmt.Sprintf("✅ Переклад завершено: '%s'", movie.TitleUA))
+		log.Printf("[ПЕРЕКЛАД] ✅ Успішно адаптовано: '%s'", movie.TitleUA)
+	} else {
+		log.Printf("[ПЕРЕКЛАД] ⚠️ Залишено оригінал для: '%s'", movie.TitleUA)
 	}
 }
 
-// needsTranslation повертає true, якщо текст треба перекласти (немає кирилиці АБО є специфічні російські літери)
+// needsTranslation повертає true, якщо текст треба перекласти (англійська або підозріла кирилиця)
 func needsTranslation(s string) bool {
 	if s == "" {
 		return false
 	}
 
 	hasCyrillic := false
-	hasRussian := false
+	hasRussianLetter := false
+	hasUkrainianLetter := false
 
 	for _, r := range s {
+		r = unicode.ToLower(r)
 		if unicode.Is(unicode.Cyrillic, r) {
 			hasCyrillic = true
 		}
-		// Перевірка на унікальні літери російської абетки
-		if r == 'ы' || r == 'э' || r == 'ъ' || r == 'ё' ||
-		   r == 'Ы' || r == 'Э' || r == 'Ъ' || r == 'Ё' {
-			hasRussian = true
-			break // Якщо знайшли російську літеру, далі можна не шукати
+		// Яскраві маркери російської
+		if r == 'ы' || r == 'э' || r == 'ъ' || r == 'ё' {
+			hasRussianLetter = true
+		}
+		// Яскраві маркери української
+		if r == 'і' || r == 'ї' || r == 'є' || r == 'ґ' {
+			hasUkrainianLetter = true
 		}
 	}
 
-	// Перекладаємо, якщо немає кирилиці (англійська) АБО є російські літери
-	return !hasCyrillic || hasRussian
+	// 1. Немає кирилиці (англійська) -> перекладаємо
+	if !hasCyrillic {
+		return true
+	}
+	// 2. Є 100% російські літери -> перекладаємо
+	if hasRussianLetter {
+		return true
+	}
+	// 3. СІРА ЗОНА: є кирилиця, але немає специфічних українських літер.
+	// Такі слова як "Жизнь", "Дом", "Игра" можуть здатися українськими, хоча це російська.
+	// Відправляємо до ШІ. Якщо текст був українським — ШІ його просто не змінить.
+	if !hasUkrainianLetter {
+		return true
+	}
+
+	return false
 }

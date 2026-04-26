@@ -113,7 +113,7 @@ func (c *Client) searchAndFetch(
 	}
 
 	searchURL := fmt.Sprintf(
-		"%s/search/multi?api_key=%s&query=%s&language=uk-UA",
+		"%s/search/multi?api_key=%s&query=%s&language=en-US",
 		baseURL, c.apiKey, url.QueryEscape(query),
 	)
 

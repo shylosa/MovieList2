@@ -13,6 +13,11 @@ type tmdbNamedItem struct {
 	Name string `json:"name"`
 }
 
+// containsCyrillic перевіряє чи в тексті є кирилиця (українська або російська)
+func containsCyrillic(s string) bool {
+	return strings.ContainsAny(s, "абвгдеёжзийклмнопрстуфхцчшщъыьэюяАБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯіІїЇєЄґҐ")
+}
+
 // tmdbMovieDetails — відповідь TMDB для /movie/{id}
 type tmdbMovieDetails struct {
 	ID            int             `json:"id"`
@@ -41,102 +46,123 @@ type tmdbTVDetails struct {
 	} `json:"credits"`
 }
 
-// getMovieDetails отримує повні деталі фільму з TMDB
-// getMovieDetails отримує повні деталі фільму з TMDB (UA -> RU -> EN)
+// getMovieDetails отримує повні деталі фільму з TMDB (Каскад: UA -> RU -> EN)
 func (c *Client) getMovieDetails(ctx context.Context, id int, originalFilename string) (*MovieInfo, error) {
-	// 1. Початковий запит УКРАЇНСЬКОЮ (з акторами)
-	urlUA := fmt.Sprintf("%s/movie/%d?api_key=%s&language=uk-UA&append_to_response=credits", baseURL, id, c.apiKey)
-	var d tmdbMovieDetails
-	if err := c.doRequestWithRetry(ctx, urlUA, &d); err != nil {
-		return nil, err
-	}
+	langs := []string{"uk-UA", "ru-RU", "en-US"}
+	var finalInfo *MovieInfo
 
-	// 2. КАСКАД: якщо опис або актори порожні — пробуємо інші мови
-	fallbacks := []string{"ru-RU", "en-US"}
-	for _, lang := range fallbacks {
-		if strings.TrimSpace(d.Overview) == "" || len(d.Credits.Cast) == 0 {
-			urlNext := fmt.Sprintf("%s/movie/%d?api_key=%s&language=%s&append_to_response=credits", baseURL, id, c.apiKey, lang)
-			var dNext tmdbMovieDetails
-			if err := c.doRequestWithRetry(ctx, urlNext, &dNext); err == nil {
-				// Дозаповнюємо тільки те, чого не вистачає
-				if strings.TrimSpace(d.Overview) == "" && dNext.Overview != "" {
-					d.Overview = dNext.Overview
-				}
-				if len(d.Credits.Cast) == 0 && len(dNext.Credits.Cast) > 0 {
-					d.Credits.Cast = dNext.Credits.Cast
-				}
+	for _, lang := range langs {
+		url := fmt.Sprintf("%s/movie/%d?api_key=%s&language=%s&append_to_response=credits", baseURL, id, c.apiKey, lang)
+		var d tmdbMovieDetails
+
+		if err := c.doRequestWithRetry(ctx, url, &d); err != nil {
+			continue
+		}
+
+		if finalInfo == nil {
+			finalInfo = &MovieInfo{
+				TMDBID:  d.ID,
+				TitleUA: d.Title,
+				TitleEN: d.OriginalTitle,
+				Year:    extractYearFromDate(d.ReleaseDate),
+				Plot:    d.Overview,
+				Genres:  joinNames(d.Genres),
+				Cast:    joinNames(d.Credits.Cast),
+			}
+			if d.PosterPath != "" {
+				finalInfo.PosterURL = imageBaseURL + d.PosterPath
 			}
 		} else {
-			break // Все знайшли, виходимо
-		}
-	}
+			// Якщо поточний опис порожній АБО він англійський, а новий - кириличний (RU) -> перезаписуємо!
+			if finalInfo.Plot == "" || (!containsCyrillic(finalInfo.Plot) && containsCyrillic(d.Overview)) {
+				finalInfo.Plot = d.Overview
+			}
 
-	info := &MovieInfo{
-		TMDBID:    d.ID,
-		TitleUA:   d.Title,
-		TitleEN:   d.OriginalTitle,
-		Year:      extractYearFromDate(d.ReleaseDate),
-		Plot:      d.Overview,
-		Genres:    joinNames(d.Genres),
-		Cast:      joinCast(d.Credits.Cast),
-		MediaType: MediaTypeMovie,
-	}
-
-	if d.PosterPath != "" {
-		info.PosterURL = imageBaseURL + d.PosterPath
-		if originalFilename != "" {
-			lp, _ := c.DownloadPoster(ctx, info.PosterURL, fmt.Sprintf("%d_%s", d.ID, originalFilename))
-			info.LocalPosterPath = lp
-		}
-	}
-	return info, nil
-}
-
-// getTVDetails отримує деталі серіалу (UA -> RU -> EN)
-func (c *Client) getTVDetails(ctx context.Context, id int, originalFilename string) (*MovieInfo, error) {
-	urlUA := fmt.Sprintf("%s/tv/%d?api_key=%s&language=uk-UA&append_to_response=credits", baseURL, id, c.apiKey)
-	var d tmdbTVDetails
-	if err := c.doRequestWithRetry(ctx, urlUA, &d); err != nil {
-		return nil, err
-	}
-
-	fallbacks := []string{"ru-RU", "en-US"}
-	for _, lang := range fallbacks {
-		if strings.TrimSpace(d.Overview) == "" || len(d.Credits.Cast) == 0 {
-			urlNext := fmt.Sprintf("%s/tv/%d?api_key=%s&language=%s&append_to_response=credits", baseURL, id, c.apiKey, lang)
-			var dNext tmdbTVDetails
-			if err := c.doRequestWithRetry(ctx, urlNext, &dNext); err == nil {
-				if strings.TrimSpace(d.Overview) == "" && dNext.Overview != "" {
-					d.Overview = dNext.Overview
-				}
-				if len(d.Credits.Cast) == 0 && len(dNext.Credits.Cast) > 0 {
-					d.Credits.Cast = dNext.Credits.Cast
+			// Те саме робимо для назви
+			if finalInfo.TitleUA == "" || finalInfo.TitleUA == finalInfo.TitleEN || (!containsCyrillic(finalInfo.TitleUA) && containsCyrillic(d.Title)) {
+				if d.Title != "" {
+					finalInfo.TitleUA = d.Title
 				}
 			}
-		} else {
+
+			if finalInfo.Genres == "" && len(d.Genres) > 0 {
+				finalInfo.Genres = joinNames(d.Genres)
+			}
+		}
+
+		// Якщо зібрали кириличні дані - можемо переривати цикл
+		if containsCyrillic(finalInfo.Plot) && containsCyrillic(finalInfo.TitleUA) && finalInfo.Genres != "" {
 			break
 		}
 	}
 
-	info := &MovieInfo{
-		TMDBID:    d.ID,
-		TitleUA:   d.Name,
-		TitleEN:   d.OriginalName,
-		Year:      extractYearFromDate(d.FirstAirDate),
-		Plot:      d.Overview,
-		Genres:    joinNames(d.Genres),
-		Cast:      joinCast(d.Credits.Cast),
-		MediaType: MediaTypeTV,
+	if finalInfo == nil {
+		return nil, fmt.Errorf("не вдалося отримати деталі фільму %d", id)
 	}
 
-	if d.PosterPath != "" {
-		info.PosterURL = imageBaseURL + d.PosterPath
-		if originalFilename != "" {
-			lp, _ := c.DownloadPoster(ctx, info.PosterURL, fmt.Sprintf("%d_%s", d.ID, originalFilename))
-			info.LocalPosterPath = lp
+	if finalInfo.PosterURL != "" && originalFilename != "" {
+		lp, _ := c.DownloadPoster(ctx, finalInfo.PosterURL, fmt.Sprintf("%d_%s", finalInfo.TMDBID, originalFilename))
+		finalInfo.LocalPosterPath = lp
+	}
+
+	return finalInfo, nil
+}
+
+// getTVDetails отримує повні деталі серіалу з TMDB (Каскад: UA -> RU -> EN)
+func (c *Client) getTVDetails(ctx context.Context, id int, originalFilename string) (*MovieInfo, error) {
+	langs := []string{"uk-UA", "ru-RU", "en-US"}
+	var finalInfo *MovieInfo
+
+	for _, lang := range langs {
+		url := fmt.Sprintf("%s/tv/%d?api_key=%s&language=%s&append_to_response=credits", baseURL, id, c.apiKey, lang)
+		var d tmdbTVDetails
+
+		if err := c.doRequestWithRetry(ctx, url, &d); err != nil {
+			continue
+		}
+
+		if finalInfo == nil {
+			finalInfo = &MovieInfo{
+				TMDBID:  d.ID,
+				TitleUA: d.Name,
+				TitleEN: d.OriginalName,
+				Year:    extractYearFromDate(d.FirstAirDate),
+				Plot:    d.Overview,
+				Genres:  joinNames(d.Genres),
+				Cast:    joinNames(d.Credits.Cast),
+			}
+			if d.PosterPath != "" {
+				finalInfo.PosterURL = imageBaseURL + d.PosterPath
+			}
+		} else {
+			if finalInfo.Plot == "" || (!containsCyrillic(finalInfo.Plot) && containsCyrillic(d.Overview)) {
+				finalInfo.Plot = d.Overview
+			}
+			if finalInfo.TitleUA == "" || finalInfo.TitleUA == finalInfo.TitleEN || (!containsCyrillic(finalInfo.TitleUA) && containsCyrillic(d.Name)) {
+				if d.Name != "" {
+					finalInfo.TitleUA = d.Name
+				}
+			}
+			if finalInfo.Genres == "" && len(d.Genres) > 0 {
+				finalInfo.Genres = joinNames(d.Genres)
+			}
+		}
+
+		if containsCyrillic(finalInfo.Plot) && containsCyrillic(finalInfo.TitleUA) && finalInfo.Genres != "" {
+			break
 		}
 	}
-	return info, nil
+
+	if finalInfo == nil {
+		return nil, fmt.Errorf("не вдалося отримати деталі серіалу %d", id)
+	}
+
+	if finalInfo.PosterURL != "" && originalFilename != "" {
+		lp, _ := c.DownloadPoster(ctx, finalInfo.PosterURL, fmt.Sprintf("%d_%s", finalInfo.TMDBID, originalFilename))
+		finalInfo.LocalPosterPath = lp
+	}
+
+	return finalInfo, nil
 }
 
 // GetDetails — публічний диспетчер: викликає movie або tv залежно від типу.
