@@ -100,7 +100,8 @@ func (c *Client) FetchByCleanTitle(ctx context.Context, title, year string, medi
 		OriginalName: title,
 		CleanTitle:   title,
 		MediaType:    mediaType,
-		TitleLang:    TitleLangLatin, // від Gemini завжди EN
+		// 🟠 ВИПРАВЛЕННЯ: Динамічне визначення мови замість хардкоду TitleLangLatin
+		TitleLang:    detectLanguage(title),
 	}
 
 	if year != "" {
@@ -110,8 +111,9 @@ func (c *Client) FetchByCleanTitle(ctx context.Context, title, year string, medi
 	log.Printf("[TMDB] 🤖 Пошук після Gemini: title='%s' year=%d type=%s",
 		title, parsed.Year, mediaType)
 
-	// Після Gemini маємо чисту EN назву — тільки прямий пошук, без транслітерації
-	return c.searchDirectly(ctx, parsed, title)
+	// 🟠 ВИПРАВЛЕННЯ: Замість searchDirectly використовуємо runPipeline,
+	// щоб відпрацювала транслітерація, якщо Gemini повернув трансліт
+	return c.runPipeline(ctx, parsed, title)
 }
 
 // runPipeline — повний каскад для сирого файлу
@@ -170,17 +172,27 @@ func (c *Client) searchDirectly(ctx context.Context, parsed ParsedFile, original
 	return c.trySearch(ctx, parsed, originalFilename), nil
 }
 
-// trySearch — виконує 1-2 спроби пошуку (з роком і без)
 // trySearch — виконує пошук і жорстко контролює результат
 func (c *Client) trySearch(ctx context.Context, parsed ParsedFile, originalFilename string) *MovieInfo {
 	// SearchWithFallbacks сама робить спроби "з роком", "без року" та "інший тип"
 	info, err := c.SearchWithFallbacks(ctx, parsed, originalFilename)
 
 	if err == nil && info != nil {
+		// 🟠 ФОЛЛБЕК РОКУ: Якщо TMDB повернув порожній рік — підхоплюємо з парсера
+		if info.Year == "" && parsed.Year > 0 {
+			info.Year = fmt.Sprintf("%d", parsed.Year)
+		}
+
 		// 🛡️ БЕТОННА СТІНА ДЛЯ ВСІХ РЕЗУЛЬТАТІВ:
 		if parsed.Year > 0 {
 			foundYear := mustAtoi(info.Year)
 			if foundYear > 0 {
+				// 🔴 ВИНЯТОК ДЛЯ СЕРІАЛІВ: TMDB зберігає рік старту шоу (напр. 2013 для Рік і Морті),
+				// а в файлі — рік релізу сезону (напр. 2023). Пропускаємо якщо TMDB старший або рівний.
+				if parsed.MediaType == MediaTypeTV && foundYear <= parsed.Year {
+					return info
+				}
+
 				diff := foundYear - parsed.Year
 				// Допускаємо похибку ±1 рік
 				if diff < -1 || diff > 1 {
@@ -211,6 +223,7 @@ func latinToCyrillic(s string) string {
 	lower := strings.ToLower(s)
 	var result strings.Builder
 	runes := []rune(lower)
+	origRunes := []rune(s) // 👈 Виносимо за межі циклу — виключаємо heap-алокацію на кожній ітерації
 	i := 0
 
 	for i < len(runes) {
@@ -219,8 +232,7 @@ func latinToCyrillic(s string) string {
 			digraph := string(runes[i : i+2])
 			if cyr, ok := digraphMap[digraph]; ok {
 				// Зберігаємо регістр першого символу оригіналу
-				orig := []rune(s)
-				if i < len(orig) && isUpper(orig[i]) {
+				if i < len(origRunes) && isUpper(origRunes[i]) {
 					result.WriteString(strings.ToUpper(cyr))
 				} else {
 					result.WriteString(cyr)
@@ -233,8 +245,7 @@ func latinToCyrillic(s string) string {
 		// Одиночний символ
 		ch := string(runes[i])
 		if cyr, ok := monographMap[ch]; ok {
-			orig := []rune(s)
-			if i < len(orig) && isUpper(orig[i]) {
+			if i < len(origRunes) && isUpper(origRunes[i]) {
 				result.WriteString(strings.ToUpper(cyr))
 			} else {
 				result.WriteString(cyr)
@@ -247,6 +258,20 @@ func latinToCyrillic(s string) string {
 	}
 
 	converted := result.String()
+
+	// 🔴 ВИПРАВЛЕННЯ: Пост-корекція типових втрат (напр. malenkij -> маленкий -> маленький)
+	for k, v := range cyrillicCorrections {
+		// Заміна для нижнього регістру
+		converted = strings.ReplaceAll(converted, k, v)
+
+		// Заміна для Title Case (якщо слово з великої літери)
+		if len(k) > 0 {
+			titleK := strings.ToUpper(string([]rune(k)[0])) + string([]rune(k)[1:])
+			titleV := strings.ToUpper(string([]rune(v)[0])) + string([]rune(v)[1:])
+			converted = strings.ReplaceAll(converted, titleK, titleV)
+		}
+	}
+
 	// Якщо конвертація не дала кирилиці — повертаємо оригінал
 	hasCyr := false
 	for _, r := range converted {
@@ -306,7 +331,21 @@ var monographMap = map[string]string{
 	"w": "в",
 	"h": "х",
 	"c": "к",
+	"'": "ь",
 }
+
+// cyrillicCorrections — пост-корекція популярних "піратських" транслітів
+// (повернення втрачених м'яких знаків тощо)
+var cyrillicCorrections = map[string]string{
+	"маленк": "маленьк",
+	"болш":   "больш",
+	"силн":   "сильн",
+	"филм":   "фильм",
+	"ден ":   "день ",
+	"тма":    "тьма",
+	"цар ":   "царь ",
+}
+
 
 func isUpper(r rune) bool {
 	return r >= 'A' && r <= 'Z'
@@ -335,7 +374,12 @@ func (c *Client) doRequest(ctx context.Context, url string, target any) error {
 		return fmt.Errorf("TMDB HTTP %d: %s", resp.StatusCode, string(body))
 	}
 
-	return json.NewDecoder(resp.Body).Decode(target)
+	if err := json.NewDecoder(resp.Body).Decode(target); err != nil {
+		return err
+	}
+	// Дренуємо залишки тіла — Go перевикористає TCP-з'єднання (keep-alive)
+	_, _ = io.Copy(io.Discard, resp.Body)
+	return nil
 }
 
 func (c *Client) DownloadPoster(ctx context.Context, posterURL, filename string) (string, error) {

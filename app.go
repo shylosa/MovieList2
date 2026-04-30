@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode"
 
@@ -34,7 +35,9 @@ type App struct {
 	cfg           *config.Config
 	db            *storage.DB
 	tmdbClient    *tmdb.Client
+	aiClient      *ai.Client
 	aiModelsCache []string
+	modelsMutex   sync.RWMutex
 	scanCancel    context.CancelFunc
 	isScanning    bool
 	scanMutex     sync.Mutex
@@ -47,6 +50,7 @@ func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
 	a.cfg = config.Load()
 	a.tmdbClient = tmdb.NewClient(a.cfg)
+	a.aiClient = ai.NewClient(a.cfg)
 
 	var err error
 	a.db, err = storage.New(a.cfg.DBPath)
@@ -187,9 +191,14 @@ func (a *App) SyncToCloud() {
 }
 
 func (a *App) GetAIModels() ([]string, error) {
+	a.modelsMutex.RLock()
 	if len(a.aiModelsCache) > 0 {
-		return a.aiModelsCache, nil
+		cache := a.aiModelsCache
+		a.modelsMutex.RUnlock()
+		return cache, nil
 	}
+	a.modelsMutex.RUnlock()
+
 	url := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models?key=%s", a.cfg.GeminiAPIKey)
 
 	// --- ОПТИМІЗАЦІЯ: Захист від зависання мережі (таймаут 10 секунд) ---
@@ -211,20 +220,25 @@ func (a *App) GetAIModels() ([]string, error) {
 		return nil, err
 	}
 
-	var names []string
+	names := make([]string, 0, len(result.Models))
 	for _, m := range result.Models {
 		name := strings.TrimPrefix(m.Name, "models/")
 		if strings.Contains(name, "gemini") {
 			names = append(names, name)
 		}
 	}
+
+	a.modelsMutex.Lock()
 	a.aiModelsCache = names
+	a.modelsMutex.Unlock()
+
 	return names, nil
 }
 
 // ── Сканування ───────────────────────────────────────────────────────────────
 
 func (a *App) RunScan() {
+	log.Printf("[DEBUG] 🚀 Виклик StartScan отримано о: %v", time.Now().UnixNano()/1e6)
 	a.scanMutex.Lock()
 	if a.isScanning {
 		a.scanMutex.Unlock()
@@ -277,39 +291,95 @@ func (a *App) RunScan() {
 
 	a.logFront(fmt.Sprintf("📂 Файлів для обробки: %d", len(filesToProcess)))
 
-	// Спроба 1: прямий пошук через TMDB
+	// 🟢 ДОДАНО: Черга для відкладеного перекладу
+	var translationQueue []string
+
+	// Спроба 1: конкурентний прямий пошук через TMDB
 	var geminiQueue []string
-	for i, path := range filesToProcess {
+
+	type scanResult struct {
+		fname       string
+		info        *tmdb.MovieInfo
+		needsGemini bool
+	}
+
+	totalFiles := len(filesToProcess)
+	resultsChan := make(chan scanResult, totalFiles)
+	sem := make(chan struct{}, 10) // Ліміт у 10 одночасних запитів до TMDB (rate-limit safe)
+	var wg sync.WaitGroup
+	var processedCount int32
+
+	for _, path := range filesToProcess {
 		if ctx.Err() != nil {
 			a.logFront("🛑 Процес сканування перервано.")
 			break
 		}
 
-		fname := filepath.Base(path)
-		a.emitProgress(i+1, len(filesToProcess), "🔍 TMDB: "+fname)
+		wg.Add(1)
+		sem <- struct{}{} // Захоплюємо слот
 
-		// 🟢 БУЛО: a.tmdbClient.FetchFromFilename(a.ctx, fname)
-		// 🟢 СТАЛО: Передаємо наш локальний ctx
-		info, err := a.tmdbClient.FetchFromFilename(ctx, fname)
-		if err != nil {
-			a.logFront(fmt.Sprintf("⚠️ TMDB помилка для '%s': %v", fname, err))
-		}
+		go func(filePath string) {
+			defer wg.Done()
+			defer func() { <-sem }() // Звільняємо слот
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("panic in TMDB search goroutine: %v", r)
+				}
+			}()
 
-		if info != nil && info.TitleEN != "" {
-			movie := movieFromTMDB(fname, info)
-			a.translateDataIfNeeded(ctx, &movie)
+			if ctx.Err() != nil {
+				return
+			}
 
+			fname := filepath.Base(filePath)
+
+			// Атомарно збільшуємо лічильник для UI
+			current := atomic.AddInt32(&processedCount, 1)
+			a.emitProgress(int(current), totalFiles, "🔍 TMDB: "+fname)
+
+			info, err := a.tmdbClient.FetchFromFilename(ctx, fname)
+			if err != nil {
+				a.logFront(fmt.Sprintf("⚠️ TMDB помилка для '%s': %v", fname, err))
+			}
+
+			if info != nil && info.TitleEN != "" {
+				resultsChan <- scanResult{fname: fname, info: info, needsGemini: false}
+			} else {
+				resultsChan <- scanResult{fname: fname, info: nil, needsGemini: true}
+			}
+		}(path)
+	}
+
+	// Закриваємо канал у фоні, коли всі воркери відпрацюють
+	go func() {
+		wg.Wait()
+		close(resultsChan)
+	}()
+
+	// 🛡️ Єдиний Writer для SQLite: вигрібає канал і пише послідовно
+	for res := range resultsChan {
+		if !res.needsGemini {
+			movie := movieFromTMDB(res.fname, res.info)
 			_ = a.db.SaveMovie(ctx, movie)
-			a.logFront(fmt.Sprintf("✅ TMDB: '%s' → '%s'", fname, info.TitleUA))
+			a.logFront(fmt.Sprintf("✅ TMDB: '%s' → '%s'", res.fname, res.info.TitleUA))
+			translationQueue = append(translationQueue, res.fname)
 		} else {
-			geminiQueue = append(geminiQueue, fname)
+			geminiQueue = append(geminiQueue, res.fname)
 		}
 	}
 
 	// Спроба 2: Gemini для тих що TMDB не знайшов
 	if len(geminiQueue) > 0 {
 		a.logFront(fmt.Sprintf("🤖 Черга Gemini: %d файлів", len(geminiQueue)))
-		a.processGeminiQueue(ctx, geminiQueue)
+
+		// 🟢 СТАЛО: processGeminiQueue тепер повертає успішні файли
+		recognizedByGemini := a.processGeminiQueue(ctx, geminiQueue, a.aiClient)
+		translationQueue = append(translationQueue, recognizedByGemini...)
+	}
+
+	// 🟢 НОВЕ: ФАЗА 3 - Асинхронний відкладений переклад
+	if len(translationQueue) > 0 {
+		a.processTranslationQueue(ctx, translationQueue, a.aiClient)
 	}
 }
 
@@ -324,12 +394,13 @@ func (a *App) StopScan() {
 }
 
 // processGeminiQueue — Gemini розпізнає назви → TMDB верифікує → мерж → збереження
-// 🟢 СТАЛО: Додаємо ctx context.Context першим параметром
-func (a *App) processGeminiQueue(ctx context.Context, filenames []string) {
+// 🟢 СТАЛО: Додаємо ctx context.Context першим параметром і повертаємо []string
+func (a *App) processGeminiQueue(ctx context.Context, filenames []string, aiClient *ai.Client) []string {
+	var recognizedFiles []string // 👈 Збираємо успішні файли
+
 	const batchSize = 10
 	total := len(filenames)
 	totalBatches := (total + batchSize - 1) / batchSize
-	aiClient := ai.NewClient(a.cfg)
 	processed := 0
 
 	for i := 0; i < total; i += batchSize {
@@ -380,9 +451,9 @@ func (a *App) processGeminiQueue(ctx context.Context, filenames []string) {
 
 			a.emitProgress(processed, total, "🤖 Gemini: "+rec.ENTitle)
 			movie := a.mergeGeminiWithTMDB(fname, rec)
-			a.translateDataIfNeeded(ctx, &movie)
 
 			_ = a.db.SaveMovie(ctx, movie)
+			recognizedFiles = append(recognizedFiles, fname) // 👈 Додаємо
 		}
 	}
 
@@ -390,11 +461,18 @@ func (a *App) processGeminiQueue(ctx context.Context, filenames []string) {
 	if ctx.Err() == nil {
 		a.logFront("✅ Gemini черга оброблена!")
 	}
+	return recognizedFiles // 👈 Повертаємо
 }
 
 // mergeGeminiWithTMDB — шукає фільм в TMDB за EN назвою від Gemini,
 // мержить результати: TMDB має пріоритет, Gemini заповнює прогалини
 func (a *App) mergeGeminiWithTMDB(fname string, rec ai.RecognizedTitle) storage.Movie {
+	// 🛡️ КРОК 1: ПЕРЕВІРКА ВАЛІДНОСТІ ВІДПОВІДІ ШІ
+	if rec.ENTitle == "" {
+		a.logFront(fmt.Sprintf("⚠️ [GEMINI] Відсутня EN назва для '%s'. Пропускаємо пошук.", fname))
+		return storage.Movie{Filename: fname}
+	}
+
 	// 🛡️ КРОК 4: ЗАЛІЗНИЙ КОНТРОЛЬ РОКУ (Захист від галюцинацій)
 	// Парсимо ім'я файлу, щоб отримати еталонний рік
 	parsed := tmdb.ParseFilename(fname)
@@ -412,14 +490,10 @@ func (a *App) mergeGeminiWithTMDB(fname string, rec ai.RecognizedTitle) storage.
 		}
 	}
 
-	// Базова заготовка з даними Gemini (будуть перезаписані TMDB де можливо)
+	// Базова заготовка з даними Gemini: тільки ідентифікатори для пошуку.
 	movie := storage.Movie{
 		Filename: fname,
-		TitleUA:  rec.TitleUA,
 		TitleEN:  rec.ENTitle,
-		Plot:     rec.Plot,
-		Genres:   rec.Genres,
-		Cast:     rec.Cast,
 	}
 	if rec.Year != nil {
 		movie.Year = strconv.Itoa(*rec.Year)
@@ -443,35 +517,24 @@ func (a *App) mergeGeminiWithTMDB(fname string, rec ai.RecognizedTitle) storage.
 	}
 
 	if tmdbInfo == nil {
-		a.logFront(fmt.Sprintf("❌ TMDB не знайшов '%s' — збережено з даними Gemini", rec.ENTitle))
-		return movie
+		a.logFront(fmt.Sprintf("❌ TMDB не знайшов '%s' — запис залишається нерозпізнаним", rec.ENTitle))
+		// Повертаємо виключно Filename. Відсутність TitleEN та TitleUA гарантує,
+		// що файл потрапить у статистику "Нерозпізнані" і UI покаже його для ручного фіксу.
+		return storage.Movie{Filename: fname}
 	}
 
 	a.logFront(fmt.Sprintf("✅ TMDB знайшов: '%s' (%s)", tmdbInfo.TitleEN, tmdbInfo.Year))
 
-	// Мерж: TMDB перезаписує непорожні поля, Gemini — fallback для порожніх
+	// TMDB є джерелом повних даних після Gemini Resolve.
 	movie.TmdbID = tmdbInfo.TMDBID
 	movie.TitleEN = tmdbInfo.TitleEN
 	movie.Year = tmdbInfo.Year
 	movie.PosterURL = tmdbInfo.PosterURL
 	movie.LocalPosterPath = tmdbInfo.LocalPosterPath
-
-	// TitleUA: TMDB має пріоритет (офіційна локалізація), Gemini — fallback
-	if tmdbInfo.TitleUA != "" {
-		movie.TitleUA = tmdbInfo.TitleUA
-	}
-	// Plot: TMDB UA має пріоритет
-	if tmdbInfo.Plot != "" {
-		movie.Plot = tmdbInfo.Plot
-	}
-	// Genres: TMDB має пріоритет
-	if tmdbInfo.Genres != "" {
-		movie.Genres = tmdbInfo.Genres
-	}
-	// Cast: TMDB має пріоритет
-	if tmdbInfo.Cast != "" {
-		movie.Cast = tmdbInfo.Cast
-	}
+	movie.TitleUA = tmdbInfo.TitleUA
+	movie.Plot = tmdbInfo.Plot
+	movie.Genres = tmdbInfo.Genres
+	movie.Cast = tmdbInfo.Cast
 
 	return movie
 }
@@ -506,6 +569,8 @@ func (a *App) FixSelected(selected []map[string]interface{}) {
 	current := 0
 	a.logFront(fmt.Sprintf("🛠 Виправлення %d файлів...", total))
 
+	var translationQueue []string // 👈 НОВЕ
+
 	// 2. Перший цикл (ручне виправлення) 🟢
 	for _, fix := range withHint {
 		// Перевірка, чи не натиснули СТОП
@@ -519,8 +584,9 @@ func (a *App) FixSelected(selected []map[string]interface{}) {
 		hint := fix["hint"].(string)
 		a.emitProgress(current, total, "🔄 "+filename)
 
-		// Тут бажано теж передати ctx, якщо UpdateMovie це підтримує
-		_ = a.UpdateMovie(filename, hint)
+		// Передаємо локальний ctx
+		_ = a.UpdateMovie(ctx, filename, hint)
+		translationQueue = append(translationQueue, filename) // 👈 Додаємо
 	}
 
 	// 3. Другий етап (черга Gemini) 🟢
@@ -528,8 +594,14 @@ func (a *App) FixSelected(selected []map[string]interface{}) {
 		// Перевіряємо стоп перед початком черги
 		if ctx.Err() == nil {
 			// ПЕРЕДАЄМО ctx у функцію (як ми домовились раніше)
-			a.processGeminiQueue(ctx, geminiQueue)
+			recognized := a.processGeminiQueue(ctx, geminiQueue, a.aiClient)
+			translationQueue = append(translationQueue, recognized...) // 👈 Додаємо
 		}
+	}
+
+	// 🟢 НОВЕ: Запускаємо переклад для виправлених
+	if len(translationQueue) > 0 {
+		a.processTranslationQueue(ctx, translationQueue, a.aiClient)
 	}
 
 	a.finalizeScan(fmt.Sprintf("Виправлено %d файлів", total))
@@ -537,10 +609,10 @@ func (a *App) FixSelected(selected []map[string]interface{}) {
 
 // UpdateMovie — оновлення одного запису за hint від користувача.
 // hint може бути: TMDB URL (themoviedb.org/movie/123), числовий ID, або текстова назва/рік.
-func (a *App) UpdateMovie(filename, hint string) error {
+func (a *App) UpdateMovie(ctx context.Context, filename, hint string) error {
 	hint = strings.TrimSpace(hint)
 
-	existing, _ := a.db.GetMovieByFilename(a.ctx, filename)
+	existing, _ := a.db.GetMovieByFilename(ctx, filename)
 	if existing == nil {
 		existing = &storage.Movie{Filename: filename}
 	}
@@ -548,16 +620,15 @@ func (a *App) UpdateMovie(filename, hint string) error {
 	// Варіант 1: TMDB URL або числовий ID
 	if tmdbID, mediaType := extractTMDBID(hint); tmdbID > 0 {
 		a.logFront(fmt.Sprintf("🎯 [%s] TMDB ID: %d", filename, tmdbID))
-		info, err := a.tmdbClient.GetDetails(a.ctx, mediaType, tmdbID, filename)
+		info, err := a.tmdbClient.GetDetails(ctx, mediaType, tmdbID, filename)
 		if err != nil {
 			a.logFront(fmt.Sprintf("❌ Помилка TMDB ID %d: %v", tmdbID, err))
 			return err
 		}
 		if info != nil {
 			applyTMDBToMovie(existing, info)
-			a.translateDataIfNeeded(a.ctx, existing)
 
-			return a.db.SaveMovie(a.ctx, *existing)
+			return a.db.SaveMovie(ctx, *existing)
 		}
 	}
 
@@ -568,8 +639,7 @@ func (a *App) UpdateMovie(filename, hint string) error {
 	}
 
 	a.logFront(fmt.Sprintf("🧠 [%s] Аналіз через Gemini...", filename))
-	aiClient := ai.NewClient(a.cfg)
-	results, err := aiClient.RecognizeBulk(a.ctx, []string{query})
+	results, err := a.aiClient.RecognizeBulk(ctx, []string{query})
 	if err != nil || len(results) == 0 {
 		a.logFront(fmt.Sprintf("❌ Gemini не відповів для '%s'", filename))
 		return err
@@ -592,7 +662,7 @@ func (a *App) UpdateMovie(filename, hint string) error {
 		movie.Plot = existing.Plot
 	}
 
-	return a.db.SaveMovie(a.ctx, movie)
+	return a.db.SaveMovie(ctx, movie)
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -729,47 +799,24 @@ func (a *App) openInExplorer(path string) {
 	}
 }
 
-func (a *App) translateDataIfNeeded(ctx context.Context, movie *storage.Movie) {
-	aiClient := ai.NewClient(a.cfg)
-	madeChanges := false
-
-	// 1. Перевіряємо НАЗВУ
-	if needsTranslation(movie.TitleUA) {
-		log.Printf("[ПЕРЕКЛАД] 🔄 Перекладаю назву '%s'...", movie.TitleUA)
-
-		// ВИПРАВЛЕННЯ: Передаємо поточну назву (movie.TitleUA) як фолбек.
-		// Якщо ШІ впаде, назва залишиться російською, а не стане англійською.
-		fallback := movie.TitleUA
-
-		translatedTitle := aiClient.TranslateTitle(ctx, movie.TitleUA, fallback)
-
-		if translatedTitle != "" && translatedTitle != movie.TitleUA {
-			movie.TitleUA = translatedTitle
-			madeChanges = true
-		}
-	}
-
-	// 2. Перевіряємо ОПИС
-	if needsTranslation(movie.Plot) {
-		log.Printf("[ПЕРЕКЛАД] 🔄 Перекладаю опис для '%s'...", movie.TitleUA)
-		translatedPlot := aiClient.TranslatePlot(ctx, movie.Plot)
-		if translatedPlot != "" && translatedPlot != movie.Plot {
-			movie.Plot = translatedPlot
-			madeChanges = true
-		}
-	}
-
-	if madeChanges {
-		log.Printf("[ПЕРЕКЛАД] ✅ Успішно адаптовано: '%s'", movie.TitleUA)
-	} else {
-		log.Printf("[ПЕРЕКЛАД] ⚠️ Залишено оригінал для: '%s'", movie.TitleUA)
-	}
-}
-
 // needsTranslation повертає true, якщо текст треба перекласти (англійська або підозріла кирилиця)
 func needsTranslation(s string) bool {
 	if s == "" {
-		return false
+		return true // Порожнечу завжди наповнюємо
+	}
+
+	sLower := strings.ToLower(s)
+
+	// 1. ПЕРЕВІРКА НА СЛОВА-МАРКЕРИ (Російські слова, що пишуться спільними літерами)
+	// Це значно дешевше за бібліотеки і відловить твій "Враг у ворот" (слово "у")
+	russianMarkers := []string{"из", "как", "что", "он", "это", "бы", "вот", "для"}
+	words := strings.Fields(sLower)
+	for _, w := range words {
+		for _, marker := range russianMarkers {
+			if w == marker {
+				return true // 100% російський маркер
+			}
+		}
 	}
 
 	hasCyrillic := false
@@ -777,34 +824,137 @@ func needsTranslation(s string) bool {
 	hasUkrainianLetter := false
 
 	for _, r := range s {
-		r = unicode.ToLower(r)
 		if unicode.Is(unicode.Cyrillic, r) {
 			hasCyrillic = true
 		}
-		// Яскраві маркери російської
-		if r == 'ы' || r == 'э' || r == 'ъ' || r == 'ё' {
+		// Яскраві маркери російської (ы, э, ъ, ё)
+		if r == 'ы' || r == 'э' || r == 'ъ' || r == 'ё' || r == 'Ы' || r == 'Э' || r == 'Ъ' || r == 'Ё' {
 			hasRussianLetter = true
 		}
-		// Яскраві маркери української
-		if r == 'і' || r == 'ї' || r == 'є' || r == 'ґ' {
+		// Яскраві маркери української (і, ї, є, ґ)
+		if r == 'і' || r == 'ї' || r == 'є' || r == 'ґ' || r == 'І' || r == 'Ї' || r == 'Є' || r == 'Ґ' {
 			hasUkrainianLetter = true
 		}
 	}
 
-	// 1. Немає кирилиці (англійська) -> перекладаємо
+	// 2. Немає кирилиці (англійська) -> перекладаємо
 	if !hasCyrillic {
 		return true
 	}
-	// 2. Є 100% російські літери -> перекладаємо
+	// 3. Є специфічні російські літери -> перекладаємо[cite: 12]
 	if hasRussianLetter {
 		return true
 	}
-	// 3. СІРА ЗОНА: є кирилиця, але немає специфічних українських літер.
-	// Такі слова як "Жизнь", "Дом", "Игра" можуть здатися українськими, хоча це російська.
-	// Відправляємо до ШІ. Якщо текст був українським — ШІ його просто не змінить.
+	// 4. СІРА ЗОНА: якщо немає специфічних українських літер (і, ї, є, ґ),
+	// але є кирилиця — краще відправити в пачку на переклад.
+	// Gemini розбереться, а ти не отримаєш "Враг у ворот" у списку.
 	if !hasUkrainianLetter {
 		return true
 	}
 
 	return false
+}
+
+func (a *App) processTranslationQueue(ctx context.Context, filenames []string, aiClient *ai.Client) {
+	a.logFront(fmt.Sprintf("🌍 Аналіз локалізації для %d файлів...", len(filenames)))
+
+	var itemsToTranslate []ai.BulkTranslateItem
+	movieMap := make(map[string]storage.Movie)
+
+	// 1. Фільтруємо чергу: збираємо ТІЛЬКИ те, що дійсно треба перекладати
+	for i, fname := range filenames {
+		if ctx.Err() != nil {
+			a.logFront("🛑 Підготовку перервано.")
+			return
+		}
+
+		a.emitProgress(i+1, len(filenames), "🔄 Перевірка тексту: "+fname)
+
+		movie, err := a.db.GetMovieByFilename(ctx, fname)
+		if err != nil || movie == nil {
+			continue
+		}
+
+		needTitle := movie.TitleUA == "" || needsTranslation(movie.TitleUA)
+		needPlot := movie.Plot == "" || needsTranslation(movie.Plot)
+
+		if needTitle || needPlot {
+			fallbackTitle := movie.TitleUA
+			if fallbackTitle == "" {
+				fallbackTitle = movie.TitleEN
+				if fallbackTitle == "" {
+					fallbackTitle = filepath.Base(fname)
+				}
+			}
+
+			itemsToTranslate = append(itemsToTranslate, ai.BulkTranslateItem{
+				Filename: fname,
+				Title:    fallbackTitle,
+				Plot:     movie.Plot,
+			})
+			movieMap[fname] = *movie
+		}
+	}
+
+	if len(itemsToTranslate) == 0 {
+		a.logFront("✅ Усі файли вже мають коректну локалізацію.")
+		return
+	}
+
+	a.logFront(fmt.Sprintf("🚀 Відправка в Gemini: %d файлів...", len(itemsToTranslate)))
+
+	// 2. Батчинг та відправка до AI
+	const batchSize = 10
+	totalBatches := (len(itemsToTranslate) + batchSize - 1) / batchSize
+	updatedCount := 0
+
+	for i := 0; i < len(itemsToTranslate); i += batchSize {
+		if ctx.Err() != nil {
+			a.logFront("🛑 Переклад перервано.")
+			break
+		}
+
+		end := i + batchSize
+		if end > len(itemsToTranslate) {
+			end = len(itemsToTranslate)
+		}
+		batch := itemsToTranslate[i:end]
+		currentBatch := i/batchSize + 1
+
+		a.logFront(fmt.Sprintf("📦 Переклад: пачка %d/%d (%d файлів)...", currentBatch, totalBatches, len(batch)))
+
+		results, err := aiClient.TranslateBulk(ctx, batch)
+		if err != nil {
+			a.logFront(fmt.Sprintf("⚠️ Помилка перекладу пачки %d: %v", currentBatch, err))
+			continue
+		}
+
+		// 3. Зберігаємо результати у БД
+		for _, res := range results {
+			movie, ok := movieMap[res.Filename]
+			if !ok {
+				continue
+			}
+
+			changed := false
+			if res.Title != "" && res.Title != movie.TitleUA && !strings.Contains(strings.ToLower(res.Title), "thought") {
+				movie.TitleUA = res.Title
+				changed = true
+			}
+			if res.Plot != "" && res.Plot != movie.Plot {
+				movie.Plot = res.Plot
+				changed = true
+			}
+
+			if changed {
+				_ = a.db.SaveMovie(ctx, movie)
+				updatedCount++
+				a.logFront(fmt.Sprintf("✅ Адаптовано: '%s'", movie.TitleUA))
+			}
+		}
+	}
+
+	if ctx.Err() == nil {
+		a.logFront(fmt.Sprintf("✅ Фаза перекладу завершена! Оновлено записів: %d", updatedCount))
+	}
 }

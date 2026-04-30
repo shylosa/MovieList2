@@ -6,6 +6,7 @@ require (
 	github.com/joho/godotenv v1.5.1
 	github.com/razsteinmetz/go-ptn v1.0.0
 	github.com/wailsapp/wails/v2 v2.12.0
+	github.com/xrash/smetrics v0.0.0-20250705151800-55b8f293f342
 	google.golang.org/api v0.275.0
 	modernc.org/sqlite v1.48.2
 )

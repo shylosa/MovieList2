@@ -15,7 +15,7 @@ type tmdbNamedItem struct {
 
 // containsCyrillic перевіряє чи в тексті є кирилиця (українська або російська)
 func containsCyrillic(s string) bool {
-	return strings.ContainsAny(s, "абвгдеёжзийклмнопрстуфхцчшщъыьэюяАБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯіІїЇєЄґҐ")
+	return strings.ContainsAny(s, "Р°Р±РІРіРґРµС‘Р¶Р·РёР№РєР»РјРЅРѕРїСЂСЃС‚СѓС„С…С†С‡С€С‰СЉС‹СЊСЌСЋСЏРђР‘Р’Р“Р”Р•РЃР–Р—РР™РљР›РњРќРћРџР РЎРўРЈР¤РҐР¦Р§РЁР©РЄР«Р¬Р­Р®РЇС–Р†С—Р‡С”Р„Т‘Тђ")
 }
 
 // tmdbMovieDetails — відповідь TMDB для /movie/{id}
@@ -66,32 +66,32 @@ func (c *Client) getMovieDetails(ctx context.Context, id int, originalFilename s
 				TitleEN: d.OriginalTitle,
 				Year:    extractYearFromDate(d.ReleaseDate),
 				Plot:    d.Overview,
-				Genres:  joinNames(d.Genres),
-				Cast:    joinNames(d.Credits.Cast),
+				Genres:  joinGenres(d.Genres),
+				Cast:    joinCast(d.Credits.Cast),
 			}
 			if d.PosterPath != "" {
 				finalInfo.PosterURL = imageBaseURL + d.PosterPath
 			}
 		} else {
 			// Якщо поточний опис порожній АБО він англійський, а новий - кириличний (RU) -> перезаписуємо!
-			if finalInfo.Plot == "" || (!containsCyrillic(finalInfo.Plot) && containsCyrillic(d.Overview)) {
+			if finalInfo.Plot == "" || (!hasCyrillicChars(finalInfo.Plot) && hasCyrillicChars(d.Overview)) {
 				finalInfo.Plot = d.Overview
 			}
 
 			// Те саме робимо для назви
-			if finalInfo.TitleUA == "" || finalInfo.TitleUA == finalInfo.TitleEN || (!containsCyrillic(finalInfo.TitleUA) && containsCyrillic(d.Title)) {
+			if finalInfo.TitleUA == "" || finalInfo.TitleUA == finalInfo.TitleEN || (!hasCyrillicChars(finalInfo.TitleUA) && hasCyrillicChars(d.Title)) {
 				if d.Title != "" {
 					finalInfo.TitleUA = d.Title
 				}
 			}
 
 			if finalInfo.Genres == "" && len(d.Genres) > 0 {
-				finalInfo.Genres = joinNames(d.Genres)
+				finalInfo.Genres = joinGenres(d.Genres)
 			}
 		}
 
 		// Якщо зібрали кириличні дані - можемо переривати цикл
-		if containsCyrillic(finalInfo.Plot) && containsCyrillic(finalInfo.TitleUA) && finalInfo.Genres != "" {
+		if hasCyrillicChars(finalInfo.Plot) && hasCyrillicChars(finalInfo.TitleUA) && finalInfo.Genres != "" {
 			break
 		}
 	}
@@ -128,27 +128,27 @@ func (c *Client) getTVDetails(ctx context.Context, id int, originalFilename stri
 				TitleEN: d.OriginalName,
 				Year:    extractYearFromDate(d.FirstAirDate),
 				Plot:    d.Overview,
-				Genres:  joinNames(d.Genres),
-				Cast:    joinNames(d.Credits.Cast),
+				Genres:  joinGenres(d.Genres),
+				Cast:    joinCast(d.Credits.Cast),
 			}
 			if d.PosterPath != "" {
 				finalInfo.PosterURL = imageBaseURL + d.PosterPath
 			}
 		} else {
-			if finalInfo.Plot == "" || (!containsCyrillic(finalInfo.Plot) && containsCyrillic(d.Overview)) {
+			if finalInfo.Plot == "" || (!hasCyrillicChars(finalInfo.Plot) && hasCyrillicChars(d.Overview)) {
 				finalInfo.Plot = d.Overview
 			}
-			if finalInfo.TitleUA == "" || finalInfo.TitleUA == finalInfo.TitleEN || (!containsCyrillic(finalInfo.TitleUA) && containsCyrillic(d.Name)) {
+			if finalInfo.TitleUA == "" || finalInfo.TitleUA == finalInfo.TitleEN || (!hasCyrillicChars(finalInfo.TitleUA) && hasCyrillicChars(d.Name)) {
 				if d.Name != "" {
 					finalInfo.TitleUA = d.Name
 				}
 			}
 			if finalInfo.Genres == "" && len(d.Genres) > 0 {
-				finalInfo.Genres = joinNames(d.Genres)
+				finalInfo.Genres = joinGenres(d.Genres)
 			}
 		}
 
-		if containsCyrillic(finalInfo.Plot) && containsCyrillic(finalInfo.TitleUA) && finalInfo.Genres != "" {
+		if hasCyrillicChars(finalInfo.Plot) && hasCyrillicChars(finalInfo.TitleUA) && finalInfo.Genres != "" {
 			break
 		}
 	}
@@ -179,7 +179,68 @@ func (c *Client) GetDetails(ctx context.Context, mediaType MediaType, id int, or
 
 // --- helpers ---
 
-// extractYearFromDate витягує рік з рядка формату "2021-10-15"
+var genreTranslations = map[string]string{
+	"Action":              "Бойовик",
+	"Adventure":           "Пригоди",
+	"Animation":           "Анімація",
+	"Comedy":              "Комедія",
+	"Crime":               "Кримінал",
+	"Documentary":         "Документальний",
+	"Drama":               "Драма",
+	"Family":              "Сімейний",
+	"Fantasy":             "Фентезі",
+	"History":             "Історія",
+	"Horror":              "Жахи",
+	"Music":               "Музика",
+	"Mystery":             "Детектив",
+	"Romance":             "Мелодрама",
+	"Science Fiction":     "Фантастика",
+	"Sci-Fi & Fantasy":    "Фантастика",
+	"TV Movie":            "Телефільм",
+	"Thriller":            "Трилер",
+	"War":                 "Військовий",
+	"Western":             "Вестерн",
+	"Action & Adventure":  "Бойовик і пригоди",
+	"Kids":                "Дитячий",
+	"News":                "Новини",
+	"Reality":             "Реаліті-шоу",
+	"Soap":                "Мильна опера",
+	"Talk":                "Ток-шоу",
+	"War & Politics":      "Війна і політика",
+	"боевик":              "Бойовик",
+	"приключения":         "Пригоди",
+	"мультфильм":          "Анімація",
+	"комедия":             "Комедія",
+	"криминал":            "Кримінал",
+	"документальный":      "Документальний",
+	"драма":               "Драма",
+	"семейный":            "Сімейний",
+	"фэнтези":             "Фентезі",
+	"история":             "Історія",
+	"ужасы":               "Жахи",
+	"музыка":              "Музика",
+	"детектив":            "Детектив",
+	"мелодрама":           "Мелодрама",
+	"фантастика":          "Фантастика",
+	"телевизионный фильм": "Телефільм",
+	"триллер":             "Трилер",
+	"военный":             "Військовий",
+	"вестерн":             "Вестерн",
+	"ток-шоу":             "Ток-шоу",
+	"новости":             "Новини",
+}
+
+func translateGenre(name string) string {
+	lowerName := strings.ToLower(name)
+	if val, ok := genreTranslations[name]; ok {
+		return val
+	}
+	if val, ok := genreTranslations[lowerName]; ok {
+		return val
+	}
+	return name
+}
+
 func extractYearFromDate(date string) string {
 	if len(date) >= 4 {
 		return date[:4]
@@ -187,17 +248,16 @@ func extractYearFromDate(date string) string {
 	return ""
 }
 
-func joinNames(items []tmdbNamedItem) string {
+func joinGenres(items []tmdbNamedItem) string {
 	names := make([]string, 0, len(items))
 	for _, item := range items {
 		if item.Name != "" {
-			names = append(names, item.Name)
+			names = append(names, translateGenre(item.Name))
 		}
 	}
 	return strings.Join(names, ", ")
 }
 
-// joinCast збирає перших maxCastMembers акторів через кому
 func joinCast(cast []tmdbNamedItem) string {
 	names := make([]string, 0, maxCastMembers)
 	for i, member := range cast {

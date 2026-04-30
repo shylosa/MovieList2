@@ -76,9 +76,12 @@ document.querySelector('#app').innerHTML = `
             <div class="console-outer">
                 <div class="console-header">
                     <span>Консоль виконання</span>
-                    <span id="console-status">Очікування...</span>
+                    <div style="display: flex; gap: 10px; align-items: center;">
+                        <span id="scan-timer" style="font-family: monospace; font-size: 14px; color: #4ade80;">00:00</span>
+                        <span id="console-status">Очікування...</span>
+                    </div>
                 </div>
-                <div class="console-body" id="console-body"><div>Вітаю у MovieList 2.0! Система готова до роботи.</div></div>
+                <div class="console-body" id="console-body"><div id="welcome-message">Вітаю у MovieList! Система готова до роботи.</div></div>
             </div>
         </div>
 
@@ -133,9 +136,14 @@ btnStop.addEventListener('click', async (e) => {
 
 // 🟢 Клік по кнопці Сканувати
 btnScan.addEventListener('click', async (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+
     if (isScanning) return; // КРИТИЧНО: Захист від подвійного запуску
     isScanning = true;
+    btnScan.classList.add('disabled');
 
+    switchTab('overview', 'Оновлення бази');
     setStopButtonState('active'); // Стає червоною
 
     document.getElementById('progress-bar').style.width = '0%';
@@ -147,6 +155,7 @@ btnScan.addEventListener('click', async (e) => {
     } finally {
         // Цей блок тепер виконається ТІЛЬКИ коли перший процес реально завершиться
         isScanning = false;
+        btnScan.classList.remove('disabled');
         setStopButtonState('disabled'); // Стає сірою
         setTimeout(() => { document.getElementById('progress-bar').style.width = '0%'; }, 2000);
     }
@@ -220,11 +229,6 @@ document.getElementById('btn-models').onclick = async () => {
     }
 };
 
-document.getElementById('btn-scan').onclick = () => {
-    switchTab('overview', 'Оновлення бази');
-    RunScan();
-};
-
 // --- ФУНКЦІЇ ДЛЯ КОНСОЛІ ТА ПРОГРЕСУ ---
 const consoleBody = document.getElementById('console-body');
 // 🟢 ЗМІНА 1: Тепер ми керуємо новим загальним контейнером (де є і смужка, і кнопка)
@@ -241,6 +245,9 @@ function logToConsole(text, className = "") {
 }
 
 // --- ПРИЙОМ ПОДІЙ ВІД GO (МАГІЯ WAILS) ---
+let scanTimerInterval;
+let scanStartTime;
+
 EventsOn('scan-started', () => {
     consoleBody.innerHTML = ""; // Чистимо консоль
     logToConsole("🚀 Запуск процесу...");
@@ -249,6 +256,15 @@ EventsOn('scan-started', () => {
     pbArea.style.display = "flex";
     pb.style.width = "0%";
     cStatus.innerText = "У процесі...";
+    document.getElementById("scan-timer").innerText = "00:00";
+    scanStartTime = Date.now();
+
+    scanTimerInterval = setInterval(() => {
+        const diffInSeconds = Math.floor((Date.now() - scanStartTime) / 1000);
+        const m = String(Math.floor(diffInSeconds / 60)).padStart(2, '0');
+        const s = String(diffInSeconds % 60).padStart(2, '0');
+        document.getElementById("scan-timer").innerText = `${m}:${s}`;
+    }, 1000);
 
     // 🟢 ЗМІНА 3: Робимо кнопку СТОП активною (червоною) на старті
     const btnStop = document.getElementById('btn-stop-scan');
@@ -270,6 +286,7 @@ EventsOn('log-message', (msg) => {
 });
 
 EventsOn('scan-finished', (msg) => {
+    clearInterval(scanTimerInterval);
     logToConsole(`\n✅ ${msg}`, "log-success");
     cStatus.innerText = "Готово";
 
@@ -516,8 +533,12 @@ async function loadAppVersion() {
     try {
         const version = await GetAppVersion();
         const versionEl = document.getElementById('app-version');
+        const welcomeEl = document.getElementById('welcome-message');
         if (versionEl && version) {
             versionEl.innerText = version;
+        }
+        if (welcomeEl && version) {
+            welcomeEl.innerText = `Вітаю у MovieList ${version}! Система готова до роботи.`;
         }
     } catch (e) {
         console.error("Не вдалося завантажити версію додатку:", e);

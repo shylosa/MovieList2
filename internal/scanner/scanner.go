@@ -68,15 +68,15 @@ func (s *Scanner) getFirstVideoInDir(dirPath string) string {
 	var largestVideo string
 	var maxSize int64
 
-	filepath.Walk(dirPath, func(path string, info os.FileInfo, err error) error {
+	filepath.WalkDir(dirPath, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return nil
 		}
-		if !info.IsDir() {
+		if !d.IsDir() {
 			ext := strings.ToLower(filepath.Ext(path))
 			if videoExts[ext] {
-				// Беремо файл з найбільшим розміром
-				if info.Size() > maxSize {
+				info, err := d.Info()
+				if err == nil && info.Size() > maxSize {
 					maxSize = info.Size()
 					largestVideo = path
 				}

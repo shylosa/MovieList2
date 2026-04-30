@@ -13,6 +13,11 @@ import (
 // S07 (без епізоду), Season 3, сезон
 var reSeason = regexp.MustCompile(`(?i)\bS(\d{2})\b(?:E\d{2})?|\bSeason\s*\d+\b|\bсезон\b`)
 
+// reFrontEpisode — детектор SххEхх на ПОЧАТКУ рядка (до назви фільму), що ламає go-ptn.
+// Приклад: "S07E05.Rick.and.Morty..." — go-ptn бере "S07E05" за тайтл.
+// Регулярка нормалізує це, переносячи маркер в кінець.
+var reFrontEpisode = regexp.MustCompile(`(?i)^(s\d{2}e\d{2}[\.\.\-\s_]+)(.*)`)
+
 // ParseFilename — парсить ім'я файлу через go-ptn + власні доповнення.
 //
 // go-ptn обробляє: рік, кодеки, якість, рілізгрупи, S01E01 формат.
@@ -25,25 +30,38 @@ func ParseFilename(raw string) ParsedFile {
 	result := ParsedFile{OriginalName: name}
 
 	// 🛡️ АГРЕСИВНИЙ ПОШУК РОКУ (Рятує від помилок go-ptn)
-	// Шукає будь-які числа від 1900 до 2099, відділені межами слова
+	// Нормалізуємо одруківки: латинська та кирилична "О" замість нуля (напр. 2O15 -> 2015)
+	searchName := strings.ReplaceAll(name, "O", "0")
+	searchName = strings.ReplaceAll(searchName, "О", "0") // кирилична
+	searchName = strings.ReplaceAll(searchName, "o", "0")
+	searchName = strings.ReplaceAll(searchName, "о", "0")
+
 	reYear := regexp.MustCompile(`\b(19\d{2}|20\d{2})\b`)
 	manualYear := 0
 	maxAllowedYear := time.Now().Year() + 1 // +1 для ранніх WEB-релізів/анонсів
 
-	matches := reYear.FindAllString(name, -1)
+	matches := reYear.FindAllString(searchName, -1)
 	for _, m := range matches {
 		y := mustAtoi(m)
-		// Обираємо найбільший рік, який не перевищує ліміт
-		if y > manualYear && y <= maxAllowedYear {
-			manualYear = y
+		// Беремо ПЕРШИЙ знайдений валідний рік. Це вирішує проблему, коли 
+		// після року йде бітрейт (напр. "2017 BDRip 2000")
+		if y > 1900 && y <= maxAllowedYear {
+			if manualYear == 0 {
+				manualYear = y
+			}
 		}
 	}
 
+	// 🟡 НОРМАЛІЗАЦІЯ ПРЕФІКСУ: go-ptn ламається, якщо S07E05 стоїть ДО назви.
+	// Зсуваємо маркер епізоду в кінець рядка (звичний формат для ptn).
+	if m := reFrontEpisode.FindStringSubmatch(name); len(m) == 3 {
+		name = m[2] + " " + strings.TrimRight(m[1], ".-_ ")
+	}
+
 	// Детектуємо S07 без епізоду ДО парсингу go-ptn
-	// (go-ptn розпізнає S01E01 але ігнорує S01 без E)
 	isSeasonOnly := reSeason.MatchString(name)
 
-	info, err := ptn.Parse(raw)
+	info, err := ptn.Parse(name + ext)
 	if err != nil || info == nil {
 		result.CleanTitle = cleanFallback(name)
 		result.MediaType = MediaTypeMovie
@@ -62,6 +80,11 @@ func ParseFilename(raw string) ParsedFile {
 	// 🛡️ Встановлюємо рік: пріоритет за go-ptn, якщо він не знайшов — беремо наш ручний
 	if info.Year != 0 {
 		result.Year = info.Year
+		// ЗАХИСТ: go-ptn часто плутає цифру 2000 в кінці (бітрейт/розмір) з роком.
+		// Якщо ми знайшли інший валідний рік раніше — довіряємо нашому.
+		if info.Year == 2000 && manualYear > 0 && manualYear != 2000 {
+			result.Year = manualYear
+		}
 	} else {
 		result.Year = manualYear
 	}

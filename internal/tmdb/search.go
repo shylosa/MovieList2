@@ -5,16 +5,19 @@ import (
 	"fmt"
 	"log"
 	"net/url"
+	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/xrash/smetrics"
 )
 
 // tmdbSearchResult — один результат з /search/multi
 type tmdbSearchResult struct {
 	ID               int     `json:"id"`
 	MediaType        string  `json:"media_type"`
-	Title            string  `json:"title"`          // для movie
-	Name             string  `json:"name"`           // для tv
+	Title            string  `json:"title"` // для movie
+	Name             string  `json:"name"`  // для tv
 	OriginalTitle    string  `json:"original_title"`
 	OriginalName     string  `json:"original_name"`
 	ReleaseDate      string  `json:"release_date"`   // для movie
@@ -43,7 +46,7 @@ func (c *Client) SearchWithFallbacks(
 	parsed ParsedFile,
 	originalFilename string,
 ) (*MovieInfo, error) {
-	attempts := buildAttempts(parsed)
+	attempts := buildAttempts(parsed, originalFilename)
 
 	for _, a := range attempts {
 		log.Printf("[TMDB] 🔍 Спроба '%s': query='%s' year=%d type=%s",
@@ -58,7 +61,6 @@ func (c *Client) SearchWithFallbacks(
 			log.Printf("[TMDB] ✅ '%s': знайдено '%s' (%s)", a.label, info.TitleEN, info.Year)
 			return info, nil
 		}
-		log.Printf("[TMDB] ❌ '%s': результат не пройшов поріг", a.label)
 	}
 
 	return nil, nil
@@ -72,29 +74,39 @@ type searchAttempt struct {
 	label     string
 }
 
-// buildAttempts формує впорядкований список спроб пошуку
-func buildAttempts(parsed ParsedFile) []searchAttempt {
-	title := parsed.CleanTitle
+// buildAttempts формує розумний список спроб пошуку, використовуючи кандидатів
+func buildAttempts(parsed ParsedFile, originalFilename string) []searchAttempt {
 	year := parsed.Year
 	mt := parsed.MediaType
 
+	if mt == MediaTypeMovie && isCyrillicSeries(originalFilename) {
+		mt = MediaTypeTV
+		log.Printf("[TMDB] 📺 Виявлено маркер серіалу в назві. Змінено тип на TV.")
+	}
+
+	candidates := generateTitleCandidates(parsed.CleanTitle, originalFilename)
 	var attempts []searchAttempt
 
-	// Спроба 1: точний запит з роком (якщо рік є)
-	if year > 0 {
-		attempts = append(attempts, searchAttempt{title, year, mt, "точний+рік"})
+	for i, title := range candidates {
+		labelPrefix := "Кандидат"
+		if i == 0 {
+			labelPrefix = "Базовий"
+		}
+
+		if year > 0 {
+			attempts = append(attempts, searchAttempt{title, year, mt, labelPrefix + "+рік"})
+		}
+		attempts = append(attempts, searchAttempt{title, 0, mt, labelPrefix + " без року"})
 	}
 
-	// Спроба 2: запит без року
-	attempts = append(attempts, searchAttempt{title, 0, mt, "без року"})
-
-	// Спроба 3: протилежний media_type без року
-	// (серіал без маркера S01 потрапить як movie — дамо шанс знайти як tv і навпаки)
-	opposite := MediaTypeMovie
-	if mt == MediaTypeMovie {
-		opposite = MediaTypeTV
+	if len(candidates) > 0 {
+		bestTitle := candidates[0]
+		opposite := MediaTypeMovie
+		if mt == MediaTypeMovie {
+			opposite = MediaTypeTV
+		}
+		attempts = append(attempts, searchAttempt{bestTitle, 0, opposite, "Протилежний тип"})
 	}
-	attempts = append(attempts, searchAttempt{title, 0, opposite, "протилежний тип"})
 
 	return attempts
 }
@@ -112,9 +124,15 @@ func (c *Client) searchAndFetch(
 		return nil, nil
 	}
 
+	// 🔴 ВИПРАВЛЕННЯ: Динамічний вибір мови індексу для TMDB
+	langParam := "en-US"
+	if hasCyrillicChars(query) {
+		langParam = "ru-RU" // Відкриваємо доступ до кириличних індексів
+	}
+
 	searchURL := fmt.Sprintf(
-		"%s/search/multi?api_key=%s&query=%s&language=en-US",
-		baseURL, c.apiKey, url.QueryEscape(query),
+		"%s/search/multi?api_key=%s&query=%s&language=%s",
+		baseURL, c.apiKey, url.QueryEscape(query), langParam,
 	)
 
 	var resp tmdbSearchResponse
@@ -177,10 +195,17 @@ func rankResults(
 		return nil
 	}
 
-	// Динамічний поріг: якщо шукали з роком — вимагаємо більшої впевненості
-	threshold := ScoreThreshold
+	// Динамічний поріг: пом'якшуємо вимоги, особливо для транслітерації
+	threshold := ScoreThreshold - 30 // Даємо трохи більше свободи базовому пошуку
+
 	if targetYear > 0 {
-		threshold = ScoreThreshold + 50
+		if best.year == targetYear {
+			// Якщо рік ідеально збігається, ми можемо довіряти fuzzy-збігу назви
+			threshold = ScoreThreshold - 50
+		} else {
+			// Рік не збігається, але був у запиті — будьмо обережніші
+			threshold = ScoreThreshold + 20
+		}
 	}
 
 	if best.score < threshold {
@@ -215,6 +240,12 @@ func scoreResult(
 	resTitle := normalizeForCompare(coalesce(res.Title, res.Name))
 	resOrig := normalizeForCompare(coalesce(res.OriginalTitle, res.OriginalName))
 
+	// 💎 ДІАМАНТОВИЙ БОНУС (Оригінальна назва + Точний рік)
+	if targetYear > 0 && resYear == targetYear && resOrig == normQuery {
+		score += 300 // Величезний бонус, гарантує 1 місце
+		log.Printf("[TMDB] 💎 ДІАМАНТОВИЙ ЗБІГ: '%s' (%d)", resOrig, resYear)
+	}
+
 	// --- Збіг назви: точний → contains → fuzzy ---
 	titleScore := matchScore(normQuery, resTitle, resOrig)
 	score += titleScore
@@ -229,6 +260,14 @@ func scoreResult(
 		default:
 			score += ScoreYearDiffTooFar // від'ємне
 		}
+	} else if targetYear == 0 && resYear > 0 {
+		// ⚖️ БАЛАНСУВАННЯ: Якщо рік файлу невідомий, віддаємо перевагу сучасним релізам.
+		// Це вирішує проблему "Жінок", де фільм 1965 року перебивав фільм 2008-го.
+		if resYear >= 2000 {
+			score += 15 // Бонус за сучасність (ймовірність що завантажили ремейк - вища)
+		} else if resYear < 1980 {
+			score -= 30 // Штраф для дуже старих (щоб сучасні ремейки вигравали)
+		}
 	}
 
 	// --- Відповідність типу медіа ---
@@ -238,16 +277,23 @@ func scoreResult(
 	}
 
 	// --- Мова оригіналу ---
+	queryIsCyrillic := hasCyrillicChars(normQuery)
 	switch res.OriginalLanguage {
 	case "uk":
 		score += ScoreLangUA
 	case "en":
 		score += ScoreLangEN
 	case "ru":
-		if resYear > 0 && resYear < 2010 {
-			score += ScoreLangRUOld    // -300
+		if queryIsCyrillic {
+			// Якщо шукали кирилицею (напр. "Брат 2"), це ймовірно місцевий фільм, не штрафуємо сильно, або навіть даємо невеликий бонус
+			score += 10
 		} else {
-			score += ScoreLangRURecent // -50
+			// Якщо шукали латиницею (напр. "Matrix"), а результат російський — жорстко штрафуємо
+			if resYear > 0 && resYear < 2010 {
+				score += ScoreLangRUOld // -300
+			} else {
+				score += ScoreLangRURecent // -50
+			}
 		}
 	}
 
@@ -269,6 +315,11 @@ func matchScore(normQuery, resTitle, resOrig string) int {
 		return ScoreExactMatch
 	}
 
+	// ШТРАФ ЗА КОРОТКІ НАЗВИ: якщо запит < 4 символів, працює тільки Exact Match
+	if len([]rune(normQuery)) < 4 {
+		return 0
+	}
+
 	// Contains (запит є підрядком назви або навпаки)
 	if strings.Contains(resTitle, normQuery) || strings.Contains(resOrig, normQuery) {
 		return ScoreContainsMatch
@@ -277,10 +328,9 @@ func matchScore(normQuery, resTitle, resOrig string) int {
 		return ScoreContainsMatch / 2
 	}
 
-	// Fuzzy: толерантність до 1-2 символів різниці
-	// Перевіряємо обидві назви, беремо кращий результат
-	fuzzyTitle := fuzzyMatchScore(normQuery, resTitle)
-	fuzzyOrig := fuzzyMatchScore(normQuery, resOrig)
+	// Fuzzy: Jaro-Winkler
+	fuzzyTitle := fuzzyMatchScoreJW(normQuery, resTitle)
+	fuzzyOrig := fuzzyMatchScoreJW(normQuery, resOrig)
 	fuzzy := fuzzyTitle
 	if fuzzyOrig > fuzzy {
 		fuzzy = fuzzyOrig
@@ -288,77 +338,96 @@ func matchScore(normQuery, resTitle, resOrig string) int {
 	return fuzzy
 }
 
-// fuzzyMatchScore повертає бал схожості через відстань Левенштейна.
-// Повертає 0 якщо рядки занадто різні.
-func fuzzyMatchScore(a, b string) int {
+// fuzzyMatchScoreJW використовує Jaro-Winkler для порівняння рядків.
+func fuzzyMatchScoreJW(a, b string) int {
 	if a == "" || b == "" {
 		return 0
 	}
-	ra, rb := []rune(a), []rune(b)
-	la, lb := len(ra), len(rb)
 
-	// Якщо довжини сильно різняться — навіть не рахуємо
-	diff := la - lb
-	if diff < 0 {
-		diff = -diff
-	}
-	maxLen := la
-	if lb > maxLen {
-		maxLen = lb
-	}
-	if diff > 3 || maxLen < 4 {
-		return 0
+	score := smetrics.JaroWinkler(a, b, 0.7, 4)
+
+	if score > 0.95 {
+		return 150
+	} else if score > 0.90 {
+		return 120
+	} else if score > 0.85 {
+		return 80
 	}
 
-	d := levenshtein(ra, rb)
-	switch {
-	case d == 1:
-		return 130 // "Ella" vs "Elle" — одна буква
-	case d == 2 && maxLen > 8:
-		return 70 // дві букви у довгому рядку
-	default:
-		return 0
-	}
-}
-
-// levenshtein — класична відстань редагування (Wagner–Fischer)
-func levenshtein(a, b []rune) int {
-	la, lb := len(a), len(b)
-	if la == 0 {
-		return lb
-	}
-	if lb == 0 {
-		return la
-	}
-
-	// Оптимізація: тільки два рядки замість матриці la×lb
-	prev := make([]int, lb+1)
-	curr := make([]int, lb+1)
-	for j := 0; j <= lb; j++ {
-		prev[j] = j
-	}
-
-	for i := 1; i <= la; i++ {
-		curr[0] = i
-		for j := 1; j <= lb; j++ {
-			if a[i-1] == b[j-1] {
-				curr[j] = prev[j-1]
-			} else {
-				curr[j] = 1 + minOf3(prev[j], curr[j-1], prev[j-1])
-			}
-		}
-		prev, curr = curr, prev
-	}
-	return prev[lb]
+	return 0
 }
 
 // --- helpers ---
+
+// --- РОЗУМНИЙ ПАРСИНГ ТА ГЕНЕРАЦІЯ КАНДИДАТІВ ---
+
+var (
+	reQuality  = regexp.MustCompile(`(?i)\b(1080p|720p|2160p|4k|8k|HDRip|BDRip|WEB-DLRip|WEB-DL|WEBRip|HDTV|HDTVRip|CAMRip|TS|DVDScr|DVDRip|BluRay|HDRezka|Line|\d{3,4}Mb)\b`)
+	reCodec    = regexp.MustCompile(`(?i)\b(x264|x265|h264|h265|HEVC|AV1|AVC)\b`)
+	reAudio    = regexp.MustCompile(`(?i)\b(AAC|DTS|AC3|DDP5\.1|Atmos|Dub|UkrDub|RusDub|MVO|DUB|L1|L2)\b`)
+	reRelease  = regexp.MustCompile(`(?i)(-?seleZen|-?ivanes|-?RG|-?NNMClub|\bUkr\b|\bRus\b|\bEng\b)`)
+	reExt      = regexp.MustCompile(`(?i)\.(mkv|mp4|avi|mov)$`)
+	reYear     = regexp.MustCompile(`\b(19\d{2}|20\d{2})\b`)
+	reBrackets = regexp.MustCompile(`\[.*?\]|\(.*?\)`)
+	rePunct    = regexp.MustCompile(`[\._]`)
+	reSpaces   = regexp.MustCompile(`\s{2,}`)
+	reSeries   = regexp.MustCompile(`(?i)(\d{1,2}\s*сезон|сезон\s*\d{1,2}|серия\s*\d{1,3}|серии\s*\d{1,3}-\d{1,3}|Часть\s*\d)`)
+)
+
+// cleanString замінює крапки/підкреслення на пробіли і прибирає зайві пробіли
+func cleanString(s string) string {
+	s = rePunct.ReplaceAllString(s, " ")
+	s = reSpaces.ReplaceAllString(s, " ")
+	return strings.TrimSpace(s)
+}
+
+// isCyrillicSeries перевіряє наявність специфічних маркерів серіалу
+func isCyrillicSeries(filename string) bool {
+	return reSeries.MatchString(filename)
+}
+
+// generateTitleCandidates формує кілька варіантів чистої назви для пошуку
+func generateTitleCandidates(ptnTitle, filename string) []string {
+	var candidates []string
+	seen := make(map[string]bool)
+
+	add := func(c string) {
+		if c != "" && !seen[c] && len([]rune(c)) > 2 {
+			candidates = append(candidates, c)
+			seen[c] = true
+		}
+	}
+
+	add(cleanString(ptnTitle))
+
+	s := reExt.ReplaceAllString(filename, "")
+	s = reQuality.ReplaceAllString(s, "")
+	s = reCodec.ReplaceAllString(s, "")
+	s = reAudio.ReplaceAllString(s, "")
+	s = reRelease.ReplaceAllString(s, "")
+
+	noBrackets := reBrackets.ReplaceAllString(s, "")
+	noBrackets = reYear.ReplaceAllString(noBrackets, "")
+	noBrackets = cleanString(noBrackets)
+	add(noBrackets)
+
+	if idx := strings.Index(noBrackets, " - "); idx > 0 {
+		add(strings.TrimSpace(noBrackets[:idx]))
+	}
+
+	soft := reYear.ReplaceAllString(s, "")
+	soft = cleanString(soft)
+	add(soft)
+
+	return candidates
+}
 
 // normalizeForCompare приводить рядок до нижнього регістру,
 // замінює пунктуацію/пробіли на один пробіл
 func normalizeForCompare(s string) string {
 	s = strings.ToLower(s)
 	var b strings.Builder
+	b.Grow(len(s))
 	prevSpace := false
 	for _, r := range s {
 		isAlphaNum := (r >= 'a' && r <= 'z') ||
@@ -397,16 +466,17 @@ func abs(x int) int {
 	return x
 }
 
-// minOf3 — мінімум з трьох int
-func minOf3(a, b, c int) int {
-	if a < b {
-		if a < c {
-			return a
+// hasCyrillicChars перевіряє, чи містить рядок кириличні символи
+func hasCyrillicChars(s string) bool {
+	for _, r := range s {
+		if (r >= 'а' && r <= 'я') || (r >= 'А' && r <= 'Я') ||
+			r == 'і' || r == 'ї' || r == 'є' || r == 'ґ' ||
+			r == 'І' || r == 'Ї' || r == 'Є' || r == 'Ґ' ||
+			r == 'ё' || r == 'Ё' || r == 'ы' || r == 'Ы' ||
+			r == 'э' || r == 'Э' || r == 'ъ' || r == 'Ъ' ||
+			r == 'ь' || r == 'Ь' {
+			return true
 		}
-		return c
 	}
-	if b < c {
-		return b
-	}
-	return c
+	return false
 }
