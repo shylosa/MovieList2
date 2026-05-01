@@ -24,6 +24,16 @@ type Movie struct {
 	Cast            string `json:"cast"`
 	PosterURL       string `json:"poster_url"`
 	LocalPosterPath string `json:"local_poster_path"`
+	MediaType       string `json:"media_type"`
+}
+
+// AIResolution — кеш розпізнавання Gemini (L2 Cache)
+type AIResolution struct {
+	OriginalFilename string
+	ResolvedTitle    string
+	Year             int
+	MediaType        string
+	Confidence       float64
 }
 
 type DB struct {
@@ -54,19 +64,28 @@ func (db *DB) InitSchema(ctx context.Context) error {
 		cast TEXT,
 		plot TEXT,
 		poster_url TEXT,
-		local_poster_path TEXT
+		local_poster_path TEXT,
+		media_type TEXT
 	);
 	CREATE INDEX IF NOT EXISTS idx_tmdb_id ON movies(tmdb_id);
 	CREATE INDEX IF NOT EXISTS idx_title_en ON movies(title_en);
 	PRAGMA journal_mode = WAL;
 	PRAGMA synchronous = NORMAL;
+
+	CREATE TABLE IF NOT EXISTS ai_resolutions (
+		original_filename TEXT PRIMARY KEY,
+		resolved_title TEXT,
+		year INTEGER,
+		media_type TEXT,
+		confidence REAL
+	);
 	`
 	_, err := db.db.ExecContext(ctx, query)
 	return err
 }
 
 func (db *DB) GetAllMovies(ctx context.Context) ([]Movie, error) {
-	query := `SELECT filename, tmdb_id, title_ua, title_en, year, genres, "cast", plot, poster_url, local_poster_path FROM movies ORDER BY rowid ASC`
+	query := `SELECT filename, tmdb_id, title_ua, title_en, year, genres, "cast", plot, poster_url, local_poster_path, media_type FROM movies ORDER BY rowid ASC`
 	rows, err := db.db.QueryContext(ctx, query)
 	if err != nil {
 		return nil, err
@@ -78,7 +97,7 @@ func (db *DB) GetAllMovies(ctx context.Context) ([]Movie, error) {
 		var m Movie
 		err := rows.Scan(
 			&m.Filename, &m.TmdbID, &m.TitleUA, &m.TitleEN, &m.Year,
-			&m.Genres, &m.Cast, &m.Plot, &m.PosterURL, &m.LocalPosterPath,
+			&m.Genres, &m.Cast, &m.Plot, &m.PosterURL, &m.LocalPosterPath, &m.MediaType,
 		)
 		if err != nil {
 			log.Printf("⚠️ Помилка читання: %v", err)
@@ -95,24 +114,24 @@ func (db *DB) GetAllMovies(ctx context.Context) ([]Movie, error) {
 func (db *DB) SaveMovie(ctx context.Context, m Movie) error {
 	query := `
 		INSERT OR REPLACE INTO movies
-		(filename, tmdb_id, title_ua, title_en, year, genres, "cast", plot, poster_url, local_poster_path)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		(filename, tmdb_id, title_ua, title_en, year, genres, "cast", plot, poster_url, local_poster_path, media_type)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`
 	_, err := db.db.ExecContext(ctx, query,
 		m.Filename, m.TmdbID, m.TitleUA, m.TitleEN, m.Year,
-		m.Genres, m.Cast, m.Plot, m.PosterURL, m.LocalPosterPath,
+		m.Genres, m.Cast, m.Plot, m.PosterURL, m.LocalPosterPath, m.MediaType,
 	)
 	return err
 }
 
 func (db *DB) GetMovieByFilename(ctx context.Context, filename string) (*Movie, error) {
-	query := `SELECT filename, tmdb_id, title_ua, title_en, year, genres, "cast", plot, poster_url, local_poster_path
+	query := `SELECT filename, tmdb_id, title_ua, title_en, year, genres, "cast", plot, poster_url, local_poster_path, media_type
 			  FROM movies WHERE filename = ?`
 	row := db.db.QueryRowContext(ctx, query, filename)
 	var m Movie
 	err := row.Scan(
 		&m.Filename, &m.TmdbID, &m.TitleUA, &m.TitleEN, &m.Year,
-		&m.Genres, &m.Cast, &m.Plot, &m.PosterURL, &m.LocalPosterPath,
+		&m.Genres, &m.Cast, &m.Plot, &m.PosterURL, &m.LocalPosterPath, &m.MediaType,
 	)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -208,5 +227,25 @@ func (db *DB) GetAllFilenames(ctx context.Context) (map[string]bool, error) {
 func (db *DB) DeleteMovieByFilename(ctx context.Context, filename string) error {
 	query := `DELETE FROM movies WHERE filename = ?`
 	_, err := db.db.ExecContext(ctx, query, filename)
+	return err
+}
+
+func (db *DB) GetAIResolution(ctx context.Context, filename string) (*AIResolution, error) {
+	query := `SELECT original_filename, resolved_title, year, media_type, confidence FROM ai_resolutions WHERE original_filename = ?`
+	row := db.db.QueryRowContext(ctx, query, filename)
+	var r AIResolution
+	err := row.Scan(&r.OriginalFilename, &r.ResolvedTitle, &r.Year, &r.MediaType, &r.Confidence)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &r, nil
+}
+
+func (db *DB) SaveAIResolution(ctx context.Context, r AIResolution) error {
+	query := `INSERT OR REPLACE INTO ai_resolutions (original_filename, resolved_title, year, media_type, confidence) VALUES (?, ?, ?, ?, ?)`
+	_, err := db.db.ExecContext(ctx, query, r.OriginalFilename, r.ResolvedTitle, r.Year, r.MediaType, r.Confidence)
 	return err
 }

@@ -113,6 +113,20 @@ func buildAttempts(parsed ParsedFile, originalFilename string) []searchAttempt {
 		attempts = append(attempts, searchAttempt{bestTitle, 0, opposite, "Протилежний тип"})
 	}
 
+	// 🟢 Додаємо фоллбек на батьківську папку з низьким пріоритетом
+	if parsed.ParentDir != "" && parsed.ParentDir != "." && parsed.ParentDir != "/" {
+		// Парсимо ім'я папки, щоб дістати рік і чисту назву
+		dirParsed := ParseFilename(parsed.ParentDir)
+		if dirParsed.CleanTitle != parsed.CleanTitle && len(dirParsed.CleanTitle) > 2 {
+			attempts = append(attempts, searchAttempt{
+				query:     dirParsed.CleanTitle,
+				year:      dirParsed.Year,
+				mediaType: dirParsed.MediaType,
+				label:     "Папка",
+			})
+		}
+	}
+
 	return attempts
 }
 
@@ -129,20 +143,56 @@ func (c *Client) searchAndFetch(
 		return nil, nil
 	}
 
+	// 🟢 Спочатку перевіряємо кеш пошуку
+	cacheKey := fmt.Sprintf("%s_%d_%s", query, targetYear, string(preferredType))
+	if val, ok := c.searchCache.Load(cacheKey); ok {
+		utils.LoggerWithTrace(ctx).Debug("search_cache_hit", slog.String("query", query))
+		return val.(*MovieInfo), nil
+	}
+
 	// 🔴 ВИПРАВЛЕННЯ: Динамічний вибір мови індексу для TMDB
 	langParam := "en-US"
 	if hasCyrillicChars(query) {
-		langParam = "ru-RU" // Відкриваємо доступ до кириличних індексів
+		langParam = "ru-RU"
+	}
+
+	// 🟢 ВИБІР ЕНДПОІНТА: /search/movie або /search/tv якщо тип відомий
+	endpoint := "multi"
+	yearParam := ""
+	if preferredType == MediaTypeMovie {
+		endpoint = "movie"
+		if targetYear > 0 {
+			yearParam = fmt.Sprintf("&year=%d", targetYear)
+		}
+	} else if preferredType == MediaTypeTV {
+		endpoint = "tv"
+		if targetYear > 0 {
+			yearParam = fmt.Sprintf("&first_air_date_year=%d", targetYear)
+		}
 	}
 
 	searchURL := fmt.Sprintf(
-		"%s/search/multi?api_key=%s&query=%s&language=%s",
-		baseURL, c.apiKey, url.QueryEscape(query), langParam,
+		"%s/search/%s?api_key=%s&query=%s&language=%s%s",
+		baseURL, endpoint, c.apiKey, url.QueryEscape(query), langParam, yearParam,
 	)
 
 	var resp tmdbSearchResponse
 	if err := c.doRequestWithRetry(ctx, searchURL, &resp); err != nil {
 		return nil, err
+	}
+
+	// Для /search/movie та /search/tv поле media_type у результатах ВІДСУТНЄ
+	// Додаємо його вручну, щоб rankResults знав з чим працює
+	for i := range resp.Results {
+		if resp.Results[i].MediaType == "" {
+			if preferredType != "" {
+				resp.Results[i].MediaType = string(preferredType)
+			} else if endpoint == "movie" {
+				resp.Results[i].MediaType = "movie"
+			} else if endpoint == "tv" {
+				resp.Results[i].MediaType = "tv"
+			}
+		}
 	}
 
 	if len(resp.Results) == 0 {
@@ -151,6 +201,7 @@ func (c *Client) searchAndFetch(
 
 	best := c.rankResults(ctx, resp.Results, query, targetYear, preferredType)
 	if best == nil {
+		c.searchCache.Store(cacheKey, (*MovieInfo)(nil)) // Кешуємо негативний результат
 		return nil, nil
 	}
 
@@ -160,7 +211,15 @@ func (c *Client) searchAndFetch(
 		detailType = MediaTypeTV
 	}
 
-	return c.GetDetails(ctx, detailType, best.result.ID, originalFilename)
+	info, err := c.getMovieDetails(ctx, best.result.ID, originalFilename)
+	if detailType == MediaTypeTV {
+		info, err = c.getTVDetails(ctx, best.result.ID, originalFilename)
+	}
+
+	if err == nil && info != nil {
+		c.searchCache.Store(cacheKey, info)
+	}
+	return info, err
 }
 
 // rankResults ранжує результати пошуку і повертає найкращого кандидата.

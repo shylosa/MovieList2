@@ -24,10 +24,12 @@ const (
 // ParsedFile — результат парсингу імені файлу
 type ParsedFile struct {
 	OriginalName string
+	ParentDir    string // назва батьківської папки
 	CleanTitle   string
 	Year         int // 0 якщо не знайдено
 	MediaType    MediaType
 	TitleLang    TitleLanguage
+	IMDBID       string // IMDb ID (tt1234567) якщо знайдено
 }
 
 // MovieInfo — фінальний результат після верифікації через TMDB

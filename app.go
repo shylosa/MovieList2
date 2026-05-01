@@ -384,6 +384,20 @@ func (a *App) RunScan() {
 			a.logFront(fmt.Sprintf("✅ TMDB: '%s' → '%s'", res.fname, res.info.TitleUA))
 			translationQueue = append(translationQueue, res.fname)
 		} else {
+			// 🟢 ПЕРЕВІРКА L2 КЕШУ: Чи не розпізнавали ми цей файл раніше через ШІ?
+			if cached, _ := a.db.GetAIResolution(ctx, res.fname); cached != nil {
+				utils.LoggerWithTrace(ctx).Info("gemini_l2_cache_hit", slog.String("file", res.fname), slog.String("resolved", cached.ResolvedTitle))
+				
+				// Використовуємо кешовану назву для пошуку в TMDB
+				info, err := a.tmdbClient.FetchByCleanTitle(ctx, cached.ResolvedTitle, strconv.Itoa(cached.Year), tmdb.MediaType(cached.MediaType))
+				if err == nil && info != nil {
+					movie := movieFromTMDB(res.fname, info)
+					_ = a.db.SaveMovie(ctx, movie)
+					a.logFront(fmt.Sprintf("⚡ L2-Кеш: '%s' → '%s'", res.fname, info.TitleUA))
+					translationQueue = append(translationQueue, res.fname)
+					continue
+				}
+			}
 			geminiQueue = append(geminiQueue, res.fname)
 		}
 	}
@@ -470,6 +484,20 @@ func (a *App) processGeminiQueue(ctx context.Context, filenames []string, aiClie
 			}
 
 			a.emitProgress(processed, total, "🤖 Gemini: "+rec.ENTitle)
+
+			// 🟢 ЗБЕРЕЖЕННЯ В L2 КЕШ
+			yearVal := 0
+			if rec.Year != nil {
+				yearVal = *rec.Year
+			}
+			_ = a.db.SaveAIResolution(ctx, storage.AIResolution{
+				OriginalFilename: fname,
+				ResolvedTitle:    rec.ENTitle,
+				Year:             yearVal,
+				MediaType:        rec.MediaType,
+				Confidence:       rec.Confidence,
+			})
+
 			movie := a.mergeGeminiWithTMDB(fname, rec)
 
 			_ = a.db.SaveMovie(ctx, movie)
@@ -555,6 +583,7 @@ func (a *App) mergeGeminiWithTMDB(fname string, rec ai.RecognizedTitle) storage.
 	movie.Plot = tmdbInfo.Plot
 	movie.Genres = tmdbInfo.Genres
 	movie.Cast = tmdbInfo.Cast
+	movie.MediaType = string(tmdbInfo.MediaType)
 
 	return movie
 }
@@ -745,6 +774,7 @@ func movieFromTMDB(fname string, info *tmdb.MovieInfo) storage.Movie {
 		Cast:            info.Cast,
 		PosterURL:       info.PosterURL,
 		LocalPosterPath: info.LocalPosterPath,
+		MediaType:       string(info.MediaType),
 	}
 }
 
@@ -767,6 +797,7 @@ func applyTMDBToMovie(movie *storage.Movie, info *tmdb.MovieInfo) {
 	if info.Cast != "" {
 		movie.Cast = info.Cast
 	}
+	movie.MediaType = string(info.MediaType)
 }
 
 // extractTMDBID витягує TMDB ID та тип медіа з підказки користувача.

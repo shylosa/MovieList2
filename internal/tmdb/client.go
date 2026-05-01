@@ -32,6 +32,9 @@ type Client struct {
 
 	// altTitlesCache — кеш для аліасів, щоб не смикати API для однакових ID
 	altTitlesCache sync.Map
+
+	// searchCache — кеш результатів пошуку (query+year+type)
+	searchCache sync.Map
 }
 
 func NewClient(cfg *config.Config) *Client {
@@ -99,7 +102,17 @@ func (c *Client) FetchFromFilename(ctx context.Context, filename string) (*Movie
 		slog.String("clean_title", parsed.CleanTitle),
 		slog.Int("year", parsed.Year),
 		slog.String("media_type", string(parsed.MediaType)),
+		slog.String("imdb_id", parsed.IMDBID),
 	)
+
+	// 1. Спроба 0: Прямий пошук по IMDb ID (найшвидший та найточніший)
+	if parsed.IMDBID != "" {
+		info, err := c.tryFindByIMDB(ctx, parsed.IMDBID, filename)
+		if err == nil && info != nil {
+			utils.LoggerWithTrace(ctx).Info("imdb_match_found", slog.String("imdb_id", parsed.IMDBID), slog.String("title", info.TitleUA))
+			return info, nil // Ранній вихід!
+		}
+	}
 
 	if parsed.CleanTitle == "" {
 		utils.LoggerWithTrace(ctx).Warn("empty_title_after_parsing", slog.String("filename", filename))
@@ -107,6 +120,27 @@ func (c *Client) FetchFromFilename(ctx context.Context, filename string) (*Movie
 	}
 
 	return c.runPipeline(ctx, parsed, filename)
+}
+
+func (c *Client) tryFindByIMDB(ctx context.Context, imdbID, originalFilename string) (*MovieInfo, error) {
+	url := fmt.Sprintf("%s/find/%s?api_key=%s&external_source=imdb_id", baseURL, imdbID, c.apiKey)
+
+	var resp struct {
+		MovieResults []tmdbSearchResult `json:"movie_results"`
+		TvResults    []tmdbSearchResult `json:"tv_results"`
+	}
+
+	if err := c.doRequestWithRetry(ctx, url, &resp); err != nil {
+		return nil, err
+	}
+
+	if len(resp.MovieResults) > 0 {
+		return c.getMovieDetails(ctx, resp.MovieResults[0].ID, originalFilename)
+	}
+	if len(resp.TvResults) > 0 {
+		return c.getTVDetails(ctx, resp.TvResults[0].ID, originalFilename)
+	}
+	return nil, nil
 }
 
 // FetchByCleanTitle — точка входу після Gemini.

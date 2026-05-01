@@ -14,20 +14,26 @@ import (
 var reSeason = regexp.MustCompile(`(?i)\bS(\d{2})\b(?:E\d{2})?|\bSeason\s*\d+\b|\bсезон\b`)
 
 // reFrontEpisode — детектор SххEхх на ПОЧАТКУ рядка (до назви фільму), що ламає go-ptn.
-// Приклад: "S07E05.Rick.and.Morty..." — go-ptn бере "S07E05" за тайтл.
-// Регулярка нормалізує це, переносячи маркер в кінець.
 var reFrontEpisode = regexp.MustCompile(`(?i)^(s\d{2}e\d{2}[\.\.\-\s_]+)(.*)`)
 
-// ParseFilename — парсить ім'я файлу через go-ptn + власні доповнення.
-//
-// go-ptn обробляє: рік, кодеки, якість, рілізгрупи, S01E01 формат.
-// Ми додаємо: детектор мови, детектор S07 (сезон без епізоду), cleanup title.
-func ParseFilename(raw string) ParsedFile {
-	name := filepath.Base(raw)
+// reIMDB — детектор IMDb ID (tt1234567)
+var reIMDB = regexp.MustCompile(`(?i)tt\d{7,10}`)
+
+// Оновлюємо ParseFilename, щоб він приймав ПОВНИЙ шлях
+func ParseFilename(fullPath string) ParsedFile {
+	name := filepath.Base(fullPath)
 	ext := filepath.Ext(name)
 	name = strings.TrimSuffix(name, ext)
 
-	result := ParsedFile{OriginalName: name}
+	result := ParsedFile{
+		OriginalName: name,
+		ParentDir:    filepath.Base(filepath.Dir(fullPath)),
+	}
+
+	// Шукаємо IMDb ID у всьому шляху
+	if match := reIMDB.FindString(fullPath); match != "" {
+		result.IMDBID = strings.ToLower(match)
+	}
 
 	// 🛡️ АГРЕСИВНИЙ ПОШУК РОКУ (Рятує від помилок go-ptn)
 	// Нормалізуємо одруківки: латинська та кирилична "О" замість нуля (напр. 2O15 -> 2015)
