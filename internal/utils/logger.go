@@ -1,82 +1,54 @@
 package utils
 
 import (
-	"fmt"
-	"io"
-	"log"
+	"context"
+	"log/slog"
 	"os"
-	"path/filepath"
-	"sync"
-	"time"
 )
 
-type DailyLogger struct {
-	mu          sync.Mutex
-	logFile     *os.File
-	currentDate string
-	initialized bool // Прапорець для відстеження ініціалізації
-}
+type contextKey string
 
-func (l *DailyLogger) Write(p []byte) (n int, err error) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
+const traceIDKey contextKey = "trace_id"
 
-	now := time.Now()
-	dateStr := now.Format("2006-01-02") // Для назви файлу (YYYY-MM-DD)
-	timeStr := now.Format("2006-01-02 15:04:05") // Для самого логу (ISO)
-
-	// Якщо дата змінилася або файл не відкритий
-	if l.currentDate != dateStr || l.logFile == nil {
-		if l.logFile != nil {
-			l.logFile.Close()
-		}
-
-		logsDir := "logs"
-		_ = os.MkdirAll(logsDir, 0755)
-
-		logPath := filepath.Join(logsDir, fmt.Sprintf("%s.log", dateStr))
-		f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-		if err != nil {
-            // Якщо не вийшло створити файл, пишемо в консоль
-			fmt.Printf("%s %s", timeStr, string(p))
-			return len(p), nil
-		}
-		l.logFile = f
-		l.currentDate = dateStr
+// InitStructuredLogger створює JSON-логер, який пише у файл logs/app.jsonl
+func InitStructuredLogger() *os.File {
+	os.MkdirAll("logs", 0755)
+	logFile, err := os.OpenFile("logs/app.jsonl", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+	if err != nil {
+		// Якщо не вдалося відкрити файл, slog буде писати в stderr за замовчуванням
+		return nil
 	}
 
-	// Формуємо фінальний рядок: наш ISO-час + стандартний лог (де вже є file.go:line)
-	finalLog := []byte(fmt.Sprintf("%s %s", timeStr, string(p)))
+	handler := slog.NewJSONHandler(logFile, &slog.HandlerOptions{
+		Level: slog.LevelDebug,
+	})
 
-	// Пишемо у файл і в консоль
-	mw := io.MultiWriter(l.logFile, os.Stdout)
-	_, err = mw.Write(finalLog)
+	logger := slog.New(handler)
+	slog.SetDefault(logger) // Тепер всі slog.Info() будуть писати сюди
 
-	// ВАЖЛИВО: повертаємо оригінальну довжину p, щоб стандартний пакет log не сварився
-	return len(p), err
+	return logFile
 }
 
-var GlobalLogger = &DailyLogger{}
+// ContextWithTrace додає trace_id до контексту
+func ContextWithTrace(ctx context.Context, traceID string) context.Context {
+	return context.WithValue(ctx, traceIDKey, traceID)
+}
 
+// LoggerWithTrace дістає trace_id з контексту і додає його до логера
+func LoggerWithTrace(ctx context.Context) *slog.Logger {
+	traceID, ok := ctx.Value(traceIDKey).(string)
+	if !ok {
+		traceID = "unknown"
+	}
+	return slog.Default().With(slog.String("trace_id", traceID))
+}
+
+// Залишаємо старі методи для сумісності, поки не переведемо весь проект на slog
 func InitLogger() {
-	// Встановлюємо логер ТІЛЬКИ ОДИН РАЗ
-	if !GlobalLogger.initialized {
-		log.SetOutput(GlobalLogger)
-
-		// ВИМИКАЄМО Ldate та Ltime, залишаємо ТІЛЬКИ Lshortfile (назву файлу і рядок)
-		log.SetFlags(log.Lshortfile)
-
-		GlobalLogger.initialized = true
-	}
+	// Порожній, бо slog ініціалізується через InitStructuredLogger
 }
 
 func CloseLogger() {
-	GlobalLogger.mu.Lock()
-	defer GlobalLogger.mu.Unlock()
-	if GlobalLogger.logFile != nil {
-		// Тут також замінив слеші на дефіси
-		fmt.Fprintln(GlobalLogger.logFile, time.Now().Format("2006-01-02 15:04:05"), "🛑 Програму закрито.")
-		GlobalLogger.logFile.Close()
-		GlobalLogger.logFile = nil
-	}
+	// Можна додати фінальний лог через slog
+	slog.Info("app_closed")
 }

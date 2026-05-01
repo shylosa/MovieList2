@@ -6,12 +6,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
 
 	"movielist-app/internal/config"
+	"movielist-app/internal/utils"
 )
 
 // RecognizedTitle — відповідь Gemini для одного файлу.
@@ -82,7 +83,7 @@ func (c *Client) RecognizeBulk(ctx context.Context, filenames []string) ([]Recog
 	}
 
 	prompt := buildPrompt(filenames)
-	log.Printf("[GEMINI] 🧠 Розпізнавання %d файлів...", len(filenames))
+	utils.LoggerWithTrace(ctx).Info("gemini_recognition_start", slog.Int("file_count", len(filenames)))
 
 	return c.requestWithRetry(ctx, prompt)
 }
@@ -100,7 +101,10 @@ func (c *Client) requestWithRetry(ctx context.Context, prompt string) ([]Recogni
 		}
 
 		if i > 0 {
-			log.Printf("[GEMINI] 🔄 Перемикання на наступну модель у каскаді: %s", modelName)
+			utils.LoggerWithTrace(ctx).Info("gemini_cascade_switch",
+				slog.String("model", modelName),
+				slog.Int("cascade_index", i),
+			)
 		}
 
 		// Робимо запит до поточної моделі
@@ -108,18 +112,24 @@ func (c *Client) requestWithRetry(ctx context.Context, prompt string) ([]Recogni
 		if err == nil {
 			// Успіх! Повертаємо результат, не чіпаємо інші моделі
 			if i > 0 {
-				log.Printf("[GEMINI] ✅ Резервна модель %s успішно впоралася!", modelName)
+				utils.LoggerWithTrace(ctx).Info("gemini_backup_model_success", slog.String("model", modelName))
 			}
 			return result, nil
 		}
 
 		// Якщо помилка, записуємо її і йдемо на наступну ітерацію (до наступної моделі)
 		lastErr = err
-		log.Printf("[GEMINI] ⚠️ Модель %s не впоралась: %v", modelName, err)
+		utils.LoggerWithTrace(ctx).Warn("gemini_model_failed",
+			slog.String("model", modelName),
+			slog.Any("error", err),
+		)
 	}
 
 	// Якщо цикл завершився, значить ВСІ моделі зі списку впали
-	log.Printf("[GEMINI] ❌ КРИТИЧНО: Жодна з %d моделей не змогла обробити запит.", len(c.cfg.GeminiModels))
+	utils.LoggerWithTrace(ctx).Error("gemini_all_models_failed",
+		slog.Int("model_count", len(c.cfg.GeminiModels)),
+		slog.Any("last_error", lastErr),
+	)
 	return nil, fmt.Errorf("всі моделі ШІ недоступні. Остання помилка: %v", lastErr)
 }
 
@@ -179,7 +189,14 @@ func (c *Client) makeRequest(ctx context.Context, prompt, modelName string) ([]R
 					if detail.Type == "type.googleapis.com/google.rpc.RetryInfo" && detail.RetryDelay != "" {
 						delay, parseErr := time.ParseDuration(detail.RetryDelay)
 						if parseErr == nil {
-							log.Printf("[GEMINI] ⏳ Ліміт (429) для %s. Чекаємо %v...", modelName, delay)
+							utils.LoggerWithTrace(ctx).Warn("api_error",
+								slog.String("stage", "gemini"),
+								slog.String("error_type", "rate_limit"),
+								slog.Int("http_code", 429),
+								slog.Bool("retryable", true),
+								slog.Duration("retry_after", delay),
+								slog.String("model", modelName),
+							)
 							select {
 							case <-time.After(delay):
 								continue // Повторюємо запит до тієї ж моделі
@@ -365,7 +382,14 @@ func (c *Client) translateWithRetry(ctx context.Context, prompt string, fallback
 						if detail.Type == "type.googleapis.com/google.rpc.RetryInfo" && detail.RetryDelay != "" {
 							delay, parseErr := time.ParseDuration(detail.RetryDelay)
 							if parseErr == nil {
-								log.Printf("[GEMINI] ⏳ Ліміт (429) для %s. Чекаємо %v перед ретраєм...", model, delay)
+								utils.LoggerWithTrace(ctx).Warn("api_error",
+									slog.String("stage", "gemini_translation"),
+									slog.String("error_type", "rate_limit"),
+									slog.Int("http_code", 429),
+									slog.Bool("retryable", true),
+									slog.Duration("retry_after", delay),
+									slog.String("model", model),
+								)
 								select {
 								case <-time.After(delay):
 									continue // Ретрай тієї ж моделі (спробує знову в циклі attempt)
@@ -377,13 +401,17 @@ func (c *Client) translateWithRetry(ctx context.Context, prompt string, fallback
 					}
 				}
 
-				log.Printf("[GEMINI] ⏳ Ліміт запитів (429) для моделі %s без RetryInfo. Перемикаємось далі...", model)
+				utils.LoggerWithTrace(ctx).Warn("api_error_no_retry_info",
+					slog.String("stage", "gemini_translation"),
+					slog.String("model", model),
+					slog.Int("http_code", 429),
+				)
 				break // Виходимо з циклу спроб для цієї моделі і пробуємо наступну з конфігу
 			}
 
 			if err == nil && resp.StatusCode == http.StatusOK {
-				defer resp.Body.Close()
 				body, _ := io.ReadAll(resp.Body)
+				resp.Body.Close()
 
 				var googleResp struct {
 					Candidates []struct {
@@ -411,16 +439,16 @@ func (c *Client) translateWithRetry(ctx context.Context, prompt string, fallback
 			// Затримка з повагою до контексту (кнопки "Стоп")
 			select {
 			case <-ctx.Done():
-				log.Printf("[GEMINI] 🛑 Переклад скасовано користувачем.")
+				utils.LoggerWithTrace(ctx).Info("translation_cancelled")
 				return fallbackText
 			case <-time.After(time.Second * 2):
 				// продовжуємо цикл
 			}
 		}
-		log.Printf("[GEMINI] ⚠️ Модель %s не змогла перекласти. Пробуємо наступну...", model)
+		utils.LoggerWithTrace(ctx).Warn("model_translation_failed", slog.String("model", model))
 	}
 
-	log.Printf("[GEMINI] ❌ Усі спроби перекладу провалилися. Повертаю оригінал.")
+	utils.LoggerWithTrace(ctx).Error("all_translation_models_failed")
 	return fallbackText
 }
 
@@ -436,7 +464,10 @@ func (c *Client) TranslateTitle(ctx context.Context, title string, fallback stri
 
 	lowerTrans := strings.ToLower(translated)
 	if len(translated) > 100 || strings.Contains(lowerTrans, "thought") || strings.Contains(lowerTrans, "original:") {
-		log.Printf("[GEMINI] ⚠️ ШІ видав монолог замість назви. Залишаємо оригінал: %s", fallback)
+		utils.LoggerWithTrace(ctx).Warn("gemini_monologue_detected",
+			slog.String("translated", translated),
+			slog.String("fallback", fallback),
+		)
 		return fallback // ВИПРАВЛЕННЯ: Повертаємо оригінал (російський текст), а не англійський фолбек
 	}
 
@@ -466,7 +497,7 @@ func (c *Client) TranslateBulk(ctx context.Context, items []BulkTranslateItem) (
 
 	inputJSON, _ := json.MarshalIndent(items, "", "  ")
 
-	prompt := fmt.Sprintf(`ОБОВ'ЯЗКОВО скористайся Google Пошуком. Твоя задача — масово знайти офіційні українські назви та описи для списку медіафайлів.
+	prompt := fmt.Sprintf(`Твоя задача — масово знайти офіційні українські назви та описи для списку медіафайлів.
 
 ПРАВИЛА:
 1. Якщо title не є офіційною українською назвою (наприклад: російська, піратська, трансліт), знайди правильну українську назву з прокату/стрімінгів.
@@ -491,7 +522,10 @@ func (c *Client) TranslateBulk(ctx context.Context, items []BulkTranslateItem) (
 
 	var results []BulkTranslateItem
 	if err := json.Unmarshal([]byte(resp), &results); err != nil {
-		log.Printf("[GEMINI] ⚠️ Помилка парсингу JSON масового перекладу. Тіло: %s", resp)
+		utils.LoggerWithTrace(ctx).Error("bulk_translate_parse_error",
+			slog.Any("error", err),
+			slog.String("response", resp),
+		)
 		return nil, fmt.Errorf("помилка парсингу JSON: %w", err)
 	}
 

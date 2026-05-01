@@ -5,15 +5,17 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"movielist-app/internal/config"
+	"movielist-app/internal/utils"
 )
 
 const (
@@ -27,6 +29,9 @@ type Client struct {
 	apiKey     string
 	postersDir string
 	rateLimiter *time.Ticker
+
+	// altTitlesCache — кеш для аліасів, щоб не смикати API для однакових ID
+	altTitlesCache sync.Map
 }
 
 func NewClient(cfg *config.Config) *Client {
@@ -36,6 +41,12 @@ func NewClient(cfg *config.Config) *Client {
 		apiKey:      cfg.TMDBAPIKey,
 		postersDir:  cfg.PostersDir,
 		rateLimiter: time.NewTicker(500 * time.Millisecond), // 2 запити/сек
+	}
+}
+
+func (c *Client) Close() {
+	if c.rateLimiter != nil {
+		c.rateLimiter.Stop()
 	}
 }
 
@@ -63,7 +74,12 @@ func (c *Client) doRequestWithRetry(ctx context.Context, url string, target any)
 			return err
 		}
 
-		log.Printf("[TMDB] Спроба %d/3 не вдалася: %v. Повтор через %v", attempt+1, err, backoff)
+		utils.LoggerWithTrace(ctx).Warn("tmdb_request_attempt_failed",
+			slog.Int("attempt", attempt+1),
+			slog.String("url", url),
+			slog.Any("error", err),
+			slog.Duration("backoff", backoff),
+		)
 		select {
 		case <-time.After(backoff):
 		case <-ctx.Done():
@@ -78,11 +94,15 @@ func (c *Client) doRequestWithRetry(ctx context.Context, url string, target any)
 // Парсить ім'я, визначає стратегію і запускає каскадний пошук.
 func (c *Client) FetchFromFilename(ctx context.Context, filename string) (*MovieInfo, error) {
 	parsed := ParseFilename(filename)
-	log.Printf("[TMDB] 📂 Парсинг '%s' → title='%s' year=%d lang=%s type=%s",
-		filename, parsed.CleanTitle, parsed.Year, parsed.TitleLang, parsed.MediaType)
+	utils.LoggerWithTrace(ctx).Info("filename_parsed",
+		slog.String("filename", filename),
+		slog.String("clean_title", parsed.CleanTitle),
+		slog.Int("year", parsed.Year),
+		slog.String("media_type", string(parsed.MediaType)),
+	)
 
 	if parsed.CleanTitle == "" {
-		log.Printf("[TMDB] ⚠️ Порожня назва після парсингу: '%s'", filename)
+		utils.LoggerWithTrace(ctx).Warn("empty_title_after_parsing", slog.String("filename", filename))
 		return nil, nil
 	}
 
@@ -108,8 +128,11 @@ func (c *Client) FetchByCleanTitle(ctx context.Context, title, year string, medi
 		parsed.Year = mustAtoi(year)
 	}
 
-	log.Printf("[TMDB] 🤖 Пошук після Gemini: title='%s' year=%d type=%s",
-		title, parsed.Year, mediaType)
+	utils.LoggerWithTrace(ctx).Info("gemini_resolve_search",
+		slog.String("title", title),
+		slog.Int("year", parsed.Year),
+		slog.String("type", string(mediaType)),
+	)
 
 	// 🟠 ВИПРАВЛЕННЯ: Замість searchDirectly використовуємо runPipeline,
 	// щоб відпрацювала транслітерація, якщо Gemini повернув трансліт
@@ -140,7 +163,10 @@ func (c *Client) pipelineLatin(ctx context.Context, parsed ParsedFile, originalF
 	// Спроба 3: транслітерація латиниці → кирилиця
 	cyrillicTitle := latinToCyrillic(parsed.CleanTitle)
 	if cyrillicTitle != parsed.CleanTitle {
-		log.Printf("[TMDB] 🔤 Транслітерація: '%s' → '%s'", parsed.CleanTitle, cyrillicTitle)
+		utils.LoggerWithTrace(ctx).Info("transliteration_applied",
+			slog.String("original", parsed.CleanTitle),
+			slog.String("converted", cyrillicTitle),
+		)
 
 		cyrParsed := parsed
 		cyrParsed.CleanTitle = cyrillicTitle
@@ -196,7 +222,11 @@ func (c *Client) trySearch(ctx context.Context, parsed ParsedFile, originalFilen
 				diff := foundYear - parsed.Year
 				// Допускаємо похибку ±1 рік
 				if diff < -1 || diff > 1 {
-					log.Printf("🛡️ [БЛОКУВАННЯ] Знайдено '%s' (%d), але файл вимагає %d. Відхиляємо!", info.TitleEN, foundYear, parsed.Year)
+					utils.LoggerWithTrace(ctx).Warn("year_mismatch_blocking",
+						slog.String("title", info.TitleEN),
+						slog.Int("found_year", foundYear),
+						slog.Int("expected_year", parsed.Year),
+					)
 					return nil // Жорстко відхиляємо, віддаємо файл ШІ!
 				}
 			}
@@ -425,4 +455,52 @@ func mustAtoi(s string) int {
 		n = n*10 + int(r-'0')
 	}
 	return n
+}
+
+type tmdbMovieAltTitles struct {
+	Titles []struct {
+		Title string `json:"title"`
+	} `json:"titles"`
+}
+
+type tmdbTVAltTitles struct {
+	Results []struct {
+		Title string `json:"title"`
+	} `json:"results"`
+}
+
+// getAlternativeTitles робить швидкий запит для отримання всіх аліасів
+func (c *Client) getAlternativeTitles(ctx context.Context, id int, mediaType MediaType) ([]string, error) {
+	// Спочатку перевіряємо кеш
+	if val, ok := c.altTitlesCache.Load(id); ok {
+		return val.([]string), nil
+	}
+
+	var titles []string
+
+	if mediaType == MediaTypeMovie {
+		url := fmt.Sprintf("%s/movie/%d/alternative_titles?api_key=%s", baseURL, id, c.apiKey)
+		var resp tmdbMovieAltTitles
+		if err := c.doRequestWithRetry(ctx, url, &resp); err == nil {
+			for _, t := range resp.Titles {
+				titles = append(titles, t.Title)
+			}
+		} else {
+			return nil, err
+		}
+	} else {
+		url := fmt.Sprintf("%s/tv/%d/alternative_titles?api_key=%s", baseURL, id, c.apiKey)
+		var resp tmdbTVAltTitles
+		if err := c.doRequestWithRetry(ctx, url, &resp); err == nil {
+			for _, t := range resp.Results {
+				titles = append(titles, t.Title)
+			}
+		} else {
+			return nil, err
+		}
+	}
+
+	// Зберігаємо в кеш перед поверненням
+	c.altTitlesCache.Store(id, titles)
+	return titles, nil
 }

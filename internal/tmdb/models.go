@@ -1,5 +1,10 @@
 package tmdb
 
+import "regexp"
+
+// reYear — спільна регулярка для пошуку року в назвах
+var reYear = regexp.MustCompile(`\b(19\d{2}|20\d{2})\b`)
+
 // MediaType — тип медіаконтенту
 type MediaType string
 

@@ -3,12 +3,13 @@ package tmdb
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
 
+	"movielist-app/internal/utils"
 	"github.com/xrash/smetrics"
 )
 
@@ -49,16 +50,20 @@ func (c *Client) SearchWithFallbacks(
 	attempts := buildAttempts(parsed, originalFilename)
 
 	for _, a := range attempts {
-		log.Printf("[TMDB] 🔍 Спроба '%s': query='%s' year=%d type=%s",
-			a.label, a.query, a.year, a.mediaType)
+		logger := utils.LoggerWithTrace(ctx).With(slog.String("component", "tmdb_search"))
+		logger.Info("search_attempt",
+			slog.String("label", a.label),
+			slog.String("query", a.query),
+			slog.Int("year", a.year),
+		)
 
 		info, err := c.searchAndFetch(ctx, a.query, a.year, a.mediaType, originalFilename)
 		if err != nil {
-			log.Printf("[TMDB] ⚠️ '%s': помилка запиту: %v", a.label, err)
+			logger.Warn("search_failed", slog.String("label", a.label), slog.Any("error", err))
 			continue
 		}
 		if info != nil {
-			log.Printf("[TMDB] ✅ '%s': знайдено '%s' (%s)", a.label, info.TitleEN, info.Year)
+			logger.Info("search_success", slog.String("label", a.label), slog.String("title", info.TitleEN))
 			return info, nil
 		}
 	}
@@ -81,7 +86,7 @@ func buildAttempts(parsed ParsedFile, originalFilename string) []searchAttempt {
 
 	if mt == MediaTypeMovie && isCyrillicSeries(originalFilename) {
 		mt = MediaTypeTV
-		log.Printf("[TMDB] 📺 Виявлено маркер серіалу в назві. Змінено тип на TV.")
+		slog.Info("media_type_changed_to_tv", slog.String("filename", originalFilename))
 	}
 
 	candidates := generateTitleCandidates(parsed.CleanTitle, originalFilename)
@@ -144,7 +149,7 @@ func (c *Client) searchAndFetch(
 		return nil, nil
 	}
 
-	best := rankResults(resp.Results, query, targetYear, preferredType)
+	best := c.rankResults(ctx, resp.Results, query, targetYear, preferredType)
 	if best == nil {
 		return nil, nil
 	}
@@ -160,7 +165,8 @@ func (c *Client) searchAndFetch(
 
 // rankResults ранжує результати пошуку і повертає найкращого кандидата.
 // Повертає nil якщо жоден кандидат не набрав достатньо балів.
-func rankResults(
+func (c *Client) rankResults(
+	ctx context.Context,
 	results []tmdbSearchResult,
 	query string,
 	targetYear int,
@@ -170,20 +176,20 @@ func rankResults(
 
 	var best *scoredResult
 
-	for _, res := range results {
+	for i, res := range results {
 		// Людей ігноруємо завжди
 		if res.MediaType == "person" {
 			continue
 		}
 
-		scored := scoreResult(res, normQuery, targetYear, preferredType)
+		scored := c.scoreResult(ctx, res, i, normQuery, targetYear, preferredType)
 
-		log.Printf("[TMDB] 🧮 Кандидат: '%s' / '%s' (%d) lang=%s score=%d",
-			coalesce(res.Title, res.Name),
-			coalesce(res.OriginalTitle, res.OriginalName),
-			scored.year,
-			res.OriginalLanguage,
-			scored.score,
+		utils.LoggerWithTrace(ctx).Debug("candidate_evaluated",
+			slog.String("title", coalesce(res.Title, res.Name)),
+			slog.String("orig_title", coalesce(res.OriginalTitle, res.OriginalName)),
+			slog.Int("year", scored.year),
+			slog.String("lang", res.OriginalLanguage),
+			slog.Int("score", scored.score),
 		)
 
 		if best == nil || scored.score > best.score {
@@ -209,10 +215,10 @@ func rankResults(
 	}
 
 	if best.score < threshold {
-		log.Printf("[TMDB] 🚫 Найкращий '%s' набрав %d < порогу %d — відхилено",
-			coalesce(best.result.Title, best.result.Name),
-			best.score,
-			threshold,
+		utils.LoggerWithTrace(ctx).Warn("best_candidate_rejected",
+			slog.String("title", coalesce(best.result.Title, best.result.Name)),
+			slog.Int("score", best.score),
+			slog.Int("threshold", threshold),
 		)
 		return nil
 	}
@@ -221,8 +227,10 @@ func rankResults(
 }
 
 // scoreResult підраховує бал для одного результату пошуку
-func scoreResult(
+func (c *Client) scoreResult(
+	ctx context.Context,
 	res tmdbSearchResult,
+	index int,
 	normQuery string,
 	targetYear int,
 	preferredType MediaType,
@@ -243,11 +251,38 @@ func scoreResult(
 	// 💎 ДІАМАНТОВИЙ БОНУС (Оригінальна назва + Точний рік)
 	if targetYear > 0 && resYear == targetYear && resOrig == normQuery {
 		score += 300 // Величезний бонус, гарантує 1 місце
-		log.Printf("[TMDB] 💎 ДІАМАНТОВИЙ ЗБІГ: '%s' (%d)", resOrig, resYear)
+		utils.LoggerWithTrace(ctx).Info("diamond_match",
+			slog.String("title", resOrig),
+			slog.Int("year", resYear),
+		)
 	}
 
 	// --- Збіг назви: точний → contains → fuzzy ---
 	titleScore := matchScore(normQuery, resTitle, resOrig)
+
+	// --- ПЕРЕВІРКА АЛІАСІВ (ПУНКТ 1) ---
+	// Якщо базовий збіг низький, але це топовий результат TMDB — перевіряємо аліаси
+	if titleScore < 100 && index < 3 {
+		mediaType := MediaTypeMovie
+		if res.MediaType == "tv" {
+			mediaType = MediaTypeTV
+		}
+
+		alts, err := c.getAlternativeTitles(ctx, res.ID, mediaType)
+		if err == nil {
+			for _, alt := range alts {
+				altNorm := normalizeForCompare(alt)
+				altScore := fuzzyMatchScoreJW(normQuery, altNorm)
+				if altScore > titleScore {
+					titleScore = altScore
+					if altScore >= 150 { // Ідеальний збіг в аліасах
+						break
+					}
+				}
+			}
+		}
+	}
+
 	score += titleScore
 
 	// --- Збіг року ---
@@ -262,11 +297,10 @@ func scoreResult(
 		}
 	} else if targetYear == 0 && resYear > 0 {
 		// ⚖️ БАЛАНСУВАННЯ: Якщо рік файлу невідомий, віддаємо перевагу сучасним релізам.
-		// Це вирішує проблему "Жінок", де фільм 1965 року перебивав фільм 2008-го.
 		if resYear >= 2000 {
-			score += 15 // Бонус за сучасність (ймовірність що завантажили ремейк - вища)
+			score += 15 // Бонус за сучасність
 		} else if resYear < 1980 {
-			score -= 30 // Штраф для дуже старих (щоб сучасні ремейки вигравали)
+			score -= 30 // Штраф для дуже старих
 		}
 	}
 
@@ -285,10 +319,8 @@ func scoreResult(
 		score += ScoreLangEN
 	case "ru":
 		if queryIsCyrillic {
-			// Якщо шукали кирилицею (напр. "Брат 2"), це ймовірно місцевий фільм, не штрафуємо сильно, або навіть даємо невеликий бонус
 			score += 10
 		} else {
-			// Якщо шукали латиницею (напр. "Matrix"), а результат російський — жорстко штрафуємо
 			if resYear > 0 && resYear < 2010 {
 				score += ScoreLangRUOld // -300
 			} else {
@@ -297,7 +329,7 @@ func scoreResult(
 		}
 	}
 
-	// --- Popularity (обмежений вплив, щоб не домінував над назвою) ---
+	// --- Popularity ---
 	popBonus := int(res.Popularity / 5)
 	if popBonus > ScorePopularityLimit {
 		popBonus = ScorePopularityLimit
@@ -367,7 +399,6 @@ var (
 	reAudio    = regexp.MustCompile(`(?i)\b(AAC|DTS|AC3|DDP5\.1|Atmos|Dub|UkrDub|RusDub|MVO|DUB|L1|L2)\b`)
 	reRelease  = regexp.MustCompile(`(?i)(-?seleZen|-?ivanes|-?RG|-?NNMClub|\bUkr\b|\bRus\b|\bEng\b)`)
 	reExt      = regexp.MustCompile(`(?i)\.(mkv|mp4|avi|mov)$`)
-	reYear     = regexp.MustCompile(`\b(19\d{2}|20\d{2})\b`)
 	reBrackets = regexp.MustCompile(`\[.*?\]|\(.*?\)`)
 	rePunct    = regexp.MustCompile(`[\._]`)
 	reSpaces   = regexp.MustCompile(`\s{2,}`)

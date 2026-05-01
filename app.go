@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"os/exec"
@@ -27,6 +28,7 @@ import (
 	"movielist-app/internal/utils"
 	"movielist-app/internal/web"
 
+	"github.com/google/uuid"
 	wailsRuntime "github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
@@ -46,7 +48,7 @@ type App struct {
 func NewApp() *App { return &App{} }
 
 func (a *App) startup(ctx context.Context) {
-	utils.InitLogger()
+	utils.InitStructuredLogger()
 	a.ctx = ctx
 	a.cfg = config.Load()
 	a.tmdbClient = tmdb.NewClient(a.cfg)
@@ -55,12 +57,16 @@ func (a *App) startup(ctx context.Context) {
 	var err error
 	a.db, err = storage.New(a.cfg.DBPath)
 	if err != nil {
-		log.Fatalf("[CRITICAL] Помилка БД: %v", err)
+		slog.Error("db_critical_error", slog.Any("error", err))
+		os.Exit(1)
 	}
 	_ = a.db.InitSchema(ctx)
 }
 
 func (a *App) shutdown(ctx context.Context) {
+	if a.tmdbClient != nil {
+		a.tmdbClient.Close()
+	}
 	if a.db != nil {
 		a.db.Close()
 	}
@@ -238,7 +244,7 @@ func (a *App) GetAIModels() ([]string, error) {
 // ── Сканування ───────────────────────────────────────────────────────────────
 
 func (a *App) RunScan() {
-	log.Printf("[DEBUG] 🚀 Виклик StartScan отримано о: %v", time.Now().UnixNano()/1e6)
+	slog.Info("scan_triggered")
 	a.scanMutex.Lock()
 	if a.isScanning {
 		a.scanMutex.Unlock()
@@ -323,7 +329,7 @@ func (a *App) RunScan() {
 			defer func() { <-sem }() // Звільняємо слот
 			defer func() {
 				if r := recover(); r != nil {
-					log.Printf("panic in TMDB search goroutine: %v", r)
+					slog.Error("panic_in_goroutine", slog.Any("panic", r))
 				}
 			}()
 
@@ -333,12 +339,26 @@ func (a *App) RunScan() {
 
 			fname := filepath.Base(filePath)
 
+			// 🟢 СТВОРЮЄМО УНІКАЛЬНИЙ TRACE_ID ДЛЯ ЦЬОГО ФАЙЛУ
+			fileTraceID := uuid.New().String()[:8]
+			fileCtx := utils.ContextWithTrace(ctx, fileTraceID)
+			logger := utils.LoggerWithTrace(fileCtx)
+
 			// Атомарно збільшуємо лічильник для UI
 			current := atomic.AddInt32(&processedCount, 1)
 			a.emitProgress(int(current), totalFiles, "🔍 TMDB: "+fname)
 
-			info, err := a.tmdbClient.FetchFromFilename(ctx, fname)
+			logger.Info("start_processing",
+				slog.String("file", fname),
+				slog.String("stage", "init"),
+			)
+
+			info, err := a.tmdbClient.FetchFromFilename(fileCtx, fname)
 			if err != nil {
+				logger.Warn("tmdb_search_error",
+					slog.String("file", fname),
+					slog.Any("error", err),
+				)
 				a.logFront(fmt.Sprintf("⚠️ TMDB помилка для '%s': %v", fname, err))
 			}
 

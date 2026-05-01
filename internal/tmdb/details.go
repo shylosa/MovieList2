@@ -13,11 +13,6 @@ type tmdbNamedItem struct {
 	Name string `json:"name"`
 }
 
-// containsCyrillic перевіряє чи в тексті є кирилиця (українська або російська)
-func containsCyrillic(s string) bool {
-	return strings.ContainsAny(s, "Р°Р±РІРіРґРµС‘Р¶Р·РёР№РєР»РјРЅРѕРїСЂСЃС‚СѓС„С…С†С‡С€С‰СЉС‹СЊСЌСЋСЏРђР‘Р’Р“Р”Р•РЃР–Р—РР™РљР›РњРќРћРџР РЎРўРЈР¤РҐР¦Р§РЁР©РЄР«Р¬Р­Р®РЇС–Р†С—Р‡С”Р„Т‘Тђ")
-}
-
 // tmdbMovieDetails — відповідь TMDB для /movie/{id}
 type tmdbMovieDetails struct {
 	ID            int             `json:"id"`

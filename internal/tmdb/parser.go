@@ -36,7 +36,6 @@ func ParseFilename(raw string) ParsedFile {
 	searchName = strings.ReplaceAll(searchName, "o", "0")
 	searchName = strings.ReplaceAll(searchName, "о", "0")
 
-	reYear := regexp.MustCompile(`\b(19\d{2}|20\d{2})\b`)
 	manualYear := 0
 	maxAllowedYear := time.Now().Year() + 1 // +1 для ранніх WEB-релізів/анонсів
 
