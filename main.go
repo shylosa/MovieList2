@@ -2,7 +2,8 @@ package main
 
 import (
 	"embed"
-	"log"
+	"log/slog"
+	"os"
 
 	"movielist-app/internal/utils"
 
@@ -23,7 +24,8 @@ func main() {
 	defer func() {
 		if r := recover(); r != nil {
 			// Якщо програма жорстко падає, ми записуємо це у наш лог-файл
-			log.Fatalf("[CRITICAL] ПРОГРАМА ЖОРСТКО ВПАЛА (ПАНІКА): %v", r)
+			slog.Error("CRITICAL_PANIC", slog.Any("panic", r))
+			os.Exit(1)
 		}
 	}()
 
@@ -49,6 +51,7 @@ func main() {
 
 	if err != nil {
 		// Якщо крах стався на рівні самого ядра Wails
-		log.Fatalf("[CRITICAL] Помилка ядра Wails: %v", err)
+		slog.Error("CRITICAL_WAILS_ERROR", slog.Any("error", err))
+		os.Exit(1)
 	}
 }

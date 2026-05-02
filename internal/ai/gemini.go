@@ -13,6 +13,8 @@ import (
 
 	"movielist-app/internal/config"
 	"movielist-app/internal/utils"
+
+	"golang.org/x/time/rate"
 )
 
 // RecognizedTitle — відповідь Gemini для одного файлу.
@@ -24,15 +26,15 @@ import (
 //
 // Виняток: en_title та year — тільки для пошуку в TMDB, не зберігаємо напряму.
 type RecognizedTitle struct {
-	OriginalFile string `json:"original_file"` // ім'я файлу як є — для маппінгу
-	ENTitle      string `json:"en_title"`      // EN назва для пошуку в TMDB
-	TitleUA      string `json:"title_ua"`      // UA назва — fallback якщо TMDB порожній
-	Year         *int   `json:"year"`          // рік — тільки якщо впевнений, інакше null
-	MediaType    string `json:"media_type"`    // "movie" або "tv"
-	Plot         string `json:"plot"`          // опис UA — fallback якщо TMDB порожній
-	Genres       string `json:"genres"`        // жанри UA — fallback якщо TMDB порожній
-	Cast         string `json:"cast"`          // актори — fallback якщо TMDB порожній
-	Confidence   float64 `json:"confidence"`   // Оцінка впевненості 0.0-1.0, 0 якщо не вказано
+	OriginalFile string  `json:"original_file"` // ім'я файлу як є — для маппінгу
+	ENTitle      string  `json:"en_title"`      // EN назва для пошуку в TMDB
+	TitleUA      string  `json:"title_ua"`      // UA назва — fallback якщо TMDB порожній
+	Year         *int    `json:"year"`          // рік — тільки якщо впевнений, інакше null
+	MediaType    string  `json:"media_type"`    // "movie" або "tv"
+	Plot         string  `json:"plot"`          // опис UA — fallback якщо TMDB порожній
+	Genres       string  `json:"genres"`        // жанри UA — fallback якщо TMDB порожній
+	Cast         string  `json:"cast"`          // актори — fallback якщо TMDB порожній
+	Confidence   float64 `json:"confidence"`    // Оцінка впевненості 0.0-1.0, 0 якщо не вказано
 }
 
 // Структури для анмаршалінгу помилок Google RPC (RetryInfo)
@@ -50,29 +52,23 @@ type geminiErrResp struct {
 	} `json:"error"`
 }
 
-
-
 type Client struct {
-	cfg         *config.Config
-	httpClient  *http.Client
-	rateLimiter *time.Ticker
+	cfg        *config.Config
+	httpClient *http.Client
+	limiter    *rate.Limiter
 }
 
 func NewClient(cfg *config.Config) *Client {
 	return &Client{
-		cfg:         cfg,
-		httpClient:  &http.Client{Timeout: 120 * time.Second},
-		rateLimiter: time.NewTicker(2 * time.Second), // 1 запит/2сек для Gemini
+		cfg:        cfg,
+		httpClient: &http.Client{Timeout: 120 * time.Second},
+		// rate.Every(4 * time.Second) = 15 RPM. Burst = 1.
+		limiter: rate.NewLimiter(rate.Every(4*time.Second), 1),
 	}
 }
 
 func (c *Client) waitForRateLimit(ctx context.Context) error {
-	select {
-	case <-c.rateLimiter.C:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
-	}
+	return c.limiter.Wait(ctx)
 }
 
 // RecognizeBulk — пакетне розпізнавання імен файлів через Gemini.
@@ -135,8 +131,8 @@ func (c *Client) requestWithRetry(ctx context.Context, prompt string) ([]Recogni
 
 func (c *Client) makeRequest(ctx context.Context, prompt, modelName string) ([]RecognizedTitle, error) {
 	url := fmt.Sprintf(
-		"https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent?key=%s",
-		modelName, c.cfg.GeminiAPIKey,
+		"https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent",
+		modelName,
 	)
 
 	payload := map[string]any{
@@ -166,6 +162,7 @@ func (c *Client) makeRequest(ctx context.Context, prompt, modelName string) ([]R
 			return nil, err
 		}
 		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("x-goog-api-key", c.cfg.GeminiAPIKey)
 
 		resp, err := c.httpClient.Do(req)
 		if err != nil {
@@ -222,21 +219,20 @@ func responseSchema() map[string]any {
 		"items": map[string]any{
 			"type": "OBJECT",
 			"properties": map[string]any{
-				"original_file": map[string]any{"type": "STRING","description": "exact original filename as provided, unchanged"},
-				"en_title": map[string]any{"type": "STRING","description": "original English title for TMDB search. Must be the international release title, not a translation."},
-				"title_ua": map[string]any{"type": "STRING","description": "official Ukrainian title. Empty string if unknown — do not invent."},
-				"year": map[string]any{"type": "INTEGER","nullable": true,"description": "release year. null if uncertain."},
-				"media_type": map[string]any{"type": "STRING","description": "\"movie\" or \"tv\". Use \"tv\" only for clear series markers."},
-				"plot": map[string]any{"type": "STRING","description": "2-3 sentence plot summary in Ukrainian."},
-				"genres": map[string]any{"type": "STRING","description": "comma-separated genres in Ukrainian."},
-				"cast": map[string]any{"type": "STRING","description": "3-5 main actor names."},
-				"confidence": map[string]any{"type": "NUMBER","description": "Confidence score 0.0-1.0, 0 if not provided."},
+				"original_file": map[string]any{"type": "STRING", "description": "exact original filename as provided, unchanged"},
+				"en_title":      map[string]any{"type": "STRING", "description": "original English title for TMDB search. Must be the international release title, not a translation."},
+				"title_ua":      map[string]any{"type": "STRING", "description": "official Ukrainian title. Empty string if unknown — do not invent."},
+				"year":          map[string]any{"type": "INTEGER", "nullable": true, "description": "release year. null if uncertain."},
+				"media_type":    map[string]any{"type": "STRING", "description": "\"movie\" or \"tv\". Use \"tv\" only for clear series markers."},
+				"plot":          map[string]any{"type": "STRING", "description": "2-3 sentence plot summary in Ukrainian."},
+				"genres":        map[string]any{"type": "STRING", "description": "comma-separated genres in Ukrainian."},
+				"cast":          map[string]any{"type": "STRING", "description": "3-5 main actor names."},
+				"confidence":    map[string]any{"type": "NUMBER", "description": "Confidence score 0.0-1.0, 0 if not provided."},
 			},
 			"required": []string{"original_file", "en_title", "media_type"},
 		},
 	}
 }
-
 
 // buildPrompt — промпт з прикладами транслітератів і правилами мержу
 func buildPrompt(filenames []string) string {
@@ -277,6 +273,7 @@ CRITICAL TRANSLATION RULES:
 1. DO NOT translate localized titles literally! If you see a Russian localized title (e.g. "Воздушное ограбление", "Решала. Агент на миллиард"), you MUST find the actual global movie release matching that title and year (e.g. "Lift", "Mercato").
 2. For transliterated files (e.g. "Vrag.2013", "Sekretnyi.Agent"), reverse-engineer the original Russian title ("Враг", "Секретный агент") and find the exact TMDB movie ("Enemy", "The Secret Agent").
 3. Always verify the movie release year matches the filename!
+4. CRITICAL RULE: If you are not 100% sure about the match between the localized title and the original movie, return null. DO NOT guess or hallucinate movies based solely on matching genres and release years. Accuracy is strictly prioritized over returning a result.
 
 FIELD RULES:
 1. en_title: exact TMDB title. For non-English originals use the most common TMDB search title.
@@ -351,7 +348,6 @@ func (c *Client) translateWithRetry(ctx context.Context, prompt string, fallback
 	}
 	bodyBytes, _ := json.Marshal(reqBody)
 
-
 	// 🛡️ ПРАВИЛЬНЕ ВИПРАВЛЕННЯ: Беремо моделі з нашого центрального конфігу
 	models := c.cfg.GeminiModels
 
@@ -361,18 +357,23 @@ func (c *Client) translateWithRetry(ctx context.Context, prompt string, fallback
 	}
 
 	for _, model := range models {
-		url := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent?key=%s", model, c.cfg.GeminiAPIKey)
+		url := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent", model)
 
 		for attempt := 1; attempt <= 3; attempt++ {
 			_ = c.waitForRateLimit(ctx)
 
 			req, _ := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(bodyBytes))
 			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("x-goog-api-key", c.cfg.GeminiAPIKey)
 
 			resp, err := c.httpClient.Do(req)
+			if err != nil {
+				utils.LoggerWithTrace(ctx).Warn("translation_request_failed", slog.String("model", model), slog.Any("error", err))
+				continue
+			}
 
 			// ⚡ Реакція на ліміти (429 Too Many Requests) з RetryInfo
-			if resp != nil && resp.StatusCode == http.StatusTooManyRequests {
+			if resp.StatusCode == http.StatusTooManyRequests {
 				body, _ := io.ReadAll(resp.Body)
 				resp.Body.Close()
 
@@ -392,7 +393,7 @@ func (c *Client) translateWithRetry(ctx context.Context, prompt string, fallback
 								)
 								select {
 								case <-time.After(delay):
-									continue // Ретрай тієї ж моделі (спробує знову в циклі attempt)
+									goto nextAttempt
 								case <-ctx.Done():
 									return fallbackText
 								}
@@ -406,10 +407,10 @@ func (c *Client) translateWithRetry(ctx context.Context, prompt string, fallback
 					slog.String("model", model),
 					slog.Int("http_code", 429),
 				)
-				break // Виходимо з циклу спроб для цієї моделі і пробуємо наступну з конфігу
+				break // Виходимо з циклу спроб для цієї моделі
 			}
 
-			if err == nil && resp.StatusCode == http.StatusOK {
+			if resp.StatusCode == http.StatusOK {
 				body, _ := io.ReadAll(resp.Body)
 				resp.Body.Close()
 
@@ -430,11 +431,11 @@ func (c *Client) translateWithRetry(ctx context.Context, prompt string, fallback
 						return translated // Успішний переклад!
 					}
 				}
-			}
-
-			if resp != nil {
+			} else {
 				resp.Body.Close()
 			}
+
+		nextAttempt:
 
 			// Затримка з повагою до контексту (кнопки "Стоп")
 			select {

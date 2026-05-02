@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -23,11 +24,26 @@ const (
 	imageBaseURL = "https://image.tmdb.org/t/p/w500"
 )
 
+var ErrNotFound = fmt.Errorf("resource not found")
+
+func maskAPIKey(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return rawURL
+	}
+	q := u.Query()
+	if q.Has("api_key") {
+		q.Set("api_key", "***MASKED***")
+		u.RawQuery = q.Encode()
+	}
+	return u.String()
+}
+
 // Client — HTTP-клієнт для TMDB API
 type Client struct {
-	client     *http.Client
-	apiKey     string
-	postersDir string
+	client      *http.Client
+	apiKey      string
+	postersDir  string
 	rateLimiter *time.Ticker
 
 	// altTitlesCache — кеш для аліасів, щоб не смикати API для однакових ID
@@ -53,6 +69,19 @@ func (c *Client) Close() {
 	}
 }
 
+// ClearCaches — безпечне очищення кешу між скануваннями
+func (c *Client) ClearCaches() {
+	c.searchCache.Range(func(key, value any) bool {
+		c.searchCache.Delete(key)
+		return true
+	})
+	c.altTitlesCache.Range(func(key, value any) bool {
+		c.altTitlesCache.Delete(key)
+		return true
+	})
+	slog.Info("tmdb_caches_cleared")
+}
+
 func (c *Client) waitForRateLimit(ctx context.Context) error {
 	select {
 	case <-c.rateLimiter.C:
@@ -72,6 +101,11 @@ func (c *Client) doRequestWithRetry(ctx context.Context, url string, target any)
 			return nil
 		}
 
+		// 🔴 ХІРУРГІЧНЕ ВТРУЧАННЯ: Якщо ресурс не знайдено (404), не робимо ретраї
+		if err == ErrNotFound {
+			return err
+		}
+
 		// Якщо це остання спроба або контекст скасований, повертаємо помилку
 		if attempt == maxRetries-1 || ctx.Err() != nil {
 			return err
@@ -79,13 +113,15 @@ func (c *Client) doRequestWithRetry(ctx context.Context, url string, target any)
 
 		utils.LoggerWithTrace(ctx).Warn("tmdb_request_attempt_failed",
 			slog.Int("attempt", attempt+1),
-			slog.String("url", url),
+			slog.String("url", maskAPIKey(url)), // 👈 МАСКУЄМО КЛЮЧ
 			slog.Any("error", err),
 			slog.Duration("backoff", backoff),
 		)
+		timer := time.NewTimer(backoff)
 		select {
-		case <-time.After(backoff):
+		case <-timer.C:
 		case <-ctx.Done():
+			timer.Stop()
 			return ctx.Err()
 		}
 		backoff *= 2 // експоненціальний backoff
@@ -104,6 +140,14 @@ func (c *Client) FetchFromFilename(ctx context.Context, filename string) (*Movie
 		slog.String("media_type", string(parsed.MediaType)),
 		slog.String("imdb_id", parsed.IMDBID),
 	)
+
+	// 🟢 ПЕРЕВІРКА КЕШУ: Якщо ми вже шукали цей фільм/серіал в цій сесії
+	cacheKey := fmt.Sprintf("%s|%d|%s", strings.ToLower(parsed.CleanTitle), parsed.Year, parsed.MediaType)
+	if val, ok := c.searchCache.Load(cacheKey); ok {
+		info, _ := val.(*MovieInfo)
+		utils.LoggerWithTrace(ctx).Info("tmdb_l1_cache_hit", slog.String("title", parsed.CleanTitle))
+		return info, nil
+	}
 
 	// 1. Спроба 0: Прямий пошук по IMDb ID (найшвидший та найточніший)
 	if parsed.IMDBID != "" {
@@ -155,7 +199,7 @@ func (c *Client) FetchByCleanTitle(ctx context.Context, title, year string, medi
 		CleanTitle:   title,
 		MediaType:    mediaType,
 		// 🟠 ВИПРАВЛЕННЯ: Динамічне визначення мови замість хардкоду TitleLangLatin
-		TitleLang:    detectLanguage(title),
+		TitleLang: detectLanguage(title),
 	}
 
 	if year != "" {
@@ -195,19 +239,22 @@ func (c *Client) pipelineLatin(ctx context.Context, parsed ParsedFile, originalF
 	}
 
 	// Спроба 3: транслітерація латиниці → кирилиця
-	cyrillicTitle := latinToCyrillic(parsed.CleanTitle)
-	if cyrillicTitle != parsed.CleanTitle {
-		utils.LoggerWithTrace(ctx).Info("transliteration_applied",
-			slog.String("original", parsed.CleanTitle),
-			slog.String("converted", cyrillicTitle),
-		)
+	// 🟡 ХІРУРГІЧНЕ ВТРУЧАННЯ: Перевіряємо чи транслітерація взагалі потрібна
+	if !isLikelyEnglish(parsed.CleanTitle) {
+		cyrillicTitle := latinToCyrillic(parsed.CleanTitle)
+		if cyrillicTitle != parsed.CleanTitle {
+			utils.LoggerWithTrace(ctx).Info("transliteration_applied",
+				slog.String("original", parsed.CleanTitle),
+				slog.String("converted", cyrillicTitle),
+			)
 
-		cyrParsed := parsed
-		cyrParsed.CleanTitle = cyrillicTitle
-		cyrParsed.TitleLang = TitleLangCyrillic
+			cyrParsed := parsed
+			cyrParsed.CleanTitle = cyrillicTitle
+			cyrParsed.TitleLang = TitleLangCyrillic
 
-		if info := c.trySearch(ctx, cyrParsed, originalFilename); info != nil {
-			return info, nil
+			if info := c.trySearch(ctx, cyrParsed, originalFilename); info != nil {
+				return info, nil
+			}
 		}
 	}
 
@@ -410,7 +457,6 @@ var cyrillicCorrections = map[string]string{
 	"цар ":   "царь ",
 }
 
-
 func isUpper(r rune) bool {
 	return r >= 'A' && r <= 'Z'
 }
@@ -434,6 +480,9 @@ func (c *Client) doRequest(ctx context.Context, url string, target any) error {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
+		if resp.StatusCode == http.StatusNotFound {
+			return ErrNotFound
+		}
 		body, _ := io.ReadAll(resp.Body)
 		return fmt.Errorf("TMDB HTTP %d: %s", resp.StatusCode, string(body))
 	}
@@ -489,6 +538,22 @@ func mustAtoi(s string) int {
 		n = n*10 + int(r-'0')
 	}
 	return n
+}
+
+// isLikelyEnglish — перевіряє, чи є рядок англійським словом (щоб не транслітерувати "Enemy" в "Енеми")
+func isLikelyEnglish(s string) bool {
+	// Якщо містить трансліт-патерни — це скоріше трансліт
+	low := strings.ToLower(s)
+	translitPatterns := []string{"zh", "ch", "sh", "kh", "ts", "ya", "yu", "yo", "iy", "yy"}
+	for _, p := range translitPatterns {
+		if strings.Contains(low, p) {
+			return false
+		}
+	}
+
+	// Якщо це просте англійське слово (тільки букви латиниці, цифри та базова пунктуація)
+	match, _ := regexp.MatchString(`^[a-zA-Z0-9\s\-\:\.,!?']+$`, s)
+	return match
 }
 
 type tmdbMovieAltTitles struct {

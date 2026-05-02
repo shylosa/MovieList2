@@ -1,7 +1,7 @@
 package scanner
 
 import (
-	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -60,7 +60,7 @@ func (s *Scanner) GetDiskFiles() ([]string, error) {
 		}
 	}
 
-	log.Printf("✅ Всього знайдено файлів: %d", len(results))
+	slog.Info("disk_scan_completed", slog.Int("total_files", len(results)))
 	return results, nil
 }
 

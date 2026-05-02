@@ -12,6 +12,7 @@ export namespace storage {
 	    cast: string;
 	    poster_url: string;
 	    local_poster_path: string;
+	    media_type: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new Movie(source);
@@ -30,6 +31,7 @@ export namespace storage {
 	        this.cast = source["cast"];
 	        this.poster_url = source["poster_url"];
 	        this.local_poster_path = source["local_poster_path"];
+	        this.media_type = source["media_type"];
 	    }
 	}
 

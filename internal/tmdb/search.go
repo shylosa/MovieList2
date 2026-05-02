@@ -9,8 +9,8 @@ import (
 	"strconv"
 	"strings"
 
-	"movielist-app/internal/utils"
 	"github.com/xrash/smetrics"
+	"movielist-app/internal/utils"
 )
 
 // tmdbSearchResult — один результат з /search/multi
@@ -143,11 +143,12 @@ func (c *Client) searchAndFetch(
 		return nil, nil
 	}
 
-	// 🟢 Спочатку перевіряємо кеш пошуку
-	cacheKey := fmt.Sprintf("%s_%d_%s", query, targetYear, string(preferredType))
+	// 🟢 Спочатку перевіряємо кеш пошуку (уніфікований формат з client.go)
+	cacheKey := fmt.Sprintf("%s|%d|%s", strings.ToLower(query), targetYear, preferredType)
 	if val, ok := c.searchCache.Load(cacheKey); ok {
+		info, _ := val.(*MovieInfo)
 		utils.LoggerWithTrace(ctx).Debug("search_cache_hit", slog.String("query", query))
-		return val.(*MovieInfo), nil
+		return info, nil
 	}
 
 	// 🔴 ВИПРАВЛЕННЯ: Динамічний вибір мови індексу для TMDB
@@ -422,11 +423,7 @@ func matchScore(normQuery, resTitle, resOrig string) int {
 	// Fuzzy: Jaro-Winkler
 	fuzzyTitle := fuzzyMatchScoreJW(normQuery, resTitle)
 	fuzzyOrig := fuzzyMatchScoreJW(normQuery, resOrig)
-	fuzzy := fuzzyTitle
-	if fuzzyOrig > fuzzy {
-		fuzzy = fuzzyOrig
-	}
-	return fuzzy
+	return max(fuzzyTitle, fuzzyOrig)
 }
 
 // fuzzyMatchScoreJW використовує Jaro-Winkler для порівняння рядків.

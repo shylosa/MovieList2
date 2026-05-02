@@ -17,7 +17,7 @@ var reSeason = regexp.MustCompile(`(?i)\bS(\d{2})\b(?:E\d{2})?|\bSeason\s*\d+\b|
 var reFrontEpisode = regexp.MustCompile(`(?i)^(s\d{2}e\d{2}[\.\.\-\s_]+)(.*)`)
 
 // reIMDB — детектор IMDb ID (tt1234567)
-var reIMDB = regexp.MustCompile(`(?i)tt\d{7,10}`)
+var reIMDB = regexp.MustCompile(`(?i)\btt\d{7,10}\b`)
 
 // Оновлюємо ParseFilename, щоб він приймав ПОВНИЙ шлях
 func ParseFilename(fullPath string) ParsedFile {
@@ -48,7 +48,7 @@ func ParseFilename(fullPath string) ParsedFile {
 	matches := reYear.FindAllString(searchName, -1)
 	for _, m := range matches {
 		y := mustAtoi(m)
-		// Беремо ПЕРШИЙ знайдений валідний рік. Це вирішує проблему, коли 
+		// Беремо ПЕРШИЙ знайдений валідний рік. Це вирішує проблему, коли
 		// після року йде бітрейт (напр. "2017 BDRip 2000")
 		if y > 1900 && y <= maxAllowedYear {
 			if manualYear == 0 {

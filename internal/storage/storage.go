@@ -3,7 +3,8 @@ package storage
 import (
 	"context"
 	"database/sql"
-	"log"
+	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 
@@ -81,14 +82,24 @@ func (db *DB) InitSchema(ctx context.Context) error {
 	);
 	`
 	_, err := db.db.ExecContext(ctx, query)
-	return err
+	if err != nil {
+		return err
+	}
+
+	// 🔴 ХІРУРГІЧНЕ ВТРУЧАННЯ: Лінива міграція для старих баз.
+	// Якщо таблиця вже існувала, ми маємо явно додати нові колонки.
+	// Ми свідомо ігноруємо помилку тут, бо якщо колонка вже є, SQLite поверне помилку "duplicate column name", що для нас ОК.
+	_, _ = db.db.ExecContext(ctx, `ALTER TABLE movies ADD COLUMN tmdb_id INTEGER;`)
+	_, _ = db.db.ExecContext(ctx, `ALTER TABLE movies ADD COLUMN media_type TEXT;`)
+
+	return nil
 }
 
 func (db *DB) GetAllMovies(ctx context.Context) ([]Movie, error) {
-	query := `SELECT filename, tmdb_id, title_ua, title_en, year, genres, "cast", plot, poster_url, local_poster_path, media_type FROM movies ORDER BY rowid ASC`
+	query := `SELECT filename, COALESCE(tmdb_id, 0), title_ua, title_en, year, genres, "cast", plot, poster_url, local_poster_path, COALESCE(media_type, '') FROM movies ORDER BY rowid ASC`
 	rows, err := db.db.QueryContext(ctx, query)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("GetAllMovies query failed: %w", err)
 	}
 	defer rows.Close()
 
@@ -100,7 +111,7 @@ func (db *DB) GetAllMovies(ctx context.Context) ([]Movie, error) {
 			&m.Genres, &m.Cast, &m.Plot, &m.PosterURL, &m.LocalPosterPath, &m.MediaType,
 		)
 		if err != nil {
-			log.Printf("⚠️ Помилка читання: %v", err)
+			slog.Error("storage_scan_error", slog.Any("error", err))
 			continue
 		}
 		movies = append(movies, m)
@@ -125,7 +136,7 @@ func (db *DB) SaveMovie(ctx context.Context, m Movie) error {
 }
 
 func (db *DB) GetMovieByFilename(ctx context.Context, filename string) (*Movie, error) {
-	query := `SELECT filename, tmdb_id, title_ua, title_en, year, genres, "cast", plot, poster_url, local_poster_path, media_type
+	query := `SELECT filename, COALESCE(tmdb_id, 0), title_ua, title_en, year, genres, "cast", plot, poster_url, local_poster_path, COALESCE(media_type, '')
 			  FROM movies WHERE filename = ?`
 	row := db.db.QueryRowContext(ctx, query, filename)
 	var m Movie
@@ -247,5 +258,11 @@ func (db *DB) GetAIResolution(ctx context.Context, filename string) (*AIResoluti
 func (db *DB) SaveAIResolution(ctx context.Context, r AIResolution) error {
 	query := `INSERT OR REPLACE INTO ai_resolutions (original_filename, resolved_title, year, media_type, confidence) VALUES (?, ?, ?, ?, ?)`
 	_, err := db.db.ExecContext(ctx, query, r.OriginalFilename, r.ResolvedTitle, r.Year, r.MediaType, r.Confidence)
+	return err
+}
+
+func (db *DB) DeleteAIResolution(ctx context.Context, filename string) error {
+	query := `DELETE FROM ai_resolutions WHERE original_filename = ?`
+	_, err := db.db.ExecContext(ctx, query, filename)
 	return err
 }

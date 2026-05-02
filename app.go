@@ -60,7 +60,11 @@ func (a *App) startup(ctx context.Context) {
 		slog.Error("db_critical_error", slog.Any("error", err))
 		os.Exit(1)
 	}
-	_ = a.db.InitSchema(ctx)
+	// 🔴 ХІРУРГІЧНЕ ВТРУЧАННЯ: Перевіряємо та логуємо помилку ініціалізації
+	if err := a.db.InitSchema(ctx); err != nil {
+		slog.Error("db_schema_init_error", slog.Any("error", err))
+		os.Exit(1)
+	}
 }
 
 func (a *App) shutdown(ctx context.Context) {
@@ -129,6 +133,10 @@ func (a *App) DeleteMovie(filename string) error {
 		a.logFront(fmt.Sprintf("❌ Помилка видалення %s: %v", filename, err))
 		return err
 	}
+
+	// 🔴 ХІРУРГІЧНЕ ВТРУЧАННЯ: Очищаємо сліди з L2 кешу ШІ
+	_ = a.db.DeleteAIResolution(a.ctx, filename)
+
 	a.logFront(fmt.Sprintf("🗑 Видалено: %s", filename))
 	return nil
 }
@@ -205,11 +213,14 @@ func (a *App) GetAIModels() ([]string, error) {
 	}
 	a.modelsMutex.RUnlock()
 
-	url := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models?key=%s", a.cfg.GeminiAPIKey)
-
-	// --- ОПТИМІЗАЦІЯ: Захист від зависання мережі (таймаут 10 секунд) ---
+	url := "https://generativelanguage.googleapis.com/v1beta/models"
 	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Get(url)
+	req, err := http.NewRequestWithContext(a.ctx, "GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("x-goog-api-key", a.cfg.GeminiAPIKey)
+	resp, err := client.Do(req)
 
 	if err != nil {
 		return nil, err
@@ -277,6 +288,12 @@ func (a *App) RunScan() {
 	wailsRuntime.EventsEmit(a.ctx, "scan-started")
 
 	scn := scanner.NewScanner(a.cfg)
+
+	// 🟢 Очищуємо кеш від попереднього сканування
+	if a.tmdbClient != nil {
+		a.tmdbClient.ClearCaches()
+	}
+
 	diskPaths, err := scn.GetDiskFiles()
 	if err != nil {
 		a.finalizeScan(fmt.Sprintf("❌ Помилка сканування диску: %v", err))
@@ -324,7 +341,7 @@ func (a *App) RunScan() {
 		wg.Add(1)
 		sem <- struct{}{} // Захоплюємо слот
 
-		go func(filePath string) {
+		go func() {
 			defer wg.Done()
 			defer func() { <-sem }() // Звільняємо слот
 			defer func() {
@@ -337,7 +354,7 @@ func (a *App) RunScan() {
 				return
 			}
 
-			fname := filepath.Base(filePath)
+			fname := filepath.Base(path)
 
 			// 🟢 СТВОРЮЄМО УНІКАЛЬНИЙ TRACE_ID ДЛЯ ЦЬОГО ФАЙЛУ
 			fileTraceID := uuid.New().String()[:8]
@@ -367,7 +384,7 @@ func (a *App) RunScan() {
 			} else {
 				resultsChan <- scanResult{fname: fname, info: nil, needsGemini: true}
 			}
-		}(path)
+		}()
 	}
 
 	// Закриваємо канал у фоні, коли всі воркери відпрацюють
@@ -385,9 +402,9 @@ func (a *App) RunScan() {
 			translationQueue = append(translationQueue, res.fname)
 		} else {
 			// 🟢 ПЕРЕВІРКА L2 КЕШУ: Чи не розпізнавали ми цей файл раніше через ШІ?
-			if cached, _ := a.db.GetAIResolution(ctx, res.fname); cached != nil {
+			if cached, _ := a.db.GetAIResolution(ctx, res.fname); cached != nil && cached.Confidence >= 0.6 {
 				utils.LoggerWithTrace(ctx).Info("gemini_l2_cache_hit", slog.String("file", res.fname), slog.String("resolved", cached.ResolvedTitle))
-				
+
 				// Використовуємо кешовану назву для пошуку в TMDB
 				info, err := a.tmdbClient.FetchByCleanTitle(ctx, cached.ResolvedTitle, strconv.Itoa(cached.Year), tmdb.MediaType(cached.MediaType))
 				if err == nil && info != nil {
@@ -479,6 +496,14 @@ func (a *App) processGeminiQueue(ctx context.Context, filenames []string, aiClie
 				a.logFront(fmt.Sprintf("⚠️ Gemini не розпізнав: '%s'", fname))
 				a.emitProgress(processed, total, "❓ Не розпізнано: "+fname)
 				// 🟢 СТАЛО: Передаємо локальний ctx
+				_ = a.db.SaveMovie(ctx, storage.Movie{Filename: fname})
+				continue
+			}
+
+			// 🔴 ФІЛЬТР КОНФІДЕНЦІЙНОСТІ
+			if rec.Confidence < 0.5 {
+				a.logFront(fmt.Sprintf("⚠️ Gemini має низьку впевненість (%.2f) для '%s'", rec.Confidence, fname))
+				a.emitProgress(processed, total, "❓ Низька впевненість: "+fname)
 				_ = a.db.SaveMovie(ctx, storage.Movie{Filename: fname})
 				continue
 			}

@@ -11,22 +11,25 @@ type contextKey string
 const traceIDKey contextKey = "trace_id"
 
 // InitStructuredLogger створює JSON-логер, який пише у файл logs/app.jsonl
-func InitStructuredLogger() *os.File {
-	os.MkdirAll("logs", 0755)
-	logFile, err := os.OpenFile("logs/app.jsonl", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
-	if err != nil {
-		// Якщо не вдалося відкрити файл, slog буде писати в stderr за замовчуванням
-		return nil
+func InitStructuredLogger() {
+	opts := &slog.HandlerOptions{
+		Level: slog.LevelDebug, // Або який там у тебе рівень
+		ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
+			// Перехоплюємо поле з часом
+			if a.Key == slog.TimeKey {
+				t := a.Value.Time()
+
+				return slog.String(a.Key, t.Format("2006-01-02T15:04:05.000"))
+			}
+			return a
+		},
 	}
 
-	handler := slog.NewJSONHandler(logFile, &slog.HandlerOptions{
-		Level: slog.LevelDebug,
-	})
+	// Застосовуємо опції до JSON хендлера
+	handler := slog.NewJSONHandler(os.Stdout, opts)
 
-	logger := slog.New(handler)
-	slog.SetDefault(logger) // Тепер всі slog.Info() будуть писати сюди
-
-	return logFile
+	// Встановлюємо як логер за замовчуванням
+	slog.SetDefault(slog.New(handler))
 }
 
 // ContextWithTrace додає trace_id до контексту
