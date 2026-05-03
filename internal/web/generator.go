@@ -162,7 +162,7 @@ const htmlLayout = `<!DOCTYPE html>
                 <div class="info">
                     <div class="title-meta-group">
                         <h2 class="title-ua">
-                            <a href="{{if .TmdbID}}https://www.themoviedb.org/movie/{{.TmdbID}}{{else}}https://www.themoviedb.org/search/movie?query={{.TitleUA}}{{end}}"
+                            <a href="{{if .TmdbID}}https://www.themoviedb.org/{{if eq .MediaType "tv"}}tv{{else}}movie{{end}}/{{.TmdbID}}{{else}}https://www.themoviedb.org/search/{{if eq .MediaType "tv"}}tv{{else}}movie{{end}}?query={{.TitleUA}}{{end}}"
                                target="_blank"
                                onclick="event.stopPropagation();">
                                {{.TitleUA}}

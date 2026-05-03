@@ -214,10 +214,7 @@ func (c *Client) searchAndFetch(
 		detailType = MediaTypeTV
 	}
 
-	info, err := c.getMovieDetails(ctx, best.result.ID, originalFilename)
-	if detailType == MediaTypeTV {
-		info, err = c.getTVDetails(ctx, best.result.ID, originalFilename)
-	}
+	info, err := c.GetDetails(ctx, detailType, best.result.ID, originalFilename)
 
 	if err == nil && info != nil {
 		c.searchCache.Store(cacheKey, info)

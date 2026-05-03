@@ -56,13 +56,14 @@ func (c *Client) getMovieDetails(ctx context.Context, id int, originalFilename s
 
 		if finalInfo == nil {
 			finalInfo = &MovieInfo{
-				TMDBID:  d.ID,
-				TitleUA: d.Title,
-				TitleEN: d.OriginalTitle,
-				Year:    extractYearFromDate(d.ReleaseDate),
-				Plot:    d.Overview,
-				Genres:  joinGenres(d.Genres),
-				Cast:    joinCast(d.Credits.Cast),
+				TMDBID:    d.ID,
+				TitleUA:   d.Title,
+				TitleEN:   d.OriginalTitle,
+				Year:      extractYearFromDate(d.ReleaseDate),
+				Plot:      d.Overview,
+				Genres:    joinGenres(d.Genres),
+				Cast:      joinCast(d.Credits.Cast),
+				MediaType: MediaTypeMovie,
 			}
 			if d.PosterPath != "" {
 				finalInfo.PosterURL = imageBaseURL + d.PosterPath
@@ -118,13 +119,14 @@ func (c *Client) getTVDetails(ctx context.Context, id int, originalFilename stri
 
 		if finalInfo == nil {
 			finalInfo = &MovieInfo{
-				TMDBID:  d.ID,
-				TitleUA: d.Name,
-				TitleEN: d.OriginalName,
-				Year:    extractYearFromDate(d.FirstAirDate),
-				Plot:    d.Overview,
-				Genres:  joinGenres(d.Genres),
-				Cast:    joinCast(d.Credits.Cast),
+				TMDBID:    d.ID,
+				TitleUA:   d.Name,
+				TitleEN:   d.OriginalName,
+				Year:      extractYearFromDate(d.FirstAirDate),
+				Plot:      d.Overview,
+				Genres:    joinGenres(d.Genres),
+				Cast:      joinCast(d.Credits.Cast),
+				MediaType: MediaTypeTV,
 			}
 			if d.PosterPath != "" {
 				finalInfo.PosterURL = imageBaseURL + d.PosterPath

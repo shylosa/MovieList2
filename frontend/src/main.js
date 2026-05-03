@@ -355,9 +355,10 @@ function renderMovies(movies) {
     movies.forEach((m) => {
         const title = m.title_ua || m.title_en || "Невідомо";
         const query = encodeURIComponent(title);
+        const urlType = m.media_type === "tv" ? "tv" : "movie";
         let tmdbUrl = (m.tmdb_id && m.tmdb_id !== 0)
-            ? `https://www.themoviedb.org/movie/${m.tmdb_id}`
-            : `https://www.themoviedb.org/search/movie?query=${query}`;
+            ? `https://www.themoviedb.org/${urlType}/${m.tmdb_id}`
+            : `https://www.themoviedb.org/search/${urlType}?query=${query}`;
 
         // 👈 ФІКС: Дістаємо значення з кешу
         const hintVal = hintsCache[m.filename] || "";
