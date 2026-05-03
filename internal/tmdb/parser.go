@@ -5,13 +5,19 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode"
 
 	ptn "github.com/razsteinmetz/go-ptn"
 )
 
 // reSeason — детектор серіальних маркерів що go-ptn пропускає:
 // S07 (без епізоду), Season 3, сезон
-var reSeason = regexp.MustCompile(`(?i)\bS(\d{2})\b(?:E\d{2})?|\bSeason\s*\d+\b|\bсезон\b`)
+var (
+	reSeason        = regexp.MustCompile(`(?i)\bS(\d{2})\b(?:E\d{2})?|\bSeason\s*\d+\b|\bсезон\b`)
+	rePunctFallback = regexp.MustCompile(`[._]`)
+	reSpaceFallback = regexp.MustCompile(`\s{2,}`)
+	zeroReplacer    = strings.NewReplacer("O", "0", "О", "0", "o", "0", "о", "0")
+)
 
 // reFrontEpisode — детектор SххEхх на ПОЧАТКУ рядка (до назви фільму), що ламає go-ptn.
 var reFrontEpisode = regexp.MustCompile(`(?i)^(s\d{2}e\d{2}[\.\.\-\s_]+)(.*)`)
@@ -37,10 +43,7 @@ func ParseFilename(fullPath string) ParsedFile {
 
 	// 🛡️ АГРЕСИВНИЙ ПОШУК РОКУ (Рятує від помилок go-ptn)
 	// Нормалізуємо одруківки: латинська та кирилична "О" замість нуля (напр. 2O15 -> 2015)
-	searchName := strings.ReplaceAll(name, "O", "0")
-	searchName = strings.ReplaceAll(searchName, "О", "0") // кирилична
-	searchName = strings.ReplaceAll(searchName, "o", "0")
-	searchName = strings.ReplaceAll(searchName, "о", "0")
+	searchName := zeroReplacer.Replace(name)
 
 	manualYear := 0
 	maxAllowedYear := time.Now().Year() + 1 // +1 для ранніх WEB-релізів/анонсів
@@ -127,8 +130,8 @@ func cleanResidual(s string) string {
 
 // cleanFallback — мінімальне очищення якщо go-ptn впав
 func cleanFallback(name string) string {
-	s := regexp.MustCompile(`[._]`).ReplaceAllString(name, " ")
-	return strings.TrimSpace(regexp.MustCompile(`\s{2,}`).ReplaceAllString(s, " "))
+	s := rePunctFallback.ReplaceAllString(name, " ")
+	return strings.TrimSpace(reSpaceFallback.ReplaceAllString(s, " "))
 }
 
 // detectLanguage визначає мову назви (кирилиця або латиниця)
@@ -141,13 +144,7 @@ func detectLanguage(s string) TitleLanguage {
 	return TitleLangLatin
 }
 
-// isCyrillic перевіряє чи є руна кириличною (рос + укр алфавіти)
+// isCyrillic перевіряє чи є руна кириличною.
 func isCyrillic(r rune) bool {
-	return (r >= 'а' && r <= 'я') ||
-		(r >= 'А' && r <= 'Я') ||
-		r == 'і' || r == 'І' ||
-		r == 'ї' || r == 'Ї' ||
-		r == 'є' || r == 'Є' ||
-		r == 'ґ' || r == 'Ґ' ||
-		r == 'ё' || r == 'Ё'
+	return unicode.Is(unicode.Cyrillic, r)
 }

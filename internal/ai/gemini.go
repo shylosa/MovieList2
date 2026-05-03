@@ -1,20 +1,19 @@
 package ai
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log/slog"
-	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"movielist-app/internal/config"
 	"movielist-app/internal/utils"
 
 	"golang.org/x/time/rate"
+	"google.golang.org/genai"
 )
 
 // RecognizedTitle — відповідь Gemini для одного файлу.
@@ -37,39 +36,79 @@ type RecognizedTitle struct {
 	Confidence   float64 `json:"confidence"`    // Оцінка впевненості 0.0-1.0, 0 якщо не вказано
 }
 
-// Структури для анмаршалінгу помилок Google RPC (RetryInfo)
-type geminiErrDetail struct {
-	Type       string `json:"@type"`
-	RetryDelay string `json:"retryDelay"`
-}
-
-type geminiErrResp struct {
-	Error struct {
-		Code    int               `json:"code"`
-		Message string            `json:"message"`
-		Status  string            `json:"status"`
-		Details []geminiErrDetail `json:"details"`
-	} `json:"error"`
-}
-
 type Client struct {
-	cfg        *config.Config
-	httpClient *http.Client
-	limiter    *rate.Limiter
+	cfg          *config.Config
+	limiter      *rate.Limiter
+	// 🟢 ДОДАНО: Динамічний каскад та м'ютекс для його захисту
+	activeModels []string
+	modelsMu     sync.RWMutex
+	genaiClient  *genai.Client
+	initMu       sync.Mutex
 }
 
 func NewClient(cfg *config.Config) *Client {
 	return &Client{
-		cfg:        cfg,
-		httpClient: &http.Client{Timeout: 120 * time.Second},
+		cfg: cfg,
 		// rate.Every(4 * time.Second) = 15 RPM. Burst = 1.
 		limiter: rate.NewLimiter(rate.Every(4*time.Second), 1),
 	}
 }
 
+// SetModels дозволяє оновити список доступних моделей "на льоту"
+func (c *Client) SetModels(models []string) {
+	c.modelsMu.Lock()
+	defer c.modelsMu.Unlock()
+	// Копіюємо слайс, щоб уникнути data race
+	c.activeModels = append([]string(nil), models...)
+}
+
+// getModels повертає актуальний список моделей для каскаду
+func (c *Client) getModels() []string {
+	c.modelsMu.RLock()
+	defer c.modelsMu.RUnlock()
+
+	// Пріоритет 1: Динамічний список від API
+	if len(c.activeModels) > 0 {
+		return append([]string(nil), c.activeModels...)
+	}
+	// Пріоритет 2: Конфіг
+	if len(c.cfg.GeminiModels) > 0 {
+		return append([]string(nil), c.cfg.GeminiModels...)
+	}
+	// Пріоритет 3: Хардкод-фолбек
+	return []string{"gemini-2.0-flash", "gemini-2.0-pro", "gemini-1.5-flash"}
+}
+
 func (c *Client) waitForRateLimit(ctx context.Context) error {
 	return c.limiter.Wait(ctx)
 }
+
+// getGenaiClient ліниво ініціалізує singleton genai.Client.
+func (c *Client) getGenaiClient(ctx context.Context) (*genai.Client, error) {
+	c.initMu.Lock()
+	defer c.initMu.Unlock()
+
+	if c.genaiClient != nil {
+		return c.genaiClient, nil
+	}
+
+	clientConfig := &genai.ClientConfig{
+		APIKey:  c.cfg.GeminiAPIKey,
+		Backend: genai.BackendGeminiAPI,
+	}
+
+	client, err := genai.NewClient(ctx, clientConfig)
+	if err != nil {
+		return nil, fmt.Errorf("помилка ініціалізації genai: %w", err)
+	}
+
+	c.genaiClient = client
+	return c.genaiClient, nil
+}
+
+// Close залишено для уніфікованого lifecycle API клієнта.
+// У поточній версії google.golang.org/genai Client не має методу Close().
+func (c *Client) Close() {}
 
 // RecognizeBulk — пакетне розпізнавання імен файлів через Gemini.
 // Повертає дані для пошуку в TMDB + fallback-поля для мержу.
@@ -86,9 +125,10 @@ func (c *Client) RecognizeBulk(ctx context.Context, filenames []string) ([]Recog
 
 func (c *Client) requestWithRetry(ctx context.Context, prompt string) ([]RecognizedTitle, error) {
 	var lastErr error
+	models := c.getModels() // 🟢 ВИПРАВЛЕННЯ: Беремо актуальний каскад
 
-	// Йдемо по списку моделей з конфігу (каскад). Пауз немає!
-	for i, modelName := range c.cfg.GeminiModels {
+	// Йдемо по списку моделей (каскад)
+	for i, modelName := range models {
 		// Перевіряємо чи не скасовано контекст користувачем
 		select {
 		case <-ctx.Done():
@@ -122,123 +162,89 @@ func (c *Client) requestWithRetry(ctx context.Context, prompt string) ([]Recogni
 	}
 
 	// Якщо цикл завершився, значить ВСІ моделі зі списку впали
-	utils.LoggerWithTrace(ctx).Error("gemini_all_models_failed",
-		slog.Int("model_count", len(c.cfg.GeminiModels)),
-		slog.Any("last_error", lastErr),
-	)
-	return nil, fmt.Errorf("всі моделі ШІ недоступні. Остання помилка: %v", lastErr)
+	return nil, fmt.Errorf("всі моделі ШІ недоступні: %w", lastErr)
 }
 
 func (c *Client) makeRequest(ctx context.Context, prompt, modelName string) ([]RecognizedTitle, error) {
-	url := fmt.Sprintf(
-		"https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent",
-		modelName,
-	)
-
-	payload := map[string]any{
-		"contents": []map[string]any{
-			{"parts": []map[string]string{{"text": prompt}}},
-		},
-		"generationConfig": map[string]any{
-			"response_mime_type": "application/json",
-			"response_schema":    responseSchema(),
-			"temperature":        0.05,
-			"max_output_tokens":  8192,
-		},
-	}
-
-	payloadBytes, err := json.Marshal(payload)
-	if err != nil {
+	if err := c.waitForRateLimit(ctx); err != nil {
 		return nil, err
 	}
 
-	for {
-		if err := c.waitForRateLimit(ctx); err != nil {
-			return nil, err
-		}
+	client, err := c.getGenaiClient(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("помилка genai клієнта: %w", err)
+	}
 
-		req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(payloadBytes))
-		if err != nil {
-			return nil, err
-		}
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("x-goog-api-key", c.cfg.GeminiAPIKey)
+	config := &genai.GenerateContentConfig{
+		Temperature:      genai.Ptr[float32](0.05),
+		ResponseMIMEType: "application/json",
+		ResponseSchema:   buildGenAISchema(),
+	}
 
-		resp, err := c.httpClient.Do(req)
-		if err != nil {
-			return nil, err
-		}
+	resp, err := client.Models.GenerateContent(ctx, modelName, genai.Text(prompt), config)
+	if err != nil {
+		return nil, fmt.Errorf("помилка API Gemini: %w", err)
+	}
 
-		respBody, err := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		if err != nil {
-			return nil, err
-		}
+	if len(resp.Candidates) == 0 || len(resp.Candidates[0].Content.Parts) == 0 {
+		return nil, fmt.Errorf("модель повернула порожню відповідь")
+	}
 
-		if resp.StatusCode == http.StatusOK {
-			return parseResponse(respBody)
-		}
+	rawText := resp.Text()
 
-		if resp.StatusCode == http.StatusTooManyRequests {
-			var apiErr geminiErrResp
-			if err := json.Unmarshal(respBody, &apiErr); err == nil {
-				for _, detail := range apiErr.Error.Details {
-					if detail.Type == "type.googleapis.com/google.rpc.RetryInfo" && detail.RetryDelay != "" {
-						delay, parseErr := time.ParseDuration(detail.RetryDelay)
-						if parseErr == nil {
-							utils.LoggerWithTrace(ctx).Warn("api_error",
-								slog.String("stage", "gemini"),
-								slog.String("error_type", "rate_limit"),
-								slog.Int("http_code", 429),
-								slog.Bool("retryable", true),
-								slog.Duration("retry_after", delay),
-								slog.String("model", modelName),
-							)
-							select {
-							case <-time.After(delay):
-								continue // Повторюємо запит до тієї ж моделі
-							case <-ctx.Done():
-								return nil, ctx.Err()
-							}
-						}
-					}
-				}
-			}
-			// Якщо RetryInfo немає або парсинг впав — повертаємо помилку (для переходу на іншу модель у каскаді)
-			return nil, fmt.Errorf("HTTP 429: %s", string(respBody))
-		}
+	var results []RecognizedTitle
+	if err := json.Unmarshal([]byte(rawText), &results); err != nil {
+		return nil, fmt.Errorf("неможливо розпарсити JSON від моделі: %w", err)
+	}
 
-		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(respBody))
+	return results, nil
+}
+
+// buildGenAISchema — типізована схема для structured output у genai SDK.
+func buildGenAISchema() *genai.Schema {
+	return &genai.Schema{
+		Type: genai.TypeArray,
+		Items: &genai.Schema{
+			Type: genai.TypeObject,
+			Properties: map[string]*genai.Schema{
+				"original_file": {Type: genai.TypeString, Description: "exact original filename as provided, unchanged"},
+				"en_title":      {Type: genai.TypeString, Description: "original English title for TMDB search. Must be the international release title, not a translation."},
+				"title_ua":      {Type: genai.TypeString, Description: "official Ukrainian title. Empty string if unknown - do not invent."},
+				"year":          {Type: genai.TypeInteger, Nullable: genai.Ptr(true), Description: "release year. null if uncertain."},
+				"media_type":    {Type: genai.TypeString, Description: "\"movie\" or \"tv\". Use \"tv\" only for clear series markers."},
+				"plot":          {Type: genai.TypeString, Description: "2-3 sentence plot summary in Ukrainian."},
+				"genres":        {Type: genai.TypeString, Description: "comma-separated genres in Ukrainian."},
+				"cast":          {Type: genai.TypeString, Description: "3-5 main actor names."},
+				"confidence":    {Type: genai.TypeNumber, Description: "Confidence score 0.0-1.0, 0 if not provided."},
+			},
+			Required: []string{"original_file", "en_title", "media_type"},
+		},
 	}
 }
 
-// responseSchema — повна схема з fallback-полями для мержу з TMDB
-func responseSchema() map[string]any {
-	return map[string]any{
-		"type": "ARRAY",
-		"items": map[string]any{
-			"type": "OBJECT",
-			"properties": map[string]any{
-				"original_file": map[string]any{"type": "STRING", "description": "exact original filename as provided, unchanged"},
-				"en_title":      map[string]any{"type": "STRING", "description": "original English title for TMDB search. Must be the international release title, not a translation."},
-				"title_ua":      map[string]any{"type": "STRING", "description": "official Ukrainian title. Empty string if unknown — do not invent."},
-				"year":          map[string]any{"type": "INTEGER", "nullable": true, "description": "release year. null if uncertain."},
-				"media_type":    map[string]any{"type": "STRING", "description": "\"movie\" or \"tv\". Use \"tv\" only for clear series markers."},
-				"plot":          map[string]any{"type": "STRING", "description": "2-3 sentence plot summary in Ukrainian."},
-				"genres":        map[string]any{"type": "STRING", "description": "comma-separated genres in Ukrainian."},
-				"cast":          map[string]any{"type": "STRING", "description": "3-5 main actor names."},
-				"confidence":    map[string]any{"type": "NUMBER", "description": "Confidence score 0.0-1.0, 0 if not provided."},
+func buildBulkTranslateSchema() *genai.Schema {
+	return &genai.Schema{
+		Type: genai.TypeArray,
+		Items: &genai.Schema{
+			Type: genai.TypeObject,
+			Properties: map[string]*genai.Schema{
+				"filename":       {Type: genai.TypeString},
+				"title":          {Type: genai.TypeString},
+				"original_title": {Type: genai.TypeString},
+				"plot":           {Type: genai.TypeString},
 			},
-			"required": []string{"original_file", "en_title", "media_type"},
+			Required: []string{"filename", "title", "plot"},
 		},
 	}
 }
 
 // buildPrompt — промпт з прикладами транслітератів і правилами мержу
 func buildPrompt(filenames []string) string {
-	list := ""
+	var sb strings.Builder
 	for _, f := range filenames {
-		list += fmt.Sprintf("- %s\n", f)
+		sb.WriteString("- ")
+		sb.WriteString(f)
+		sb.WriteString("\n")
 	}
 
 	return fmt.Sprintf(`You are a movie database expert. Your goal is to find the OFFICIAL ORIGINAL (English) title of the movie on IMDB/TMDB based on the provided transliterated or localized name and year.
@@ -267,16 +273,16 @@ CYRILLIC EXAMPLES:
 - "Женщины" → en_title: "The Women" (2008)
 - "Иллюзия обмана 3" → en_title: "Now You See Me 3"
 - "Пригоди бравого вояка Швейка" → en_title: "The Good Soldier Švejk"
-- "Кошачьи миры Луиса Уэйна" → en_title: "The Electrical Life of Louis Wain"
+- "Кошачьи мири Луиса Уэйна" → en_title: "The Electrical Life of Louis Wain"
 
 CRITICAL TRANSLATION RULES:
 1. DO NOT translate localized titles literally! If you see a Russian localized title (e.g. "Воздушное ограбление", "Решала. Агент на миллиард"), you MUST find the actual global movie release matching that title and year (e.g. "Lift", "Mercato").
 2. For transliterated files (e.g. "Vrag.2013", "Sekretnyi.Agent"), reverse-engineer the original Russian title ("Враг", "Секретный агент") and find the exact TMDB movie ("Enemy", "The Secret Agent").
 3. Always verify the movie release year matches the filename!
-4. CRITICAL RULE: If you are not 100% sure about the match between the localized title and the original movie, return null. DO NOT guess or hallucinate movies based solely on matching genres and release years. Accuracy is strictly prioritized over returning a result.
+4. CRITICAL RULE: If you are not 100%% sure about the match between the localized title and the original movie, return an empty string "" for the "en_title". DO NOT guess or hallucinate movies based solely on matching genres and release years. Accuracy is strictly prioritized over returning a result.
 
 FIELD RULES:
-1. en_title: exact TMDB title. For non-English originals use the most common TMDB search title.
+1. en_title: exact TMDB title. For non-English originals use the most common TMDB search title. Empty string "" if uncertain.
 2. title_ua: official Ukrainian localization only. Empty string "" if unknown.
 3. year: from filename if present. null if no year or uncertain.
 4. plot: Ukrainian, 2-3 sentences. Empty string "" if you don't know this film.
@@ -285,168 +291,47 @@ FIELD RULES:
 7. media_type: "tv" only with explicit S01/Season markers. Otherwise "movie".
 
 Files to process:
-%s`, list)
+%s`, sb.String())
 }
 
-// parseResponse витягує масив результатів з відповіді Gemini
-func parseResponse(body []byte) ([]RecognizedTitle, error) {
-	var googleResp struct {
-		Candidates []struct {
-			Content struct {
-				Parts []struct {
-					Text string `json:"text"`
-				} `json:"parts"`
-			} `json:"content"`
-		} `json:"candidates"`
-	}
-
-	if err := json.Unmarshal(body, &googleResp); err != nil {
-		return nil, fmt.Errorf("розбір відповіді Gemini: %w", err)
-	}
-
-	if len(googleResp.Candidates) == 0 ||
-		len(googleResp.Candidates[0].Content.Parts) == 0 {
-		return nil, fmt.Errorf("Gemini повернув порожню відповідь")
-	}
-
-	rawText := googleResp.Candidates[0].Content.Parts[0].Text
-
-	var results []RecognizedTitle
-	if err := json.Unmarshal([]byte(rawText), &results); err == nil {
-		return results, nil
-	}
-
-	// Fallback: масив всередині об'єкта-обгортки
-	var wrapper map[string]json.RawMessage
-	if err := json.Unmarshal([]byte(rawText), &wrapper); err != nil {
-		limit := 200
-		if len(rawText) < limit {
-			limit = len(rawText)
-		}
-		return nil, fmt.Errorf("неможливо розпарсити відповідь: %s", rawText[:limit])
-	}
-
-	for _, val := range wrapper {
-		var results []RecognizedTitle
-		if err := json.Unmarshal(val, &results); err == nil && len(results) > 0 {
-			return results, nil
-		}
-	}
-
-	return nil, fmt.Errorf("масив результатів не знайдено у відповіді Gemini")
-}
 
 // translateWithRetry — універсальний метод перекладу з каскадом моделей та ретраями
 func (c *Client) translateWithRetry(ctx context.Context, prompt string, fallbackText string) string {
-	reqBody := map[string]interface{}{
-		"contents": []map[string]interface{}{
-			{"parts": []map[string]interface{}{{"text": prompt}}},
-		},
-		"generationConfig": map[string]interface{}{
-			"temperature": 0.2,
-		},
-	}
-	bodyBytes, _ := json.Marshal(reqBody)
-
-	// 🛡️ ПРАВИЛЬНЕ ВИПРАВЛЕННЯ: Беремо моделі з нашого центрального конфігу
-	models := c.cfg.GeminiModels
-
-	// Якщо в .env нічого не вказали (або змінна порожня), ставимо безпечний дефолт
-	if len(models) == 0 {
-		models = []string{"gemini-2.5-flash", "gemini-2.5-pro", "gemini-flash-latest", "gemini-2.5-flash-lite"}
+	models := c.getModels()
+	client, err := c.getGenaiClient(ctx)
+	if err != nil {
+		utils.LoggerWithTrace(ctx).Error("genai_client_init_failed", slog.Any("error", err))
+		return fallbackText
 	}
 
-	for _, model := range models {
-		url := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent", model)
+	for _, modelName := range models {
+		if ctx.Err() != nil {
+			utils.LoggerWithTrace(ctx).Info("translation_cancelled")
+			return fallbackText
+		}
 
-		for attempt := 1; attempt <= 3; attempt++ {
-			_ = c.waitForRateLimit(ctx)
+		if err := c.waitForRateLimit(ctx); err != nil {
+			utils.LoggerWithTrace(ctx).Warn("translation_rate_limit_wait_failed", slog.Any("error", err))
+			return fallbackText
+		}
 
-			req, _ := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(bodyBytes))
-			req.Header.Set("Content-Type", "application/json")
-			req.Header.Set("x-goog-api-key", c.cfg.GeminiAPIKey)
+		config := &genai.GenerateContentConfig{
+			Temperature: genai.Ptr[float32](0.2),
+		}
 
-			resp, err := c.httpClient.Do(req)
-			if err != nil {
-				utils.LoggerWithTrace(ctx).Warn("translation_request_failed", slog.String("model", model), slog.Any("error", err))
-				continue
-			}
+		resp, err := client.Models.GenerateContent(ctx, modelName, genai.Text(prompt), config)
+		if err != nil {
+			utils.LoggerWithTrace(ctx).Warn("model_translation_failed", slog.String("model", modelName), slog.Any("error", err))
+			continue
+		}
 
-			// ⚡ Реакція на ліміти (429 Too Many Requests) з RetryInfo
-			if resp.StatusCode == http.StatusTooManyRequests {
-				body, _ := io.ReadAll(resp.Body)
-				resp.Body.Close()
-
-				var apiErr geminiErrResp
-				if err := json.Unmarshal(body, &apiErr); err == nil {
-					for _, detail := range apiErr.Error.Details {
-						if detail.Type == "type.googleapis.com/google.rpc.RetryInfo" && detail.RetryDelay != "" {
-							delay, parseErr := time.ParseDuration(detail.RetryDelay)
-							if parseErr == nil {
-								utils.LoggerWithTrace(ctx).Warn("api_error",
-									slog.String("stage", "gemini_translation"),
-									slog.String("error_type", "rate_limit"),
-									slog.Int("http_code", 429),
-									slog.Bool("retryable", true),
-									slog.Duration("retry_after", delay),
-									slog.String("model", model),
-								)
-								select {
-								case <-time.After(delay):
-									goto nextAttempt
-								case <-ctx.Done():
-									return fallbackText
-								}
-							}
-						}
-					}
-				}
-
-				utils.LoggerWithTrace(ctx).Warn("api_error_no_retry_info",
-					slog.String("stage", "gemini_translation"),
-					slog.String("model", model),
-					slog.Int("http_code", 429),
-				)
-				break // Виходимо з циклу спроб для цієї моделі
-			}
-
-			if resp.StatusCode == http.StatusOK {
-				body, _ := io.ReadAll(resp.Body)
-				resp.Body.Close()
-
-				var googleResp struct {
-					Candidates []struct {
-						Content struct {
-							Parts []struct {
-								Text string `json:"text"`
-							} `json:"parts"`
-						} `json:"content"`
-					} `json:"candidates"`
-				}
-
-				if err := json.Unmarshal(body, &googleResp); err == nil && len(googleResp.Candidates) > 0 && len(googleResp.Candidates[0].Content.Parts) > 0 {
-					translated := strings.TrimSpace(googleResp.Candidates[0].Content.Parts[0].Text)
-					translated = strings.Trim(translated, `"'«»`)
-					if translated != "" {
-						return translated // Успішний переклад!
-					}
-				}
-			} else {
-				resp.Body.Close()
-			}
-
-		nextAttempt:
-
-			// Затримка з повагою до контексту (кнопки "Стоп")
-			select {
-			case <-ctx.Done():
-				utils.LoggerWithTrace(ctx).Info("translation_cancelled")
-				return fallbackText
-			case <-time.After(time.Second * 2):
-				// продовжуємо цикл
+		if len(resp.Candidates) > 0 && len(resp.Candidates[0].Content.Parts) > 0 {
+			translated := strings.TrimSpace(resp.Text())
+			translated = strings.Trim(translated, `"'«»`)
+			if translated != "" {
+				return translated
 			}
 		}
-		utils.LoggerWithTrace(ctx).Warn("model_translation_failed", slog.String("model", model))
 	}
 
 	utils.LoggerWithTrace(ctx).Error("all_translation_models_failed")
@@ -485,9 +370,10 @@ func (c *Client) TranslatePlot(ctx context.Context, text string) string {
 }
 
 type BulkTranslateItem struct {
-	Filename string `json:"filename"`
-	Title    string `json:"title"`
-	Plot     string `json:"plot"`
+	Filename      string `json:"filename"`
+	Title         string `json:"title"`
+	OriginalTitle string `json:"original_title,omitempty"` // 🟢 НОВЕ: для контексту при перекладі
+	Plot          string `json:"plot"`
 }
 
 // TranslateBulk виконує пакетний переклад назв та описів за один HTTP-запит.
@@ -496,39 +382,54 @@ func (c *Client) TranslateBulk(ctx context.Context, items []BulkTranslateItem) (
 		return nil, nil
 	}
 
+	client, err := c.getGenaiClient(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("помилка клієнта genai: %w", err)
+	}
+
 	inputJSON, _ := json.MarshalIndent(items, "", "  ")
 
 	prompt := fmt.Sprintf(`Твоя задача — масово знайти офіційні українські назви та описи для списку медіафайлів.
 
 ПРАВИЛА:
-1. Якщо title не є офіційною українською назвою (наприклад: російська, піратська, трансліт), знайди правильну українську назву з прокату/стрімінгів.
+1. Якщо title не є офіційною українською назвою (наприклад: російська, піратська, трансліт), знайди правильну українську назву з прокату/стрімінгів. Орієнтуйся на "original_title" для точного пошуку.
 2. Якщо plot порожній або не українською — знайди або переклади офіційний опис українською.
-3. Поверни результат ВИКЛЮЧНО у форматі JSON масиву об'єктів (ідентично до вхідного формату).
-4. КЛЮЧОВЕ: Збережи значення поля "filename" без змін, щоб я міг співставити результати!
+3. КЛЮЧОВЕ: Збережи значення поля "filename" без змін, щоб я міг співставити результати!
+4. ЗАХИСТ ВІД ГАЛЮЦИНАЦІЙ: Якщо офіційної української прокатної назви не існує або ти її не знаєш, ЗАЛИШ "original_title" БЕЗ ЗМІН у полі "title". Не вигадуй назви.
 
 Вхідні дані:
 %s`, string(inputJSON))
 
-	resp := c.translateWithRetry(ctx, prompt, "")
-	if resp == "" {
-		return nil, fmt.Errorf("ШІ повернув порожню відповідь")
+	var lastErr error
+	for _, modelName := range c.getModels() {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+
+		if err := c.waitForRateLimit(ctx); err != nil {
+			return nil, err
+		}
+
+		config := &genai.GenerateContentConfig{
+			Temperature:      genai.Ptr[float32](0.1),
+			ResponseMIMEType: "application/json",
+			ResponseSchema:   buildBulkTranslateSchema(),
+		}
+
+		resp, err := client.Models.GenerateContent(ctx, modelName, genai.Text(prompt), config)
+		if err == nil && len(resp.Candidates) > 0 {
+			var results []BulkTranslateItem
+			unmarshalErr := json.Unmarshal([]byte(resp.Text()), &results)
+			if unmarshalErr == nil {
+				return results, nil
+			}
+			lastErr = fmt.Errorf("parse error on %s: %w", modelName, unmarshalErr)
+			continue
+		}
+
+		lastErr = err
+		utils.LoggerWithTrace(ctx).Warn("bulk_translate_failed", slog.String("model", modelName), slog.Any("error", err))
 	}
 
-	// Очищаємо від можливого Markdown-форматування
-	resp = strings.TrimSpace(resp)
-	resp = strings.TrimPrefix(resp, "```json")
-	resp = strings.TrimPrefix(resp, "```")
-	resp = strings.TrimSuffix(resp, "```")
-	resp = strings.TrimSpace(resp)
-
-	var results []BulkTranslateItem
-	if err := json.Unmarshal([]byte(resp), &results); err != nil {
-		utils.LoggerWithTrace(ctx).Error("bulk_translate_parse_error",
-			slog.Any("error", err),
-			slog.String("response", resp),
-		)
-		return nil, fmt.Errorf("помилка парсингу JSON: %w", err)
-	}
-
-	return results, nil
+	return nil, fmt.Errorf("всі моделі для масового перекладу недоступні: %w", lastErr)
 }

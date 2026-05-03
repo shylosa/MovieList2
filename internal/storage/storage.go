@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 
 	_ "modernc.org/sqlite"
+	"movielist-app/internal/utils"
 )
 
 // Movie описує структуру фільму в базі даних (уніфіковано)
@@ -133,6 +134,55 @@ func (db *DB) SaveMovie(ctx context.Context, m Movie) error {
 		m.Genres, m.Cast, m.Plot, m.PosterURL, m.LocalPosterPath, m.MediaType,
 	)
 	return err
+}
+
+// SaveMoviesBatch — масовий запис через єдину транзакцію
+func (db *DB) SaveMoviesBatch(ctx context.Context, movies []Movie) error {
+	if len(movies) == 0 {
+		return nil
+	}
+
+	// Відкриваємо транзакцію
+	tx, err := db.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin tx failed: %w", err)
+	}
+	defer tx.Rollback() // Безпечний відкат, якщо Commit не спрацює
+
+	query := `
+		INSERT OR REPLACE INTO movies
+		(filename, tmdb_id, title_ua, title_en, year, genres, "cast", plot, poster_url, local_poster_path, media_type)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`
+
+	// Підготовлений вираз для оптимізації
+	stmt, err := tx.PrepareContext(ctx, query)
+	if err != nil {
+		return fmt.Errorf("prepare stmt failed: %w", err)
+	}
+	defer stmt.Close()
+
+	// Виконуємо вставку в пам'яті
+	for _, m := range movies {
+		// 🔴 ХІРУРГІЧНЕ ВТРУЧАННЯ: Перериваємо цикл безпечно, якщо контекст скасовано.
+		if err := ctx.Err(); err != nil {
+			utils.LoggerWithTrace(ctx).Warn("batch_insert_cancelled", slog.Any("error", err))
+			return err
+		}
+
+		_, err := stmt.ExecContext(ctx,
+			m.Filename, m.TmdbID, m.TitleUA, m.TitleEN, m.Year,
+			m.Genres, m.Cast, m.Plot, m.PosterURL, m.LocalPosterPath, m.MediaType,
+		)
+		if err != nil {
+			// 🔴 ХІРУРГІЧНЕ ВТРУЧАННЯ: Логуємо помилку для конкретного файлу і йдемо далі
+			slog.Warn("batch_insert_skip", slog.String("file", m.Filename), slog.Any("err", err))
+			continue
+		}
+	}
+
+	// Фіксуємо зміни на диск за один раз
+	return tx.Commit()
 }
 
 func (db *DB) GetMovieByFilename(ctx context.Context, filename string) (*Movie, error) {

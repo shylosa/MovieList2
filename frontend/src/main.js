@@ -363,6 +363,9 @@ function renderMovies(movies) {
         const hintVal = hintsCache[m.filename] || "";
         const isChecked = checkedCache.has(m.filename) ? "checked" : "";
 
+        const isUnrecognized = !m.tmdb_id || m.tmdb_id === 0;
+        const titleColor = isUnrecognized ? "var(--warn-yellow)" : "#58a6ff";
+
         html += `
             <div class="movie-row">
                 <div class="col-cb"><input type="checkbox" class="row-cb" data-filename="${m.filename}" ${isChecked}></div>
@@ -370,7 +373,7 @@ function renderMovies(movies) {
                 <div class="col-arr">➜</div>
                 <div class="col-year">${m.year || '—'}</div>
                 <div class="col-title">
-                    <span class="tmdb-link" data-url="${tmdbUrl}" style="color: #58a6ff; cursor: pointer; text-decoration: none; font-weight: 500;">
+                    <span class="tmdb-link" data-url="${tmdbUrl}" style="color: ${titleColor}; cursor: pointer; text-decoration: none; font-weight: 500;">
                         ${title}
                     </span>
                 </div>

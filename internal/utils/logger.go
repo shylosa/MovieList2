@@ -2,33 +2,52 @@ package utils
 
 import (
 	"context"
+	"io"
 	"log/slog"
 	"os"
+	"path/filepath"
 )
 
 type contextKey string
 
 const traceIDKey contextKey = "trace_id"
 
-// InitStructuredLogger створює JSON-логер, який пише у файл logs/app.jsonl
-func InitStructuredLogger() {
+// safeWriter обгортає io.Writer і глушить помилки запису.
+// Якщо файл логів заблокується, це не заблокує вивід у консоль і роботу програми.
+type safeWriter struct {
+	w io.Writer
+}
+
+func (sw safeWriter) Write(p []byte) (n int, err error) {
+	n, _ = sw.w.Write(p) // Ігноруємо помилку запису
+	return n, nil        // Завжди повертаємо nil, щоб MultiWriter не переривався
+}
+
+// InitLogger ініціалізує структуроване логування (slog) з виводом у консоль та файл.
+func InitLogger() {
+	os.MkdirAll("logs", 0755)
+
+	// Відкриваємо файл. Якщо не вдалося — просто не використовуємо його, але програма працює
+	logFile, err := os.OpenFile(filepath.Join("logs", "app.jsonl"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+
+	var writer io.Writer = os.Stdout
+	if err == nil {
+		// Використовуємо MultiWriter + наш safeWriter для одночасного запису
+		writer = io.MultiWriter(os.Stdout, safeWriter{w: logFile})
+	}
+
 	opts := &slog.HandlerOptions{
-		Level: slog.LevelDebug, // Або який там у тебе рівень
+		Level: slog.LevelDebug,
 		ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
-			// Перехоплюємо поле з часом
 			if a.Key == slog.TimeKey {
 				t := a.Value.Time()
-
 				return slog.String(a.Key, t.Format("2006-01-02T15:04:05.000"))
 			}
 			return a
 		},
 	}
 
-	// Застосовуємо опції до JSON хендлера
-	handler := slog.NewJSONHandler(os.Stdout, opts)
-
-	// Встановлюємо як логер за замовчуванням
+	handler := slog.NewJSONHandler(writer, opts)
 	slog.SetDefault(slog.New(handler))
 }
 
@@ -46,12 +65,6 @@ func LoggerWithTrace(ctx context.Context) *slog.Logger {
 	return slog.Default().With(slog.String("trace_id", traceID))
 }
 
-// Залишаємо старі методи для сумісності, поки не переведемо весь проект на slog
-func InitLogger() {
-	// Порожній, бо slog ініціалізується через InitStructuredLogger
-}
-
 func CloseLogger() {
-	// Можна додати фінальний лог через slog
 	slog.Info("app_closed")
 }

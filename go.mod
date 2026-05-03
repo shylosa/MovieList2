@@ -8,12 +8,15 @@ require (
 	github.com/razsteinmetz/go-ptn v1.0.0
 	github.com/wailsapp/wails/v2 v2.12.0
 	github.com/xrash/smetrics v0.0.0-20250705151800-55b8f293f342
+	golang.org/x/sync v0.20.0
 	golang.org/x/time v0.15.0
 	google.golang.org/api v0.275.0
+	google.golang.org/genai v1.55.0
 	modernc.org/sqlite v1.48.2
 )
 
 require (
+	cloud.google.com/go v0.116.0 // indirect
 	cloud.google.com/go/auth v0.20.0 // indirect
 	cloud.google.com/go/auth/oauth2adapt v0.2.8 // indirect
 	cloud.google.com/go/compute/metadata v0.9.0 // indirect
@@ -26,6 +29,7 @@ require (
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/go-ole/go-ole v1.3.0 // indirect
 	github.com/godbus/dbus/v5 v5.1.0 // indirect
+	github.com/google/go-cmp v0.7.0 // indirect
 	github.com/google/s2a-go v0.1.9 // indirect
 	github.com/googleapis/enterprise-certificate-proxy v0.3.14 // indirect
 	github.com/googleapis/gax-go/v2 v2.21.0 // indirect

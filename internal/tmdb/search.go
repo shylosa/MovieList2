@@ -8,9 +8,11 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode"
+
+	"movielist-app/internal/utils"
 
 	"github.com/xrash/smetrics"
-	"movielist-app/internal/utils"
 )
 
 // tmdbSearchResult — один результат з /search/multi
@@ -268,8 +270,11 @@ func (c *Client) rankResults(
 		if best.year == targetYear {
 			// Якщо рік ідеально збігається, ми можемо довіряти fuzzy-збігу назви
 			threshold = ScoreThreshold - 50
+		} else if abs(best.year-targetYear) == 1 {
+			// Рік відрізняється на 1 (норма для релізів) - толерантний поріг
+			threshold = ScoreThreshold - 10
 		} else {
-			// Рік не збігається, але був у запиті — будьмо обережніші
+			// Рік не збігається серйозно, але був у запиті — будьмо обережніші
 			threshold = ScoreThreshold + 20
 		}
 	}
@@ -317,23 +322,28 @@ func (c *Client) scoreResult(
 		)
 	}
 
-	// --- Збіг назви: точний → contains → fuzzy ---
-	titleScore := matchScore(normQuery, resTitle, resOrig)
+	       // --- Збіг назви: точний → contains → fuzzy ---
+	       titleScore := matchScore(normQuery, resTitle, resOrig)
 
-	// --- ПЕРЕВІРКА АЛІАСІВ (ПУНКТ 1) ---
-	// Якщо базовий збіг низький, але це топовий результат TMDB — перевіряємо аліаси
-	if titleScore < 100 && index < 3 {
-		mediaType := MediaTypeMovie
-		if res.MediaType == "tv" {
-			mediaType = MediaTypeTV
-		}
+	       // 🔴 ХІРУРГІЧНЕ ВТРУЧАННЯ: Якщо назва (або її аліаси) взагалі ніяк не метчиться із запитом — це сміття. Жорстко відхиляємо.
+	       if titleScore == 0 {
+		       return scoredResult{result: res, score: -1000, year: resYear}
+	       }
 
-		alts, err := c.getAlternativeTitles(ctx, res.ID, mediaType)
-		if err == nil {
-			for _, alt := range alts {
-				altNorm := normalizeForCompare(alt)
-				altScore := fuzzyMatchScoreJW(normQuery, altNorm)
-				if altScore > titleScore {
+	       // --- ПЕРЕВІРКА АЛІАСІВ (ПУНКТ 1) ---
+	       // Якщо базовий збіг низький, але це топовий результат TMDB — перевіряємо аліаси
+	       if titleScore < 100 && index < 3 {
+		       mediaType := MediaTypeMovie
+		       if res.MediaType == "tv" {
+			       mediaType = MediaTypeTV
+		       }
+
+		       alts, err := c.getAlternativeTitles(ctx, res.ID, mediaType)
+		       if err == nil {
+			       for _, alt := range alts {
+				       altNorm := normalizeForCompare(alt)
+				       altScore := fuzzyMatchScoreJW(normQuery, altNorm)
+				       if altScore > titleScore {
 					titleScore = altScore
 					if altScore >= 150 { // Ідеальний збіг в аліасах
 						break
@@ -519,10 +529,7 @@ func normalizeForCompare(s string) string {
 	for _, r := range s {
 		isAlphaNum := (r >= 'a' && r <= 'z') ||
 			(r >= '0' && r <= '9') ||
-			(r >= 'а' && r <= 'я') ||
-			(r >= 'А' && r <= 'Я') ||
-			r == 'і' || r == 'ї' || r == 'є' || r == 'ґ' ||
-			r == 'І' || r == 'Ї' || r == 'Є' || r == 'Ґ'
+			unicode.Is(unicode.Cyrillic, r)
 
 		if isAlphaNum {
 			b.WriteRune(r)
@@ -556,12 +563,7 @@ func abs(x int) int {
 // hasCyrillicChars перевіряє, чи містить рядок кириличні символи
 func hasCyrillicChars(s string) bool {
 	for _, r := range s {
-		if (r >= 'а' && r <= 'я') || (r >= 'А' && r <= 'Я') ||
-			r == 'і' || r == 'ї' || r == 'є' || r == 'ґ' ||
-			r == 'І' || r == 'Ї' || r == 'Є' || r == 'Ґ' ||
-			r == 'ё' || r == 'Ё' || r == 'ы' || r == 'Ы' ||
-			r == 'э' || r == 'Э' || r == 'ъ' || r == 'Ъ' ||
-			r == 'ь' || r == 'Ь' {
+		if unicode.Is(unicode.Cyrillic, r) {
 			return true
 		}
 	}
