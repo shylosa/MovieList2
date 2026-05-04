@@ -99,6 +99,20 @@ func ParseFilename(fullPath string) ParsedFile {
 
 	title := info.Title
 
+	// 🔴 ХІРУРГІЧНЕ ВТРУЧАННЯ: Якщо go-ptn не розпізнав рік через друкарську помилку (напр. "2O09"),
+	// він залишає його в Title. Вичищаємо його.
+	if manualYear > 0 {
+		words := strings.Fields(title)
+		if len(words) > 0 {
+			lastWord := words[len(words)-1]
+			// Перевіряємо чи останнє слово після нормалізації нулів відповідає знайденому року
+			if mustAtoi(zeroReplacer.Replace(lastWord)) == manualYear {
+				title = strings.TrimSuffix(title, lastWord)
+				title = strings.TrimSpace(title)
+			}
+		}
+	}
+
 	// go-ptn залишає серіальний маркер у title якщо немає епізоду (напр. "The Rookie S07 WEB")
 	if isSeasonOnly {
 		title = reSeason.ReplaceAllString(title, "")

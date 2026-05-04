@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"strings"
 	"sync"
 	"time"
@@ -44,6 +45,7 @@ type Client struct {
 	modelsMu     sync.RWMutex
 	genaiClient  *genai.Client
 	initMu       sync.Mutex
+	httpClient   *http.Client // 🔴 ДОДАНО ДЛЯ ТЕСТІВ: Дозволяє мокувати відповіді API
 }
 
 func NewClient(cfg *config.Config) *Client {
@@ -95,6 +97,10 @@ func (c *Client) getGenaiClient(ctx context.Context) (*genai.Client, error) {
 	clientConfig := &genai.ClientConfig{
 		APIKey:  c.cfg.GeminiAPIKey,
 		Backend: genai.BackendGeminiAPI,
+	}
+	// 🔴 ХІРУРГІЧНЕ ВТРУЧАННЯ: Якщо є тестовий клієнт — використовуємо його
+	if c.httpClient != nil {
+		clientConfig.HTTPClient = c.httpClient
 	}
 
 	client, err := genai.NewClient(ctx, clientConfig)
