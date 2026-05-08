@@ -8,8 +8,9 @@ import (
 	"os"
 	"path/filepath"
 
-	_ "modernc.org/sqlite"
 	"movielist-app/internal/utils"
+
+	_ "modernc.org/sqlite"
 )
 
 // Movie описує структуру фільму в базі даних (уніфіковано)
@@ -73,6 +74,7 @@ func (db *DB) InitSchema(ctx context.Context) error {
 	CREATE INDEX IF NOT EXISTS idx_title_en ON movies(title_en);
 	PRAGMA journal_mode = WAL;
 	PRAGMA synchronous = NORMAL;
+	PRAGMA busy_timeout = 5000;
 
 	CREATE TABLE IF NOT EXISTS ai_resolutions (
 		original_filename TEXT PRIMARY KEY,

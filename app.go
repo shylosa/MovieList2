@@ -19,7 +19,7 @@ import (
 	"time"
 	"unicode"
 
-	"golang.org/x/sync/errgroup"
+	"golang.org/x/sync/singleflight"
 
 	"movielist-app/internal/ai"
 	"movielist-app/internal/config"
@@ -42,10 +42,15 @@ type App struct {
 	aiClient      *ai.Client
 	aiModelsCache []string
 	modelsMutex   sync.RWMutex
+	modelsGroup   singleflight.Group
 	scanCancel    context.CancelFunc
 	isScanning    bool
 	scanMutex     sync.Mutex
 }
+
+const geminiMinConfidence = 0.5
+
+var russianMarkers = []string{"из", "как", "что", "он", "это", "бы", "вот", "для"}
 
 func NewApp() *App { return &App{} }
 
@@ -82,6 +87,28 @@ func (a *App) logFront(msg string) {
 	log.Output(2, msg)
 }
 
+func (a *App) setScanCancel(cancel context.CancelFunc) {
+	a.scanMutex.Lock()
+	defer a.scanMutex.Unlock()
+	a.scanCancel = cancel
+}
+
+func (a *App) clearScanCancel() {
+	a.scanMutex.Lock()
+	defer a.scanMutex.Unlock()
+	a.scanCancel = nil
+}
+
+func (a *App) cancelScan() {
+	a.scanMutex.Lock()
+	cancel := a.scanCancel
+	a.scanCancel = nil
+	a.scanMutex.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
 // ── Публічні методи інтерфейсу ──────────────────────────────────────────────
 
 func (a *App) GetMovies() ([]storage.Movie, error) {
@@ -106,7 +133,7 @@ func (a *App) GetStats() map[string]interface{} {
 
 	unrec := 0
 	for _, m := range movies {
-		if m.TitleUA == "" && m.TitleEN == "" {
+		if m.TmdbID == 0 {
 			unrec++
 		}
 	}
@@ -208,55 +235,58 @@ func (a *App) SyncToCloud() {
 func (a *App) GetAIModels() ([]string, error) {
 	a.modelsMutex.RLock()
 	if len(a.aiModelsCache) > 0 {
-		// 🟢 ВИПРАВЛЕННЯ: Повертаємо копію слайсу
 		cache := append([]string(nil), a.aiModelsCache...)
 		a.modelsMutex.RUnlock()
 		return cache, nil
 	}
 	a.modelsMutex.RUnlock()
 
-	url := "https://generativelanguage.googleapis.com/v1beta/models"
-	client := &http.Client{Timeout: 10 * time.Second}
-	req, err := http.NewRequestWithContext(a.ctx, "GET", url, nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("x-goog-api-key", a.cfg.GeminiAPIKey)
-	resp, err := client.Do(req)
-
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	var result struct {
-		Models []struct {
-			Name string `json:"name"`
-		} `json:"models"`
-	}
-	// Додав обробку помилки декодування (про всяк випадок)
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, err
-	}
-
-	names := make([]string, 0, len(result.Models))
-	for _, m := range result.Models {
-		name := strings.TrimPrefix(m.Name, "models/")
-		if strings.Contains(name, "gemini") {
-			names = append(names, name)
+	value, err, _ := a.modelsGroup.Do("ai_models", func() (interface{}, error) {
+		url := "https://generativelanguage.googleapis.com/v1beta/models"
+		client := &http.Client{Timeout: 10 * time.Second}
+		req, err := http.NewRequestWithContext(a.ctx, "GET", url, nil)
+		if err != nil {
+			return nil, err
 		}
+		req.Header.Set("x-goog-api-key", a.cfg.GeminiAPIKey)
+		resp, err := client.Do(req)
+		if err != nil {
+			return nil, err
+		}
+		defer resp.Body.Close()
+
+		var result struct {
+			Models []struct {
+				Name string `json:"name"`
+			} `json:"models"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+			return nil, err
+		}
+
+		names := make([]string, 0, len(result.Models))
+		for _, m := range result.Models {
+			name := strings.TrimPrefix(m.Name, "models/")
+			if strings.Contains(name, "gemini") {
+				names = append(names, name)
+			}
+		}
+
+		a.modelsMutex.Lock()
+		a.aiModelsCache = names
+		a.modelsMutex.Unlock()
+
+		if a.aiClient != nil {
+			a.aiClient.SetModels(names)
+		}
+
+		return append([]string(nil), names...), nil
+	})
+	if err != nil {
+		return nil, err
 	}
 
-	a.modelsMutex.Lock()
-	a.aiModelsCache = names
-	a.modelsMutex.Unlock()
-
-	// 🟢 ДОДАНО: Передаємо актуальний список в бойовий клієнт
-	if a.aiClient != nil {
-		a.aiClient.SetModels(names)
-	}
-
-	return append([]string(nil), names...), nil
+	return value.([]string), nil
 }
 
 // ── Сканування ───────────────────────────────────────────────────────────────
@@ -274,17 +304,19 @@ func (a *App) RunScan() {
 
 	// 1. Створюємо контекст, який можна скасувати
 	ctx, cancel := context.WithCancel(a.ctx)
-	a.scanCancel = cancel
+	a.setScanCancel(cancel)
 
 	defer func() {
+		stoppedByUser := ctx.Err() != nil
 		cancel()
+		a.clearScanCancel()
 		a.scanMutex.Lock()
 		a.isScanning = false
 		a.scanMutex.Unlock()
 
 		// Якщо контекст був скасований штучно - пишемо що зупинено, інакше - завершено
 		msg := "Сканування завершено"
-		if a.ctx.Err() != nil {
+		if stoppedByUser {
 			msg = "Сканування перервано користувачем"
 		}
 
@@ -452,33 +484,26 @@ func (a *App) RunScan() {
 
 // StopScan зупиняє поточний процес сканування
 func (a *App) StopScan() {
-	if a.scanCancel != nil {
-		a.logFront("🚨 [СТОП] Сигнал скасування отримано бекендом!")
-		a.scanCancel()
-	} else {
-		a.logFront("⚠️ [СТОП] ПОМИЛКА: scanCancel порожній!")
-	}
+	a.logFront("🚨 [СТОП] Сигнал скасування отримано бекендом!")
+	a.cancelScan()
 }
 
 // processGeminiQueue — Gemini розпізнає назви → TMDB верифікує → мерж → збереження
 // 🟢 СТАЛО: Додаємо ctx context.Context першим параметром і повертаємо []string
 func (a *App) processGeminiQueue(ctx context.Context, filenames []string, aiClient *ai.Client) []string {
 	var recognizedFiles []string
-	var mu sync.Mutex // Захист для recognizedFiles
 
 	const batchSize = 10
 	total := len(filenames)
 	totalBatches := (total + batchSize - 1) / batchSize
-	var processed int32
-
-	// Створюємо групу горутин з контекстом
-	g, gCtx := errgroup.WithContext(ctx)
-
-	// 🔴 ХІРУРГІЧНЕ ВТРУЧАННЯ: Семафор для обмеження паралелізму запитів до Gemini (макс 2 пачки одночасно)
-	sem := make(chan struct{}, 2)
+	processed := 0
 
 	for i := 0; i < total; i += batchSize {
-		i := i // capture range variable
+		if ctx.Err() != nil {
+			a.logFront("🛑 Gemini черга перервана користувачем.")
+			break
+		}
+
 		end := i + batchSize
 		if end > total {
 			end = total
@@ -486,104 +511,71 @@ func (a *App) processGeminiQueue(ctx context.Context, filenames []string, aiClie
 		batch := filenames[i:end]
 		currentBatchIdx := i/batchSize + 1
 
-		// Запускаємо кожну пачку в окремій горутині
-		g.Go(func() error {
-			// Займаємо слот у семафорі
-			select {
-			case sem <- struct{}{}:
-				defer func() { <-sem }()
-			case <-gCtx.Done():
-				return gCtx.Err()
-			}
+		a.logFront(fmt.Sprintf("📦 Gemini пачка %d/%d (%d файлів) відправлена...", currentBatchIdx, totalBatches, len(batch)))
 
-			a.logFront(fmt.Sprintf("📦 Gemini пачка %d/%d (%d файлів) відправлена...", currentBatchIdx, totalBatches, len(batch)))
-
-			// Виклик ШІ (лімітер всередині aiClient сам зробить потрібні паузи)
-			results, err := aiClient.RecognizeBulk(gCtx, batch)
-			if err != nil {
-				a.logFront(fmt.Sprintf("⚠️ Gemini помилка пачки %d: %v", currentBatchIdx, err))
-				// В разі помилки пачки - позначаємо файли як нерозпізнані
-				var errorMovies []storage.Movie
-				for _, fname := range batch {
-					atomic.AddInt32(&processed, 1)
-					errorMovies = append(errorMovies, storage.Movie{Filename: fname})
-				}
-				_ = a.db.SaveMoviesBatch(gCtx, errorMovies)
-				return nil // Не перериваємо всю чергу через помилку однієї пачки
-			}
-
-			recognizedMap := make(map[string]ai.RecognizedTitle, len(results))
-			for _, r := range results {
-				recognizedMap[r.OriginalFile] = r
-			}
-
-			var moviesToSave []storage.Movie
+		results, err := aiClient.RecognizeBulk(ctx, batch)
+		if err != nil {
+			a.logFront(fmt.Sprintf("⚠️ Gemini помилка пачки %d: %v", currentBatchIdx, err))
+			var errorMovies []storage.Movie
 			for _, fname := range batch {
-				p := atomic.AddInt32(&processed, 1)
-				rec, ok := recognizedMap[fname]
+				errorMovies = append(errorMovies, storage.Movie{Filename: fname})
+			}
+			_ = a.db.SaveMoviesBatch(ctx, errorMovies)
+			continue
+		}
 
-				if !ok || rec.ENTitle == "" {
-					a.logFront(fmt.Sprintf("⚠️ Gemini не розпізнав: '%s'", fname))
-					a.emitProgress(int(p), total, "❓ Не розпізнано: "+fname)
-					moviesToSave = append(moviesToSave, storage.Movie{Filename: fname})
-					continue
-				}
+		recognizedMap := make(map[string]ai.RecognizedTitle, len(results))
+		for _, r := range results {
+			recognizedMap[r.OriginalFile] = r
+		}
 
-				// 🔴 ФІЛЬТР КОНФІДЕНЦІЙНОСТІ
-				if rec.Confidence < 0.5 {
-					a.logFront(fmt.Sprintf("⚠️ Gemini має низьку впевненість (%.2f) для '%s'", rec.Confidence, fname))
-					a.emitProgress(int(p), total, "❓ Низька впевненість: "+fname)
-					moviesToSave = append(moviesToSave, storage.Movie{Filename: fname})
-					continue
-				}
+		var moviesToSave []storage.Movie
+		for _, fname := range batch {
+			processed++
+			rec, ok := recognizedMap[fname]
 
-				a.emitProgress(int(p), total, "🤖 Gemini: "+rec.ENTitle)
+			if !ok || rec.ENTitle == "" {
+				a.logFront(fmt.Sprintf("⚠️ Gemini не розпізнав: '%s'", fname))
+				a.emitProgress(processed, total, "❓ Не розпізнано: "+fname)
+				moviesToSave = append(moviesToSave, storage.Movie{Filename: fname})
+				continue
+			}
 
-				// 🟢 ЗБЕРЕЖЕННЯ В L2 КЕШ
-				yearVal := 0
-				if rec.Year != nil {
-					yearVal = *rec.Year
-				}
-				_ = a.db.SaveAIResolution(gCtx, storage.AIResolution{
-					OriginalFilename: fname,
-					ResolvedTitle:    rec.ENTitle,
-					Year:             yearVal,
-					MediaType:        rec.MediaType,
-					Confidence:       rec.Confidence,
-				})
+			a.emitProgress(processed, total, "🤖 Gemini: "+rec.ENTitle)
 
-				movie := a.mergeGeminiWithTMDB(fname, rec)
-				moviesToSave = append(moviesToSave, movie)
+			yearVal := 0
+			if rec.Year != nil {
+				yearVal = *rec.Year
+			}
+			_ = a.db.SaveAIResolution(ctx, storage.AIResolution{
+				OriginalFilename: fname,
+				ResolvedTitle:    rec.ENTitle,
+				Year:             yearVal,
+				MediaType:        rec.MediaType,
+				Confidence:       rec.Confidence,
+			})
 
-				// Безпечно додаємо в список успішних
-				mu.Lock()
+			movie := a.mergeGeminiWithTMDB(ctx, fname, rec)
+			moviesToSave = append(moviesToSave, movie)
+			if movie.TmdbID > 0 {
 				recognizedFiles = append(recognizedFiles, fname)
-				mu.Unlock()
 			}
+		}
 
-			// Зберігаємо пачку в БД
-			if len(moviesToSave) > 0 {
-				_ = a.db.SaveMoviesBatch(gCtx, moviesToSave)
-			}
-
-			return nil
-		})
-	}
-
-	// Чекаємо завершення всіх горутин
-	if err := g.Wait(); err != nil {
-		slog.Error("gemini_parallel_processing_error", slog.Any("error", err))
+		if len(moviesToSave) > 0 {
+			_ = a.db.SaveMoviesBatch(ctx, moviesToSave)
+		}
 	}
 
 	if ctx.Err() == nil {
-		a.logFront("✅ Gemini черга оброблена паралельно!")
+		a.logFront("✅ Gemini черга оброблена!")
 	}
 	return recognizedFiles
 }
 
 // mergeGeminiWithTMDB — шукає фільм в TMDB за EN назвою від Gemini,
 // мержить результати: TMDB має пріоритет, Gemini заповнює прогалини
-func (a *App) mergeGeminiWithTMDB(fname string, rec ai.RecognizedTitle) storage.Movie {
+func (a *App) mergeGeminiWithTMDB(ctx context.Context, fname string, rec ai.RecognizedTitle) storage.Movie {
 	// 🛡️ КРОК 1: ПЕРЕВІРКА ВАЛІДНОСТІ ВІДПОВІДІ ШІ
 	if rec.ENTitle == "" {
 		a.logFront(fmt.Sprintf("⚠️ [GEMINI] Відсутня EN назва для '%s'. Пропускаємо пошук.", fname))
@@ -591,7 +583,7 @@ func (a *App) mergeGeminiWithTMDB(fname string, rec ai.RecognizedTitle) storage.
 	}
 
 	// 🔴 ДОДАНО: Жорсткий фільтр за рівнем впевненості (єдиний центр прийняття рішень)
-	if rec.Confidence > 0 && rec.Confidence < 0.5 {
+	if rec.Confidence < geminiMinConfidence {
 		a.logFront(fmt.Sprintf("🛡️ [ЗАХИСТ] Gemini невпевнений (%.2f) щодо '%s'. Відхиляємо.", rec.Confidence, fname))
 		return storage.Movie{Filename: fname}
 	}
@@ -634,7 +626,7 @@ func (a *App) mergeGeminiWithTMDB(fname string, rec ai.RecognizedTitle) storage.
 		yearStr = strconv.Itoa(*rec.Year)
 	}
 
-	tmdbInfo, err := a.tmdbClient.FetchByCleanTitle(a.ctx, rec.ENTitle, yearStr, mt)
+	tmdbInfo, err := a.tmdbClient.FetchByCleanTitle(ctx, rec.ENTitle, yearStr, mt)
 	if err != nil {
 		a.logFront(fmt.Sprintf("⚠️ TMDB помилка для '%s': %v", rec.ENTitle, err))
 	}
@@ -670,8 +662,11 @@ func (a *App) mergeGeminiWithTMDB(fname string, rec ai.RecognizedTitle) storage.
 func (a *App) FixSelected(selected []map[string]interface{}) {
 	// 1. Створюємо керований контекст 🟢
 	ctx, cancel := context.WithCancel(a.ctx)
-	a.scanCancel = cancel
-	defer cancel()
+	a.setScanCancel(cancel)
+	defer func() {
+		cancel()
+		a.clearScanCancel()
+	}()
 
 	wailsRuntime.EventsEmit(a.ctx, "scan-started")
 
@@ -709,8 +704,9 @@ func (a *App) FixSelected(selected []map[string]interface{}) {
 		a.emitProgress(current, total, "🔄 "+filename)
 
 		// Передаємо локальний ctx
-		_ = a.UpdateMovie(ctx, filename, hint)
-		translationQueue = append(translationQueue, filename) // 👈 Додаємо
+		if err := a.UpdateMovie(ctx, filename, hint); err == nil {
+			translationQueue = append(translationQueue, filename)
+		}
 	}
 
 	// 3. Другий етап (черга Gemini) 🟢
@@ -776,7 +772,7 @@ func (a *App) UpdateMovie(ctx context.Context, filename, hint string) error {
 	}
 
 	a.logFront(fmt.Sprintf("🤖 Gemini: '%s' → '%s'", filename, rec.ENTitle))
-	movie := a.mergeGeminiWithTMDB(filename, rec)
+	movie := a.mergeGeminiWithTMDB(ctx, filename, rec)
 
 	// Зберігаємо існуючі поля якщо нові порожні
 	if movie.TitleUA == "" {
@@ -935,7 +931,6 @@ func needsTranslation(s string) bool {
 
 	// 1. ПЕРЕВІРКА НА СЛОВА-МАРКЕРИ (Російські слова, що пишуться спільними літерами)
 	// Це значно дешевше за бібліотеки і відловить твій "Враг у ворот" (слово "у")
-	russianMarkers := []string{"из", "как", "что", "он", "это", "бы", "вот", "для"}
 	words := strings.Fields(sLower)
 	for _, w := range words {
 		for _, marker := range russianMarkers {
@@ -1030,21 +1025,17 @@ func (a *App) processTranslationQueue(ctx context.Context, filenames []string, a
 
 	a.logFront(fmt.Sprintf("🚀 Відправка в Gemini: %d файлів...", len(itemsToTranslate)))
 
-	// 2. Паралельний батчинг та відправка до AI
 	const batchSize = 10
 	totalItems := len(itemsToTranslate)
 	totalBatches := (totalItems + batchSize - 1) / batchSize
 	var updatedCount int32
 
-	g, gCtx := errgroup.WithContext(ctx)
-
-	// 🔴 ХІРУРГІЧНЕ ВТРУЧАННЯ: Семафор для перекладу (макс 2 пачки одночасно)
-	sem := make(chan struct{}, 2)
-
-	// WARNING: movieMap is READ-ONLY from this point. Do not mutate inside goroutines to prevent data races.
-
 	for i := 0; i < totalItems; i += batchSize {
-		i := i
+		if ctx.Err() != nil {
+			a.logFront("🛑 Переклад перервано.")
+			return
+		}
+
 		end := i + batchSize
 		if end > totalItems {
 			end = totalItems
@@ -1052,61 +1043,44 @@ func (a *App) processTranslationQueue(ctx context.Context, filenames []string, a
 		batch := itemsToTranslate[i:end]
 		currentBatchIdx := i/batchSize + 1
 
-		g.Go(func() error {
-			// Займаємо слот у семафорі
-			select {
-			case sem <- struct{}{}:
-				defer func() { <-sem }()
-			case <-gCtx.Done():
-				return gCtx.Err()
+		a.logFront(fmt.Sprintf("📦 Переклад: пачка %d/%d (%d файлів)...", currentBatchIdx, totalBatches, len(batch)))
+
+		results, err := aiClient.TranslateBulk(ctx, batch)
+		if err != nil {
+			a.logFront(fmt.Sprintf("⚠️ Помилка перекладу пачки %d: %v", currentBatchIdx, err))
+			continue
+		}
+
+		var moviesToSave []storage.Movie
+		for _, res := range results {
+			movie, ok := movieMap[res.Filename]
+			if !ok {
+				continue
 			}
 
-			a.logFront(fmt.Sprintf("📦 Переклад: пачка %d/%d (%d файлів)...", currentBatchIdx, totalBatches, len(batch)))
-
-			results, err := aiClient.TranslateBulk(gCtx, batch)
-			if err != nil {
-				a.logFront(fmt.Sprintf("⚠️ Помилка перекладу пачки %d: %v", currentBatchIdx, err))
-				return nil
+			changed := false
+			if res.Title != "" && res.Title != movie.TitleUA && !strings.Contains(strings.ToLower(res.Title), "thought") {
+				movie.TitleUA = res.Title
+				changed = true
+			}
+			if res.Plot != "" && res.Plot != movie.Plot {
+				movie.Plot = res.Plot
+				changed = true
 			}
 
-			// 3. Зберігаємо результати у БД
-			var moviesToSave []storage.Movie
-			for _, res := range results {
-				// БЕЗПЕКА: беремо value-copy з map. Не мутувати movieMap у горутинах.
-				movie, ok := movieMap[res.Filename]
-				if !ok {
-					continue
-				}
-
-				changed := false
-				if res.Title != "" && res.Title != movie.TitleUA && !strings.Contains(strings.ToLower(res.Title), "thought") {
-					movie.TitleUA = res.Title
-					changed = true
-				}
-				if res.Plot != "" && res.Plot != movie.Plot {
-					movie.Plot = res.Plot
-					changed = true
-				}
-
-				if changed {
-					moviesToSave = append(moviesToSave, movie)
-					atomic.AddInt32(&updatedCount, 1)
-					a.logFront(fmt.Sprintf("✅ Адаптовано: '%s'", movie.TitleUA))
-				}
+			if changed {
+				moviesToSave = append(moviesToSave, movie)
+				atomic.AddInt32(&updatedCount, 1)
+				a.logFront(fmt.Sprintf("✅ Адаптовано: '%s'", movie.TitleUA))
 			}
+		}
 
-			if len(moviesToSave) > 0 {
-				_ = a.db.SaveMoviesBatch(gCtx, moviesToSave)
-			}
-			return nil
-		})
-	}
-
-	if err := g.Wait(); err != nil {
-		slog.Error("translation_parallel_error", slog.Any("error", err))
+		if len(moviesToSave) > 0 {
+			_ = a.db.SaveMoviesBatch(ctx, moviesToSave)
+		}
 	}
 
 	if ctx.Err() == nil {
-		a.logFront(fmt.Sprintf("✅ Фаза перекладу завершена паралельно! Оновлено записів: %d", updatedCount))
+		a.logFront(fmt.Sprintf("✅ Фаза перекладу завершена! Оновлено записів: %d", updatedCount))
 	}
 }

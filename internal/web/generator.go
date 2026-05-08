@@ -150,6 +150,8 @@ const htmlLayout = `<!DOCTYPE html>
     <div class="stats-bar">
         <span>🎬 Всього: <strong>{{.TotalMovies}}</strong></span>
         <span>📅 Оновлено: <strong>{{.GenerationTime}}</strong></span>
+        <span id="filteredCount" style="display:none">🔎 Знайдено: <strong id="filteredNum">0</strong></span>
+        <div id="noResults" class="no-results" style="display:none">Нічого не знайдено 🎬</div>
     </div>
 
     <div class="container">

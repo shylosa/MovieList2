@@ -98,15 +98,20 @@ Filename
     │
     ▼
 [7] Gemini-черга (якщо TMDB не знайшов)    ← app.go processGeminiQueue()
-    │  Батч по 10 файлів, семафор 2 паралельних запити
+    │  Батч по 10 файлів, послідовна обробка через один контекст
     │  RecognizeBulk() → ENTitle → FetchByCleanTitle() → Merge → Save
+    │  Повертає список файлів у яких movie.TmdbID > 0 (верифіковані через TMDB)
     │  L2 кеш: SaveAIResolution() після кожного успішного розпізнавання
+    │  Файли з Confidence < 0.5 залишаються як нерозпізнані (TmdbID=0)
     │
     ▼
 [8] processTranslationQueue()     ← app.go
-    │  Фаза перекладу: фільми з англійськими полями → Gemini TranslateBulk()
-    │  Семафор 2 паралельних запити
+    │  Фаза перекладу: файли з англійськими/порожніми полями → Gemini TranslateBulk()
+    │  Послідовна обробка батчів по 10 файлів
+    │  Оновлення title_ua/plot, якщо потрібно
+    │  Семафор 2 паралельних запити (але реального паралелізму немає через rate.Limiter)
 ```
+
 
 ---
 
@@ -116,15 +121,22 @@ Filename
 
 - **Не змінювати порядок спроб у pipeline** — Спроба 0 (IMDB ID) завжди першою, потім типізовані endpoints, потім транслітерація.
 - **Не прибирати `ctx.Err()` перевірки** — вони потрібні для реакції на кнопку "Стоп".
+- **Не перевіряти `ctx.Err()` після виклику `cancel()`** — стан скасування треба фіксувати до закриття контексту, щоб не отримати хибне "перервано користувачем".
 - **Не замінювати `SaveMoviesBatch` на N окремих `SaveMovie`** — це регрес по продуктивності.
 - **Не використовувати `/search/multi`** коли MediaType відомий — використовувати `/search/movie` або `/search/tv`.
 - **Не компілювати regexp всередині функцій** що викликаються у циклах — виносити в `var` на рівні пакету.
 - **Не довіряти `tmdb_id` від Gemini** — Gemini галюцинує ID. ID завжди верифікується через реальний TMDB запит.
 - **Не зберігати `confidence < 0.5` від Gemini** — файл залишається нерозпізнаним для повторної спроби.
+- **Не дублювати поріг confidence у кількох місцях** — перевірка зберігається в одному місці, через константу `geminiMinConfidence`.
 - **Не використовувати `http.Client` напряму для Gemini** — тільки `google.golang.org/genai` SDK.
+- **Не ускладнювати процес Gemini паралелізмом** — `processGeminiQueue()` працює послідовно (batching без `errgroup`), оскільки обмеження rate limiter робить багато паралельних горутин марними.
 - **Не використовувати `time.After` в циклах** — завжди `timer := time.NewTimer(d); defer timer.Stop()`.
 - **Не мутувати `movieMap` всередині горутин** — він read-only після ініціалізації.
 - **Не видаляти `defer tx.Rollback()`** — навіть після успішного Commit (no-op в SQLite, але захист від паніки).
+- **Не додавати файли до `translationQueue` без перевірки розпізнавання** — тільки файли з `movie.TmdbID > 0` повинні йти в переклад.
+- **Не додавати всі результати `UpdateMovie` до черги без перевірки** — додавати тільки якщо повернула `nil` (сукцес).
+- **Не дублювати логіку отримання моделей** — використовувати `singleflight.Group.Do()` для дедубліювання.
+- **Не пропускати HTML елементи в пошуку** — `id="noResults"`, `id="filteredCount"`, `id="filteredNum"` обов'язкові.
 
 ### ✅ ЗАВЖДИ робити
 
@@ -137,7 +149,14 @@ Filename
 - **`ClearCaches()`** на початку кожного `RunScan()`.
 - **Перевіряти `ctx.Err()`** перед кожним мережевим запитом і на початку кожного циклу обробки.
 - **Лінива ініціалізація з retry** — використовувати `sync.Mutex` замість `sync.Once` для ініціалізації ШІ-клієнта. Це гарантує безпечний retry у разі помилки мережі без ризику data race.
-
+- **HTML елементи для пошуку** — `index.html` та `generator.go` шаблон мають містити:
+  - `<span id="filteredCount">` — показ кількості знайдених результатів
+  - `<div id="noResults">` — повідомлення про відсутність результатів
+  - `<strong id="filteredNum">` — динамічне оновлення числа знайдених (без цих елементів будуть помилки у консолі браузера)
+- **`processGeminiQueue()` повертає список верифікованих файлів** — тільки файли з `movie.TmdbID > 0` додаються до `translationQueue`, щоб не перекладати порожні записи.
+- **`FixSelected()` перевіряє помилку `UpdateMovie`** — файли додаються до `translationQueue` лише якщо `UpdateMovie` повернула `nil` (сукцес).
+- **`GetAIModels()` використовує `singleflight.Group`** — одночасні запити дедубліюються, перший отримує від API, рештві чекають результату без додаткових HTTP запитів.
+- **`processTranslationQueue()` спрощено до послідовного батчингу** — без `errgroup`, але зі семафором 2 паралельних запити (реального паралелізму немає через `rate.Limiter` в SDK).
 ---
 
 ## Конфігурація (.env)
@@ -145,7 +164,7 @@ Filename
 ```env
 APP_VERSION=2.0
 GEMINI_API_KEY=<required — panics on startup if missing>
-GEMINI_MODELS=gemini-2.5-flash,gemini-2.0-flash,gemini-2.5-flash-lite   # cascade, comma-separated
+GEMINI_MODELS=gemini-2.5-flash,gemini-2.0-flash,gemini-2.5-flash-lite   # cascade, comma-separated (removed gemini-3-flash-preview)
 TMDB_API_KEY=<required>
 MEDIA_FOLDER_PATH=D:\Movies
 EXCLUDE_FOLDERS=Downloads,Temp
@@ -189,7 +208,7 @@ GOOGLE_SHEET_WORKSHEET_NAME=base
 | `confidence` | REAL | Впевненість Gemini (0.0–1.0) |
 
 **Індекси:** `idx_tmdb_id`, `idx_title_en`
-**Pragmas:** `journal_mode=WAL`, `synchronous=NORMAL`
+**Pragmas:** `journal_mode=WAL`, `synchronous=NORMAL`, `busy_timeout=5000`
 **Міграція:** лінива через `ALTER TABLE ... ADD COLUMN` з ігноруванням "duplicate column" помилки.
 
 ---
@@ -240,9 +259,19 @@ const (
 
 **SDK:** `google.golang.org/genai` (не HTTP вручну)
 **Singleton:** `initMu sync.Mutex` + `getGenaiClient()` — ліниво ініціалізується з можливістю безпечного retry у разі помилки.
-**Каскад моделей:** `getModels()` повертає пріоритет: динамічний список (`SetModels`) → конфіг (`GeminiModels`) → хардкод fallback.
+**HTTP клієнт в тестах:** якщо `httpClient` заданий, він використовується для genai.
+**Каскад моделей:** `GetAIModels()` → одночасні запити дедубліюються через `singleflight.Group` → перший запит отримує список від API → наступні запити одночасно чекають результату без додаткових HTTP-запитів → активний список (`SetModels`) → конфіг (`GeminiModels`) → хардкод fallback.
+**Warmup:** `RunScan()` асинхронно викликає `GetAIModels()` щоб `aiClient` отримав актуальні моделі до Gemini пачки.
 **Rate limiting:** `rate.Limiter` спільний для всього клієнта.
-**Батчинг:** 10 файлів на запит, семафор `chan struct{}` з буфером 2 для обмеження паралелізму.
+**Батчинг:** 10 файлів на запит, послідовна обробка через один контекст (без `errgroup`).
+**Переклад:** послідовна обробка батчів з семафором 2 паралельних запити (`chan struct{}`), але реального паралелізму немає через `rate.Limiter` всередині SDK.
+**Перекладна безпека:** якщо офіційної UA назви немає — Gemini залишає `original_title` без змін.
+**Переключення режимів:** `movieMap` у `processTranslationQueue()` — read-only; не мутувати всередині горутин.
+**Персистенція:** `SaveAIResolution()` зберігає L2-кеш після кожного успішного розпізнавання.
+
+### Структура результатів processGeminiQueue
+
+`processGeminiQueue()` повертає `[]string` — список успішно розпізнаних файлів (тих, у яких `movie.TmdbID > 0` після мержу з TMDB). Файли з `Confidence < 0.5` або ті, що TMDB не верифікував, залишають як нерозпізнані (`TmdbID=0`) і не потрапляють у `translationQueue`.
 
 ### Structured output schema (RecognizeBulk)
 
@@ -259,6 +288,8 @@ confidence     float    — 0.0-1.0, 0 якщо не вказано
 ```
 
 **Правило:** `confidence < 0.5` → файл зберігається як нерозпізнаний (`TmdbID=0`) для повторної спроби.
+
+**Примітка:** цей поріг зберігається в коді через константу `geminiMinConfidence`, щоб перевірка була однією і надійною.
 
 ---
 
@@ -347,3 +378,74 @@ Gemini має RPM (requests per minute) ліміт, не RPS. Паралельн
 
 **Помилка 5:** Видалити `defer tx.Rollback()` бо "після Commit воно все одно no-op".
 `defer` спрацює навіть якщо функція повернулась через panic — це важливий захист.
+
+---
+
+## Ревізія 4 — виправлення та оптимізації
+
+### Зміни в `app.go`
+
+- **`GetAIModels()`** тепер використовує `singleflight.Group` замість простого double-checked locking. Одночасні запити дедубліюються — перший робить HTTP запит, рештві чекають результату без додаткових запитів до API.
+- **`processGeminiQueue()`** тепер повертає `[]string` — список файлів у яких `movie.TmdbID > 0` (верифіковані через TMDB). Тільки ці файли потрапляють у `translationQueue`.
+- **`processTranslationQueue()`** спрощено — послідовне батчинг без `errgroup`, але зі семафором на 2 паралельних запити. Реального паралелізму немає через `rate.Limiter` всередину SDK.
+- **`FixSelected()`** тепер перевіряє помилку `UpdateMovie` перед додаванням у `translationQueue`. Файли додаються лише якщо `err == nil`.
+- **`mergeGeminiWithTMDB()`** перевіряє `movie.TmdbID > 0` перед додаванням до `recognizedFiles` (був баг: файли з confidence<0.5 йшли на переклад порожніх записів).
+
+### Зміни в `internal/config/config.go`
+
+- **Дефолтний список моделей** — замінено з `"gemini-3-flash-preview,gemini-2.5-flash,..."` на `"gemini-2.5-flash,gemini-2.0-flash,gemini-2.5-flash-lite"` (видалена неіснуюча модель).
+
+### Зміни в `internal/web/generator.go` та `index.html`
+
+- **Додано HTML елементи для пошуку**:
+  - `<span id="filteredCount">` — контейнер для показу кількості
+  - `<strong id="filteredNum">` — число знайдених результатів
+  - `<div id="noResults">` — повідомлення коли нічого не знайдено
+  - Без цих елементів JavaScript падає з "Cannot set properties of null" помилкою при пошуку.
+
+### Дедубліювання запитів (singleflight)
+
+```go
+type App struct {
+    // ...
+    modelsGroup   singleflight.Group  // Нове
+}
+
+func (a *App) GetAIModels() ([]string, error) {
+    // 1. Перевіріємо L1 кеш під RLock (швидко)
+    a.modelsMutex.RLock()
+    if len(a.aiModelsCache) > 0 {
+        cache := append([]string(nil), a.aiModelsCache...)
+        a.modelsMutex.RUnlock()
+        return cache, nil
+    }
+    a.modelsMutex.RUnlock()
+
+    // 2. Одночасні запити дедубліюються
+    value, err, _ := a.modelsGroup.Do("ai_models", func() (interface{}, error) {
+        // Робимо HTTP запит, але тільки перший потік його виконує
+        // Рештві потоки чекають результату від a.modelsGroup
+        // ...
+    })
+    // ...
+}
+```
+
+**Результат:** При 10 одночасних запитах до `GetAIModels()` робиться лише 1 HTTP запит замість 10.
+
+### Критичні поправки
+
+| # | Проблема | Статус |
+|---|---|---|
+| P0 | HTML елементи для пошуку | ✅ Додано |
+| P0 | `recognizedFiles` без перевірки `TmdbID` | ✅ Виправлено |
+| P1 | `FixSelected` додає файли без перевірки | ✅ Виправлено |
+| P1 | `GetAIModels` робить подвійні запити | ✅ Виправлено (singleflight) |
+| P1 | `processTranslationQueue` зі складністю errgroup | ✅ Спрощено |
+| P2 | Дефолт містить `gemini-3-flash-preview` | ✅ Видалено |
+
+Решта проблем залишена як низькопріоритетна або прийнятна:
+- `cleanDeletedFiles` дублює роботу `CleanMissingMovies` — не критично
+- L2 кеш має різні пороги (0.6 vs 0.5) — свідомо
+- `Movie.ID` не заповнюється — поле невикористовується, можна видалити в P3
+- `searchDirectly` — мертвий код, можна видалити в P3

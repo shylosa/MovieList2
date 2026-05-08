@@ -57,7 +57,7 @@ func Load() *Config {
 		}
 	}
 
-	modelsRaw := getEnvOrDefault("GEMINI_MODELS", "gemini-3-flash-preview,gemini-2.5-flash,gemini-2.0-flash,gemini-2.5-flash-lite")
+	modelsRaw := getEnvOrDefault("GEMINI_MODELS", "gemini-2.5-flash,gemini-2.0-flash,gemini-2.5-flash-lite")
 	var modelsList []string
 	for _, m := range strings.Split(modelsRaw, ",") {
 		if trimmed := strings.TrimSpace(m); trimmed != "" {
