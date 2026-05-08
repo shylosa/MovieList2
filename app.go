@@ -752,7 +752,44 @@ func (a *App) UpdateMovie(ctx context.Context, filename, hint string) error {
 		}
 	}
 
-	// Варіант 2: текстова підказка (назва або рік) → Gemini → TMDB
+	// 🔴 ХІРУРГІЧНЕ ВТРУЧАННЯ: Варіант 1.5 - Прямий пошук у TMDB за підказкою
+	// Обходимо анти-галюцинаційні фільтри (зокрема жорсткий блок по році)
+	if hint != "" {
+		origParsed := tmdb.ParseFilename(filename)
+		hintParsed := tmdb.ParseFilename(hint)
+
+		searchTitle := hintParsed.CleanTitle
+		if searchTitle == "" {
+			searchTitle = origParsed.CleanTitle // Якщо підказка - це тільки рік (напр. "2024")
+		}
+
+		searchYear := origParsed.Year
+		if hintParsed.Year > 0 {
+			searchYear = hintParsed.Year // Пріоритет року з підказки
+		}
+
+		targetToSearch := tmdb.ParsedFile{
+			CleanTitle: searchTitle,
+			Year:       searchYear,
+			MediaType:  origParsed.MediaType,
+		}
+
+		a.logFront(fmt.Sprintf("🔍 [%s] Прямий пошук TMDB за: '%s' (рік: %d)", filename, searchTitle, searchYear))
+
+		// Використовуємо SearchWithFallbacks напряму.
+		// Він використає рік для сортування, але не відхилить ідеальний збіг по назві, якщо рік відрізняється.
+		info, err := a.tmdbClient.SearchWithFallbacks(ctx, targetToSearch, filename)
+
+		if err == nil && info != nil {
+			a.logFront(fmt.Sprintf("✅ TMDB знайшов за підказкою: '%s'", info.TitleUA))
+			applyTMDBToMovie(existing, info)
+			return a.db.SaveMovie(ctx, *existing)
+		}
+
+		a.logFront("⚠️ Прямий пошук не дав результату, підключаємо Gemini...")
+	}
+
+	// Варіант 2: текстова підказка не дала результату → Gemini → TMDB
 	query := filename
 	if hint != "" {
 		query = fmt.Sprintf("%s (підказка: %s)", filename, hint)
@@ -921,6 +958,16 @@ func (a *App) openInExplorer(path string) {
 	}
 }
 
+// hasCyrillic повертає true, якщо рядок містить хоча б один кирилічний символ
+func hasCyrillic(s string) bool {
+	for _, r := range s {
+		if unicode.Is(unicode.Cyrillic, r) {
+			return true
+		}
+	}
+	return false
+}
+
 // needsTranslation повертає true, якщо текст треба перекласти (англійська або підозріла кирилиця)
 func needsTranslation(s string) bool {
 	if s == "" {
@@ -966,9 +1013,16 @@ func needsTranslation(s string) bool {
 	if hasRussianLetter {
 		return true
 	}
-	// 4. СІРА ЗОНА: якщо немає специфічних українських літер (і, ї, є, ґ),
-	// але є кирилиця — краще відправити в пачку на переклад.
-	// Gemini розбереться, а ти не отримаєш "Враг у ворот" у списку.
+	// 4. 🔴 ХІРУРГІЧНЕ ВТРУЧАННЯ: Якщо вже є кирилиця без російських маркерів,
+	// це означає, що TMDB вже дав нам щось пристойне.
+	// Не смикаємо ШІ даремно — довіримо TMDB.
+	if hasCyrillic && !hasRussianLetter {
+		return false
+	}
+
+	// 5. СІРА ЗОНА: якщо немає специфічних українських літер (і, ї, є, ґ),
+	// але є кирилиця та немає російських маркерів — скоріш за все OK.
+	// Якщо є російські маркери — вже обробили вище.
 	if !hasUkrainianLetter {
 		return true
 	}
@@ -1060,8 +1114,17 @@ func (a *App) processTranslationQueue(ctx context.Context, filenames []string, a
 
 			changed := false
 			if res.Title != "" && res.Title != movie.TitleUA && !strings.Contains(strings.ToLower(res.Title), "thought") {
-				movie.TitleUA = res.Title
-				changed = true
+				// 🔴 ХІРУРГІЧНЕ ВТРУЧАННЯ: Закон пріоритету кирилиці.
+				// Не дозволяємо Gemini перезаписувати назву на англійську, якщо в базі вже є кирилиця.
+				if hasCyrillic(movie.TitleUA) && !hasCyrillic(res.Title) {
+					slog.Debug("localization_skip_downgrade",
+						slog.String("file", movie.Filename),
+						slog.String("kept", movie.TitleUA),
+						slog.String("rejected", res.Title))
+				} else {
+					movie.TitleUA = res.Title
+					changed = true
+				}
 			}
 			if res.Plot != "" && res.Plot != movie.Plot {
 				movie.Plot = res.Plot
