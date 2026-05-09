@@ -86,8 +86,8 @@ func (c *Client) getMovieDetails(ctx context.Context, id int, originalFilename s
 			}
 		}
 
-		// Якщо зібрали кириличні дані - можемо переривати цикл
-		if hasCyrillicChars(finalInfo.Plot) && hasCyrillicChars(finalInfo.TitleUA) && finalInfo.Genres != "" {
+		// Якщо зібрали якісні українські дані - можемо переривати цикл
+		if isGoodUkrainian(finalInfo.TitleUA) && isGoodUkrainian(finalInfo.Plot) {
 			break
 		}
 	}
@@ -145,7 +145,7 @@ func (c *Client) getTVDetails(ctx context.Context, id int, originalFilename stri
 			}
 		}
 
-		if hasCyrillicChars(finalInfo.Plot) && hasCyrillicChars(finalInfo.TitleUA) && finalInfo.Genres != "" {
+		if isGoodUkrainian(finalInfo.TitleUA) && isGoodUkrainian(finalInfo.Plot) {
 			break
 		}
 	}

@@ -133,7 +133,8 @@ func buildAttempts(parsed ParsedFile, originalFilename string) []searchAttempt {
 }
 
 // searchAndFetch виконує один запит до TMDB, ранжує результати,
-// і якщо знайшов переможця — витягує повні деталі
+// і якщо знайшов переможця — витягує повні деталі.
+// 🔴 КАСКАД ПОШУКУ: Шукаємо в обох індексах (UA + RU) для кириличних запитів
 func (c *Client) searchAndFetch(
 	ctx context.Context,
 	query string,
@@ -153,68 +154,98 @@ func (c *Client) searchAndFetch(
 		return info, nil
 	}
 
-	// 🔴 ВИПРАВЛЕННЯ: Динамічний вибір мови індексу для TMDB
-	langParam := "en-US"
+	// 🔴 КАСКАД ПОШУКУ: Шукаємо в обох індексах для кириличних запитів
+	langs := []string{"en-US"}
 	if hasCyrillicChars(query) {
-		langParam = "ru-RU"
+		// Для кириличних запитів пробуємо спочатку UA, потім RU
+		langs = []string{"uk-UA", "ru-RU"}
 	}
 
-	// 🟢 ВИБІР ЕНДПОІНТА: /search/movie або /search/tv якщо тип відомий
-	endpoint := "multi"
-	yearParam := ""
-	if preferredType == MediaTypeMovie {
-		endpoint = "movie"
-		if targetYear > 0 {
-			yearParam = fmt.Sprintf("&year=%d", targetYear)
+	var bestGlobal *scoredResult
+	logger := utils.LoggerWithTrace(ctx).With(slog.String("component", "tmdb_search_cascade"))
+
+	for _, langParam := range langs {
+		// 🟢 ВИБІР ЕНДПОІНТА: /search/movie або /search/tv якщо тип відомий
+		endpoint := "multi"
+		yearParam := ""
+		if preferredType == MediaTypeMovie {
+			endpoint = "movie"
+			if targetYear > 0 {
+				yearParam = fmt.Sprintf("&year=%d", targetYear)
+			}
+		} else if preferredType == MediaTypeTV {
+			endpoint = "tv"
+			if targetYear > 0 {
+				yearParam = fmt.Sprintf("&first_air_date_year=%d", targetYear)
+			}
 		}
-	} else if preferredType == MediaTypeTV {
-		endpoint = "tv"
-		if targetYear > 0 {
-			yearParam = fmt.Sprintf("&first_air_date_year=%d", targetYear)
+
+		searchURL := fmt.Sprintf(
+			"%s/search/%s?api_key=%s&query=%s&language=%s%s",
+			baseURL, endpoint, c.apiKey, url.QueryEscape(query), langParam, yearParam,
+		)
+
+		logger.Debug("search_attempt", slog.String("lang", langParam), slog.String("url", searchURL))
+
+		var resp tmdbSearchResponse
+		if err := c.doRequestWithRetry(ctx, searchURL, &resp); err != nil {
+			logger.Debug("search_failed_for_lang", slog.String("lang", langParam), slog.Any("error", err))
+			continue
 		}
-	}
 
-	searchURL := fmt.Sprintf(
-		"%s/search/%s?api_key=%s&query=%s&language=%s%s",
-		baseURL, endpoint, c.apiKey, url.QueryEscape(query), langParam, yearParam,
-	)
+		// Для /search/movie та /search/tv поле media_type у результатах ВІДСУТНЄ
+		// Додаємо його вручну, щоб rankResults знав з чим працює
+		for i := range resp.Results {
+			if resp.Results[i].MediaType == "" {
+				if preferredType != "" {
+					resp.Results[i].MediaType = string(preferredType)
+				} else if endpoint == "movie" {
+					resp.Results[i].MediaType = "movie"
+				} else if endpoint == "tv" {
+					resp.Results[i].MediaType = "tv"
+				}
+			}
+		}
 
-	var resp tmdbSearchResponse
-	if err := c.doRequestWithRetry(ctx, searchURL, &resp); err != nil {
-		return nil, err
-	}
+		if len(resp.Results) == 0 {
+			logger.Debug("no_results_for_lang", slog.String("lang", langParam))
+			continue
+		}
 
-	// Для /search/movie та /search/tv поле media_type у результатах ВІДСУТНЄ
-	// Додаємо його вручну, щоб rankResults знав з чим працює
-	for i := range resp.Results {
-		if resp.Results[i].MediaType == "" {
-			if preferredType != "" {
-				resp.Results[i].MediaType = string(preferredType)
-			} else if endpoint == "movie" {
-				resp.Results[i].MediaType = "movie"
-			} else if endpoint == "tv" {
-				resp.Results[i].MediaType = "tv"
+		// Ранжуємо результати для цієї мови
+		bestForLang := c.rankResults(ctx, resp.Results, query, targetYear, preferredType)
+		if bestForLang != nil {
+			logger.Debug("best_for_lang",
+				slog.String("lang", langParam),
+				slog.String("title", coalesce(bestForLang.result.Title, bestForLang.result.Name)),
+				slog.Int("score", bestForLang.score),
+			)
+
+			// ПОРІВНЯННЯ: якщо в цій мові бал вищий (точніший збіг) — оновлюємо глобальний результат
+			if bestGlobal == nil || bestForLang.score > bestGlobal.score {
+				bestGlobal = bestForLang
 			}
 		}
 	}
 
-	if len(resp.Results) == 0 {
-		return nil, nil
-	}
-
-	best := c.rankResults(ctx, resp.Results, query, targetYear, preferredType)
-	if best == nil {
+	if bestGlobal == nil {
+		logger.Debug("no_best_candidate_found")
 		c.searchCache.Store(cacheKey, (*MovieInfo)(nil)) // Кешуємо негативний результат
 		return nil, nil
 	}
 
+	logger.Info("dual_search_winner",
+		slog.String("title", coalesce(bestGlobal.result.Title, bestGlobal.result.Name)),
+		slog.Int("score", bestGlobal.score),
+	)
+
 	// Визначаємо фінальний MediaType для запиту деталей
 	detailType := MediaTypeMovie
-	if best.result.MediaType == "tv" {
+	if bestGlobal.result.MediaType == "tv" {
 		detailType = MediaTypeTV
 	}
 
-	info, err := c.GetDetails(ctx, detailType, best.result.ID, originalFilename)
+	info, err := c.GetDetails(ctx, detailType, bestGlobal.result.ID, originalFilename)
 
 	if err == nil && info != nil {
 		c.searchCache.Store(cacheKey, info)
@@ -561,6 +592,22 @@ func abs(x int) int {
 func hasCyrillicChars(s string) bool {
 	for _, r := range s {
 		if unicode.Is(unicode.Cyrillic, r) {
+			return true
+		}
+	}
+	return false
+}
+
+// isGoodUkrainian перевіряє, чи містить рядок суто українські літери (і, ї, є, ґ)
+// Це гарантує, що текст справді український, а не російський
+func isGoodUkrainian(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		// Якщо є хоч одна суто українська літера — вважаємо, що це UA
+		switch r {
+		case 'і', 'І', 'ї', 'Ї', 'є', 'Є', 'ґ', 'Ґ':
 			return true
 		}
 	}
