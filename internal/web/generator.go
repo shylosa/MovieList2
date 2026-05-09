@@ -113,7 +113,7 @@ const htmlLayout = `<!DOCTYPE html>
         .movie-list.list-view .plot { grid-column: 2; grid-row: 1 / 4; margin: 0; font-size: 0.85em; color: #bbb; text-align: left; display: -webkit-box; -webkit-line-clamp: 5; -webkit-box-orient: vertical; overflow: hidden; }
         .movie-list.list-view .filename { grid-column: 2; grid-row: 4; margin: 0; text-align: right; align-self: end; font-size: 0.75em; border: none; padding: 0; color: #bbb; }
 
-        .no-results { grid-column: 1 / -1; text-align: center; padding: 50px; font-size: 1.2em; color: #888; display: none; }
+        .no-results { text-align: center; padding: 50px; font-size: 1.2em; color: #888; display: none; }
 
         .modal { display: none; position: fixed; z-index: 2000; left: 0; top: 0; width: 100%; height: 100%; background: rgba(0,0,0,0.8); backdrop-filter: blur(8px); justify-content: center; align-items: center; }
         .modal-content { max-width: 90vw; max-height: 90vh; }
@@ -151,7 +151,6 @@ const htmlLayout = `<!DOCTYPE html>
         <span>🎬 Всього: <strong>{{.TotalMovies}}</strong></span>
         <span>📅 Оновлено: <strong>{{.GenerationTime}}</strong></span>
         <span id="filteredCount" style="display:none">🔎 Знайдено: <strong id="filteredNum">0</strong></span>
-        <div id="noResults" class="no-results" style="display:none">Нічого не знайдено 🎬</div>
     </div>
 
     <div class="container">
@@ -182,6 +181,7 @@ const htmlLayout = `<!DOCTYPE html>
             {{end}}
         </div>
     </div>
+    <div id="noResults" class="no-results" style="display:none">Нічого не знайдено 🎬</div>
     <div id="imageModal" style="display: none; position: fixed; z-index: 9999; left: 0; top: 0; width: 100%; height: 100%; background-color: rgba(0,0,0,0.85); align-items: center; justify-content: center; cursor: pointer;">
         <img id="modalImage" style="max-height: 90vh; max-width: 90vw; border-radius: 8px; box-shadow: 0 10px 30px rgba(0,0,0,0.8); cursor: default;">
     </div>
