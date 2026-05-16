@@ -36,7 +36,8 @@ type ParsedFile struct {
 type MovieInfo struct {
 	TMDBID          int
 	TitleUA         string
-	TitleEN         string
+	TitleEN         string // Це насправді OriginalTitle (за базою)
+	SearchTitle     string // Знайдена локалізована назва (для TitleSimilarity)
 	Year            string
 	Genres          string
 	Plot            string

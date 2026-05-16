@@ -14,7 +14,6 @@ import (
 )
 
 // Movie описує структуру фільму в базі даних (уніфіковано)
-// Movie описує структуру фільму в базі даних (уніфіковано)
 type Movie struct {
 	ID              int    `json:"id"`
 	Filename        string `json:"filename"`

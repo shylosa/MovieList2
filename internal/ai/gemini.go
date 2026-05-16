@@ -6,16 +6,47 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
 	"movielist-app/internal/config"
+	"movielist-app/internal/tmdb"
 	"movielist-app/internal/utils"
 
 	"golang.org/x/time/rate"
 	"google.golang.org/genai"
 )
+
+// FileRecognitionContext — структурований контекст файлу для промпту Gemini.
+type FileRecognitionContext struct {
+	OriginalFile string `json:"original_file"`
+	FilePath     string `json:"-"`
+	CleanTitle   string `json:"parsed_title"`
+	Year         int    `json:"parsed_year,omitempty"`
+	MediaType    string `json:"parsed_media_type"`
+	ParentDir    string `json:"parent_folder,omitempty"`
+	IMDBID       string `json:"imdb_id,omitempty"`
+}
+
+// FileRecognitionContextFromPath будує контекст із повного шляху або basename.
+func FileRecognitionContextFromPath(path string) FileRecognitionContext {
+	parsed := tmdb.ParseFilename(path)
+	year := 0
+	if parsed.Year > 0 {
+		year = parsed.Year
+	}
+	return FileRecognitionContext{
+		OriginalFile: filepath.Base(path),
+		FilePath:     path,
+		CleanTitle:   parsed.CleanTitle,
+		Year:         year,
+		MediaType:    string(parsed.MediaType),
+		ParentDir:    parsed.ParentDir,
+		IMDBID:       parsed.IMDBID,
+	}
+}
 
 // RecognizedTitle — відповідь Gemini для одного файлу.
 //
@@ -118,13 +149,13 @@ func (c *Client) Close() {}
 
 // RecognizeBulk — пакетне розпізнавання імен файлів через Gemini.
 // Повертає дані для пошуку в TMDB + fallback-поля для мержу.
-func (c *Client) RecognizeBulk(ctx context.Context, filenames []string) ([]RecognizedTitle, error) {
-	if len(filenames) == 0 {
+func (c *Client) RecognizeBulk(ctx context.Context, contexts []FileRecognitionContext) ([]RecognizedTitle, error) {
+	if len(contexts) == 0 {
 		return nil, nil
 	}
 
-	prompt := buildPrompt(filenames)
-	utils.LoggerWithTrace(ctx).Info("gemini_recognition_start", slog.Int("file_count", len(filenames)))
+	prompt := buildPrompt(contexts)
+	utils.LoggerWithTrace(ctx).Info("gemini_recognition_start", slog.Int("file_count", len(contexts)))
 
 	return c.requestWithRetry(ctx, prompt)
 }
@@ -245,16 +276,15 @@ func buildBulkTranslateSchema() *genai.Schema {
 }
 
 // buildPrompt — промпт з прикладами транслітератів і правилами мержу
-func buildPrompt(filenames []string) string {
-	var sb strings.Builder
-	for _, f := range filenames {
-		sb.WriteString("- ")
-		sb.WriteString(f)
-		sb.WriteString("\n")
-	}
+func buildPrompt(contexts []FileRecognitionContext) string {
+	filesJSON, _ := json.MarshalIndent(contexts, "", "  ")
 
 	return fmt.Sprintf(`You are a movie database expert. Your goal is to find the OFFICIAL ORIGINAL (English) title of the movie on IMDB/TMDB based on the provided transliterated or localized name and year.
 CRITICAL: DO NOT translate localized titles literally! (e.g., DO NOT translate "Moj malenkij angel" as "My Little Angel" — find the actual release like "Foster"). Your data will be MERGED with TMDB results.
+
+PRE-PARSED FILE CONTEXT (from our local parser — TRUST these fields, do not re-guess year/media_type):
+%s
+For each item, "original_file" in your response MUST exactly match "original_file" from the input JSON.
 
 MERGE STRATEGY (important to understand your role):
 - "en_title" → used to search TMDB. Must be exact TMDB-searchable title.
@@ -294,10 +324,8 @@ FIELD RULES:
 4. plot: Ukrainian, 2-3 sentences. Empty string "" if you don't know this film.
 5. genres: Ukrainian names only. Empty string "" if uncertain.
 6. cast: real names, 3-5 actors. Empty string "" if uncertain.
-7. media_type: "tv" only with explicit S01/Season markers. Otherwise "movie".
-
-Files to process:
-%s`, sb.String())
+7. media_type: prefer "parsed_media_type" from input when present. Use "tv" only with explicit S01/Season markers. Otherwise "movie".
+8. year: prefer "parsed_year" from input when present and valid.`, string(filesJSON))
 }
 
 

@@ -48,7 +48,11 @@ type App struct {
 	scanMutex     sync.Mutex
 }
 
-const geminiMinConfidence = 0.5
+// aiConfidenceThreshold — єдиний поріг для Gemini, L2-кешу та merge.
+const aiConfidenceThreshold = 0.55
+
+// geminiTMDBVerifyMinJW — мінімальна схожість EN-назви Gemini і TMDB після верифікації.
+const geminiTMDBVerifyMinJW = 0.85
 
 var russianMarkers = []string{"из", "как", "что", "он", "это", "бы", "вот", "для"}
 
@@ -363,6 +367,7 @@ func (a *App) RunScan() {
 	var geminiQueue []string
 
 	type scanResult struct {
+		path        string
 		fname       string
 		info        *tmdb.MovieInfo
 		needsGemini bool
@@ -412,7 +417,7 @@ func (a *App) RunScan() {
 				slog.String("stage", "init"),
 			)
 
-			info, err := a.tmdbClient.FetchFromFilename(fileCtx, fname)
+			info, err := a.tmdbClient.FetchFromFilename(fileCtx, path)
 			if err != nil {
 				logger.Warn("tmdb_search_error",
 					slog.String("file", fname),
@@ -421,10 +426,10 @@ func (a *App) RunScan() {
 				a.logFront(fmt.Sprintf("⚠️ TMDB помилка для '%s': %v", fname, err))
 			}
 
-			if info != nil && info.TitleEN != "" {
-				resultsChan <- scanResult{fname: fname, info: info, needsGemini: false}
+			if info != nil && info.TMDBID > 0 {
+				resultsChan <- scanResult{path: path, fname: fname, info: info, needsGemini: false}
 			} else {
-				resultsChan <- scanResult{fname: fname, info: nil, needsGemini: true}
+				resultsChan <- scanResult{path: path, fname: fname, info: nil, needsGemini: true}
 			}
 		}()
 	}
@@ -445,20 +450,28 @@ func (a *App) RunScan() {
 			translationQueue = append(translationQueue, res.fname)
 		} else {
 			// 🟢 ПЕРЕВІРКА L2 КЕШУ: Чи не розпізнавали ми цей файл раніше через ШІ?
-			if cached, _ := a.db.GetAIResolution(ctx, res.fname); cached != nil && cached.Confidence >= 0.6 {
+			if cached, _ := a.db.GetAIResolution(ctx, res.fname); cached != nil && cached.Confidence >= aiConfidenceThreshold {
 				utils.LoggerWithTrace(ctx).Info("gemini_l2_cache_hit", slog.String("file", res.fname), slog.String("resolved", cached.ResolvedTitle))
 
 				// Використовуємо кешовану назву для пошуку в TMDB
 				info, err := a.tmdbClient.FetchByCleanTitle(ctx, cached.ResolvedTitle, strconv.Itoa(cached.Year), tmdb.MediaType(cached.MediaType))
-				if err == nil && info != nil {
-					movie := movieFromTMDB(res.fname, info)
-					moviesToSave = append(moviesToSave, movie)
-					a.logFront(fmt.Sprintf("⚡ L2-Кеш: '%s' → '%s'", res.fname, info.TitleUA))
-					translationQueue = append(translationQueue, res.fname)
-					continue
+				if err == nil && info != nil && info.TMDBID > 0 {
+					jw := tmdb.TitleSimilarity(cached.ResolvedTitle, info.TitleEN)
+					if info.SearchTitle != "" {
+						if jwSearch := tmdb.TitleSimilarity(cached.ResolvedTitle, info.SearchTitle); jwSearch > jw {
+							jw = jwSearch
+						}
+					}
+					if jw >= geminiTMDBVerifyMinJW {
+						movie := movieFromTMDB(res.fname, info)
+						moviesToSave = append(moviesToSave, movie)
+						a.logFront(fmt.Sprintf("⚡ L2-Кеш: '%s' → '%s'", res.fname, info.TitleUA))
+						translationQueue = append(translationQueue, res.fname)
+						continue
+					}
 				}
 			}
-			geminiQueue = append(geminiQueue, res.fname)
+			geminiQueue = append(geminiQueue, res.path)
 		}
 	}
 
@@ -488,13 +501,13 @@ func (a *App) StopScan() {
 	a.cancelScan()
 }
 
-// processGeminiQueue — Gemini розпізнає назви → TMDB верифікує → мерж → збереження
-// 🟢 СТАЛО: Додаємо ctx context.Context першим параметром і повертаємо []string
-func (a *App) processGeminiQueue(ctx context.Context, filenames []string, aiClient *ai.Client) []string {
+// processGeminiQueue — Gemini розпізнає назви → TMDB верифікує → мерж → збереження.
+// paths — повні шляхи до файлів (для парсера та збагаченого промпту).
+func (a *App) processGeminiQueue(ctx context.Context, paths []string, aiClient *ai.Client) []string {
 	var recognizedFiles []string
 
 	const batchSize = 10
-	total := len(filenames)
+	total := len(paths)
 	totalBatches := (total + batchSize - 1) / batchSize
 	processed := 0
 
@@ -508,17 +521,22 @@ func (a *App) processGeminiQueue(ctx context.Context, filenames []string, aiClie
 		if end > total {
 			end = total
 		}
-		batch := filenames[i:end]
+		batch := paths[i:end]
 		currentBatchIdx := i/batchSize + 1
 
 		a.logFront(fmt.Sprintf("📦 Gemini пачка %d/%d (%d файлів) відправлена...", currentBatchIdx, totalBatches, len(batch)))
 
-		results, err := aiClient.RecognizeBulk(ctx, batch)
+		contexts := make([]ai.FileRecognitionContext, len(batch))
+		for j, path := range batch {
+			contexts[j] = ai.FileRecognitionContextFromPath(path)
+		}
+
+		results, err := aiClient.RecognizeBulk(ctx, contexts)
 		if err != nil {
 			a.logFront(fmt.Sprintf("⚠️ Gemini помилка пачки %d: %v", currentBatchIdx, err))
 			var errorMovies []storage.Movie
-			for _, fname := range batch {
-				errorMovies = append(errorMovies, storage.Movie{Filename: fname})
+			for _, path := range batch {
+				errorMovies = append(errorMovies, storage.Movie{Filename: filepath.Base(path)})
 			}
 			_ = a.db.SaveMoviesBatch(ctx, errorMovies)
 			continue
@@ -526,13 +544,14 @@ func (a *App) processGeminiQueue(ctx context.Context, filenames []string, aiClie
 
 		recognizedMap := make(map[string]ai.RecognizedTitle, len(results))
 		for _, r := range results {
-			recognizedMap[r.OriginalFile] = r
+			recognizedMap[strings.ToLower(r.OriginalFile)] = r
 		}
 
 		var moviesToSave []storage.Movie
-		for _, fname := range batch {
+		for _, path := range batch {
 			processed++
-			rec, ok := recognizedMap[fname]
+			fname := filepath.Base(path)
+			rec, ok := recognizedMap[strings.ToLower(fname)]
 
 			if !ok || rec.ENTitle == "" {
 				a.logFront(fmt.Sprintf("⚠️ Gemini не розпізнав: '%s'", fname))
@@ -543,21 +562,20 @@ func (a *App) processGeminiQueue(ctx context.Context, filenames []string, aiClie
 
 			a.emitProgress(processed, total, "🤖 Gemini: "+rec.ENTitle)
 
-			yearVal := 0
-			if rec.Year != nil {
-				yearVal = *rec.Year
-			}
-			_ = a.db.SaveAIResolution(ctx, storage.AIResolution{
-				OriginalFilename: fname,
-				ResolvedTitle:    rec.ENTitle,
-				Year:             yearVal,
-				MediaType:        rec.MediaType,
-				Confidence:       rec.Confidence,
-			})
-
-			movie := a.mergeGeminiWithTMDB(ctx, fname, rec)
+			movie := a.mergeGeminiWithTMDB(ctx, path, rec)
 			moviesToSave = append(moviesToSave, movie)
 			if movie.TmdbID > 0 {
+				yearVal := 0
+				if rec.Year != nil {
+					yearVal = *rec.Year
+				}
+				_ = a.db.SaveAIResolution(ctx, storage.AIResolution{
+					OriginalFilename: fname,
+					ResolvedTitle:    rec.ENTitle,
+					Year:             yearVal,
+					MediaType:        rec.MediaType,
+					Confidence:       rec.Confidence,
+				})
 				recognizedFiles = append(recognizedFiles, fname)
 			}
 		}
@@ -574,30 +592,31 @@ func (a *App) processGeminiQueue(ctx context.Context, filenames []string, aiClie
 }
 
 // mergeGeminiWithTMDB — шукає фільм в TMDB за EN назвою від Gemini,
-// мержить результати: TMDB має пріоритет, Gemini заповнює прогалини
-func (a *App) mergeGeminiWithTMDB(ctx context.Context, fname string, rec ai.RecognizedTitle) storage.Movie {
+// мержить результати: TMDB має пріоритет, Gemini заповнює прогалини.
+// filePath — повний шлях або basename (для ParseFilename).
+func (a *App) mergeGeminiWithTMDB(ctx context.Context, filePath string, rec ai.RecognizedTitle) storage.Movie {
+	fname := filepath.Base(filePath)
+
 	// 🛡️ КРОК 1: ПЕРЕВІРКА ВАЛІДНОСТІ ВІДПОВІДІ ШІ
 	if rec.ENTitle == "" {
 		a.logFront(fmt.Sprintf("⚠️ [GEMINI] Відсутня EN назва для '%s'. Пропускаємо пошук.", fname))
 		return storage.Movie{Filename: fname}
 	}
 
-	// 🔴 ДОДАНО: Жорсткий фільтр за рівнем впевненості (єдиний центр прийняття рішень)
-	if rec.Confidence < geminiMinConfidence {
+	if rec.Confidence < aiConfidenceThreshold {
 		a.logFront(fmt.Sprintf("🛡️ [ЗАХИСТ] Gemini невпевнений (%.2f) щодо '%s'. Відхиляємо.", rec.Confidence, fname))
 		return storage.Movie{Filename: fname}
 	}
 
-	// 🛡️ КРОК 4: ЗАЛІЗНИЙ КОНТРОЛЬ РОКУ (Захист від галюцинацій)
-	// Парсимо ім'я файлу, щоб отримати еталонний рік
-	parsed := tmdb.ParseFilename(fname)
+	// 🛡️ КРОК 4: КОНТРОЛЬ РОКУ
+	parsed := tmdb.ParseFilename(filePath)
 	if parsed.Year > 0 {
 		if rec.Year != nil {
 			diff := *rec.Year - parsed.Year
-			// Допускаємо похибку ±1 рік. Якщо більше — це галюцинація!
+			// Допускаємо похибку ±1 рік. Якщо більше — логуємо як потенційну галюцинацію,
+			// але даємо шанс TMDB верифікувати цей рік.
 			if diff < -1 || diff > 1 {
-				a.logFront(fmt.Sprintf("🛡️ [ЗАХИСТ] ШІ галюцинує рік %d для '%s'. Примусово беремо з файлу: %d", *rec.Year, fname, parsed.Year))
-				*rec.Year = parsed.Year // Жорстко перезаписуємо брехню ШІ
+				a.logFront(fmt.Sprintf("⚠️ [ПОПЕРЕДЖЕННЯ] Gemini вказав рік %d для '%s' (у файлі %d). Довіряємо Gemini, але TMDB має це перевірити.", *rec.Year, fname, parsed.Year))
 			}
 		} else {
 			// Якщо ШІ взагалі не дав року, страхуємо його
@@ -633,8 +652,22 @@ func (a *App) mergeGeminiWithTMDB(ctx context.Context, fname string, rec ai.Reco
 
 	if tmdbInfo == nil {
 		a.logFront(fmt.Sprintf("❌ TMDB не знайшов '%s' — запис залишається нерозпізнаним", rec.ENTitle))
-		// Повертаємо виключно Filename. Відсутність TitleEN та TitleUA гарантує,
-		// що файл потрапить у статистику "Нерозпізнані" і UI покаже його для ручного фіксу.
+		return storage.Movie{Filename: fname}
+	}
+
+	jw := tmdb.TitleSimilarity(rec.ENTitle, tmdbInfo.TitleEN)
+	if tmdbInfo.SearchTitle != "" {
+		jwSearch := tmdb.TitleSimilarity(rec.ENTitle, tmdbInfo.SearchTitle)
+		if jwSearch > jw {
+			jw = jwSearch
+		}
+	}
+
+	if jw < geminiTMDBVerifyMinJW {
+		a.logFront(fmt.Sprintf(
+			"🛡️ [POST-VERIFY] Відхилено '%s': Gemini '%s' ≠ TMDB '%s' (Search: '%s', схожість %.2f)",
+			fname, rec.ENTitle, tmdbInfo.TitleEN, tmdbInfo.SearchTitle, jw,
+		))
 		return storage.Movie{Filename: fname}
 	}
 
@@ -790,13 +823,14 @@ func (a *App) UpdateMovie(ctx context.Context, filename, hint string) error {
 	}
 
 	// Варіант 2: текстова підказка не дала результату → Gemini → TMDB
-	query := filename
+	a.logFront(fmt.Sprintf("🧠 [%s] Аналіз через Gemini...", filename))
+
+	geminiCtx := ai.FileRecognitionContextFromPath(filename)
 	if hint != "" {
-		query = fmt.Sprintf("%s (підказка: %s)", filename, hint)
+		geminiCtx.OriginalFile = fmt.Sprintf("%s (підказка: %s)", filename, hint)
 	}
 
-	a.logFront(fmt.Sprintf("🧠 [%s] Аналіз через Gemini...", filename))
-	results, err := a.aiClient.RecognizeBulk(ctx, []string{query})
+	results, err := a.aiClient.RecognizeBulk(ctx, []ai.FileRecognitionContext{geminiCtx})
 	if err != nil || len(results) == 0 {
 		a.logFront(fmt.Sprintf("❌ Gemini не відповів для '%s'", filename))
 		return err
@@ -810,6 +844,20 @@ func (a *App) UpdateMovie(ctx context.Context, filename, hint string) error {
 
 	a.logFront(fmt.Sprintf("🤖 Gemini: '%s' → '%s'", filename, rec.ENTitle))
 	movie := a.mergeGeminiWithTMDB(ctx, filename, rec)
+
+	if movie.TmdbID > 0 {
+		yearVal := 0
+		if rec.Year != nil {
+			yearVal = *rec.Year
+		}
+		_ = a.db.SaveAIResolution(ctx, storage.AIResolution{
+			OriginalFilename: filename,
+			ResolvedTitle:    rec.ENTitle,
+			Year:             yearVal,
+			MediaType:        rec.MediaType,
+			Confidence:       rec.Confidence,
+		})
+	}
 
 	// Зберігаємо існуючі поля якщо нові порожні
 	if movie.TitleUA == "" {
@@ -1012,12 +1060,6 @@ func needsTranslation(s string) bool {
 	// 3. Є специфічні російські літери -> перекладаємо[cite: 12]
 	if hasRussianLetter {
 		return true
-	}
-	// 4. 🔴 ХІРУРГІЧНЕ ВТРУЧАННЯ: Якщо вже є кирилиця без російських маркерів,
-	// це означає, що TMDB вже дав нам щось пристойне.
-	// Не смикаємо ШІ даремно — довіримо TMDB.
-	if hasCyrillic && !hasRussianLetter {
-		return false
 	}
 
 	// 5. СІРА ЗОНА: якщо немає специфічних українських літер (і, ї, є, ґ),

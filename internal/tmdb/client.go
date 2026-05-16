@@ -300,12 +300,29 @@ func (c *Client) pipelineLatin(ctx context.Context, parsed ParsedFile, originalF
 // pipelineCyrillic — стратегія для кириличних назв:
 // 1. TMDB напряму (з роком якщо є)
 // 2. TMDB без року
-// 3. Сигнал "потрібен Gemini" (nil, nil)
+// 3. Транслітерація кирилиця → латиниця → TMDB (en-US індекс)
+// 4. Сигнал "потрібен Gemini" (nil, nil)
 func (c *Client) pipelineCyrillic(ctx context.Context, parsed ParsedFile, originalFilename string) (*MovieInfo, error) {
 	if info := c.trySearch(ctx, parsed, originalFilename); info != nil {
 		return info, nil
 	}
-	// Gemini на рівні вище
+
+	latinTitle := cyrillicToLatin(parsed.CleanTitle)
+	if latinTitle != parsed.CleanTitle {
+		utils.LoggerWithTrace(ctx).Info("cyrillic_to_latin_translit",
+			slog.String("original", parsed.CleanTitle),
+			slog.String("converted", latinTitle),
+		)
+
+		latinParsed := parsed
+		latinParsed.CleanTitle = latinTitle
+		latinParsed.TitleLang = TitleLangLatin
+
+		if info := c.trySearch(ctx, latinParsed, originalFilename); info != nil {
+			return info, nil
+		}
+	}
+
 	return nil, nil
 }
 
@@ -420,6 +437,45 @@ func latinToCyrillic(s string) string {
 		return s
 	}
 	return converted
+}
+
+// cyrillicToLatinMap — транслітерація кирилиці в латиницю для пошуку в en-US індексі TMDB.
+var cyrillicToLatinMap = map[rune]string{
+	'а': "a", 'б': "b", 'в': "v", 'г': "g", 'д': "d", 'е': "e", 'ё': "yo", 'ж': "zh",
+	'з': "z", 'и': "i", 'й': "y", 'к': "k", 'л': "l", 'м': "m", 'н': "n", 'о': "o",
+	'п': "p", 'р': "r", 'с': "s", 'т': "t", 'у': "u", 'ф': "f", 'х': "kh", 'ц': "ts",
+	'ч': "ch", 'ш': "sh", 'щ': "shch", 'ъ': "", 'ы': "y", 'ь': "", 'э': "e", 'ю': "yu", 'я': "ya",
+	'і': "i", 'ї': "i", 'є': "e", 'ґ': "g",
+	'А': "A", 'Б': "B", 'В': "V", 'Г': "G", 'Д': "D", 'Е': "E", 'Ё': "Yo", 'Ж': "Zh",
+	'З': "Z", 'И': "I", 'Й': "Y", 'К': "K", 'Л': "L", 'М': "M", 'Н': "N", 'О': "O",
+	'П': "P", 'Р': "R", 'С': "S", 'Т': "T", 'У': "U", 'Ф': "F", 'Х': "Kh", 'Ц': "Ts",
+	'Ч': "Ch", 'Ш': "Sh", 'Щ': "Shch", 'Ъ': "", 'Ы': "Y", 'Ь': "", 'Э': "E", 'Ю': "Yu", 'Я': "Ya",
+	'І': "I", 'Ї': "I", 'Є': "E", 'Ґ': "G",
+}
+
+// cyrillicToLatin конвертує кириличну назву в латиницю для пошуку TMDB.
+// "Слово Пацана" → "Slovo Patsana"
+func cyrillicToLatin(s string) string {
+	hasCyr := false
+	for _, r := range s {
+		if isCyrillic(r) {
+			hasCyr = true
+			break
+		}
+	}
+	if !hasCyr {
+		return s
+	}
+
+	var result strings.Builder
+	for _, r := range s {
+		if lat, ok := cyrillicToLatinMap[r]; ok {
+			result.WriteString(lat)
+		} else {
+			result.WriteRune(r)
+		}
+	}
+	return strings.TrimSpace(reSpaceFallback.ReplaceAllString(result.String(), " "))
 }
 
 // digraphMap — двосимвольні комбінації (порядок важливий: обробляються першими)

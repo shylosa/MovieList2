@@ -2,7 +2,10 @@ package tmdb
 
 import (
 	"context"
+	"net/http"
 	"testing"
+
+	"golang.org/x/time/rate"
 )
 
 func TestMatchScore(t *testing.T) {
@@ -30,7 +33,10 @@ func TestMatchScore(t *testing.T) {
 }
 
 func TestScoreResult_DiamondMatch(t *testing.T) {
-	c := &Client{} // Порожній клієнт, нам потрібна лише логіка
+	c := &Client{
+		client:      &http.Client{},
+		rateLimiter: rate.NewLimiter(rate.Inf, 1),
+	} // Порожній клієнт з ініціалізованими лімітерами для безпечного фейлу запитів
 	ctx := context.Background()
 
 	res := tmdbSearchResult{

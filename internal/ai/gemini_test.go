@@ -67,7 +67,9 @@ func TestGeminiCascadeFallback(t *testing.T) {
 
 	// 3. Запускаємо запит
 	ctx := context.Background()
-	results, err := client.RecognizeBulk(ctx, []string{"test.mkv"})
+	results, err := client.RecognizeBulk(ctx, []FileRecognitionContext{
+		{OriginalFile: "test.mkv", CleanTitle: "test", MediaType: "movie"},
+	})
 
 	// 4. Перевірки
 	if err != nil {

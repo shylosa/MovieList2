@@ -248,6 +248,9 @@ func (c *Client) searchAndFetch(
 	info, err := c.GetDetails(ctx, detailType, bestGlobal.result.ID, originalFilename)
 
 	if err == nil && info != nil {
+		if !hasCyrillicChars(query) {
+			info.SearchTitle = coalesce(bestGlobal.result.Title, bestGlobal.result.Name)
+		}
 		c.searchCache.Store(cacheKey, info)
 	}
 	return info, err
@@ -353,25 +356,20 @@ func (c *Client) scoreResult(
 	       // --- Збіг назви: точний → contains → fuzzy ---
 	       titleScore := matchScore(normQuery, resTitle, resOrig)
 
-	       // 🔴 ХІРУРГІЧНЕ ВТРУЧАННЯ: Якщо назва (або її аліаси) взагалі ніяк не метчиться із запитом — це сміття. Жорстко відхиляємо.
-	       if titleScore == 0 {
-		       return scoredResult{result: res, score: -1000, year: resYear}
-	       }
+	// --- ПЕРЕВІРКА АЛІАСІВ (ПУНКТ 1) ---
+	// Якщо базовий збіг низький, але це топовий результат TMDB — перевіряємо аліаси
+	if titleScore < 100 && index < 3 {
+		mediaType := MediaTypeMovie
+		if res.MediaType == "tv" {
+			mediaType = MediaTypeTV
+		}
 
-	       // --- ПЕРЕВІРКА АЛІАСІВ (ПУНКТ 1) ---
-	       // Якщо базовий збіг низький, але це топовий результат TMDB — перевіряємо аліаси
-	       if titleScore < 100 && index < 3 {
-		       mediaType := MediaTypeMovie
-		       if res.MediaType == "tv" {
-			       mediaType = MediaTypeTV
-		       }
-
-		       alts, err := c.getAlternativeTitles(ctx, res.ID, mediaType)
-		       if err == nil {
-			       for _, alt := range alts {
-				       altNorm := normalizeForCompare(alt)
-				       altScore := fuzzyMatchScoreJW(normQuery, altNorm)
-				       if altScore > titleScore {
+		alts, err := c.getAlternativeTitles(ctx, res.ID, mediaType)
+		if err == nil {
+			for _, alt := range alts {
+				altNorm := normalizeForCompare(alt)
+				altScore := fuzzyMatchScoreJW(normQuery, altNorm)
+				if altScore > titleScore {
 					titleScore = altScore
 					if altScore >= 150 { // Ідеальний збіг в аліасах
 						break
@@ -379,6 +377,11 @@ func (c *Client) scoreResult(
 				}
 			}
 		}
+	}
+
+	// 🔴 ХІРУРГІЧНЕ ВТРУЧАННЯ: Якщо назва (або її аліаси) взагалі ніяк не метчиться із запитом — це сміття. Жорстко відхиляємо.
+	if titleScore == 0 {
+		return scoredResult{result: res, score: -1000, year: resYear}
 	}
 
 	score += titleScore
@@ -462,6 +465,16 @@ func matchScore(normQuery, resTitle, resOrig string) int {
 	fuzzyTitle := fuzzyMatchScoreJW(normQuery, resTitle)
 	fuzzyOrig := fuzzyMatchScoreJW(normQuery, resOrig)
 	return max(fuzzyTitle, fuzzyOrig)
+}
+
+// TitleSimilarity повертає Jaro-Winkler схожість нормалізованих назв (0.0–1.0).
+func TitleSimilarity(a, b string) float64 {
+	a = normalizeForCompare(a)
+	b = normalizeForCompare(b)
+	if a == "" || b == "" {
+		return 0
+	}
+	return smetrics.JaroWinkler(a, b, 0.7, 4)
 }
 
 // fuzzyMatchScoreJW використовує Jaro-Winkler для порівняння рядків.
