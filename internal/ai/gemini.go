@@ -21,6 +21,7 @@ import (
 
 // FileRecognitionContext — структурований контекст файлу для промпту Gemini.
 type FileRecognitionContext struct {
+	ID           int    `json:"id"`
 	OriginalFile string `json:"original_file"`
 	FilePath     string `json:"-"`
 	CleanTitle   string `json:"parsed_title"`
@@ -57,15 +58,12 @@ func FileRecognitionContextFromPath(path string) FileRecognitionContext {
 //
 // Виняток: en_title та year — тільки для пошуку в TMDB, не зберігаємо напряму.
 type RecognizedTitle struct {
+	ID           int     `json:"id"`
 	OriginalFile string  `json:"original_file"` // ім'я файлу як є — для маппінгу
-	ENTitle      string  `json:"en_title"`      // EN назва для пошуку в TMDB
-	TitleUA      string  `json:"title_ua"`      // UA назва — fallback якщо TMDB порожній
-	Year         *int    `json:"year"`          // рік — тільки якщо впевнений, інакше null
-	MediaType    string  `json:"media_type"`    // "movie" або "tv"
-	Plot         string  `json:"plot"`          // опис UA — fallback якщо TMDB порожній
-	Genres       string  `json:"genres"`        // жанри UA — fallback якщо TMDB порожній
-	Cast         string  `json:"cast"`          // актори — fallback якщо TMDB порожній
-	Confidence   float64 `json:"confidence"`    // Оцінка впевненості 0.0-1.0, 0 якщо не вказано
+	ENTitle      string  `json:"en_title"`      // оригінальна англійська назва (для TMDB пошуку)
+	Year         *int    `json:"year"`
+	MediaType    string  `json:"media_type"` // "movie" або "tv"
+	Confidence   float64 `json:"confidence"` // Оцінка впевненості 0.0-1.0, 0 якщо не вказано
 }
 
 type Client struct {
@@ -244,17 +242,14 @@ func buildGenAISchema() *genai.Schema {
 		Items: &genai.Schema{
 			Type: genai.TypeObject,
 			Properties: map[string]*genai.Schema{
+				"id":            {Type: genai.TypeInteger, Description: "exact integer identifier from input"},
 				"original_file": {Type: genai.TypeString, Description: "exact original filename as provided, unchanged"},
 				"en_title":      {Type: genai.TypeString, Description: "original English title for TMDB search. Must be the international release title, not a translation."},
-				"title_ua":      {Type: genai.TypeString, Description: "official Ukrainian title. Empty string if unknown - do not invent."},
 				"year":          {Type: genai.TypeInteger, Nullable: genai.Ptr(true), Description: "release year. null if uncertain."},
 				"media_type":    {Type: genai.TypeString, Description: "\"movie\" or \"tv\". Use \"tv\" only for clear series markers."},
-				"plot":          {Type: genai.TypeString, Description: "2-3 sentence plot summary in Ukrainian."},
-				"genres":        {Type: genai.TypeString, Description: "comma-separated genres in Ukrainian."},
-				"cast":          {Type: genai.TypeString, Description: "3-5 main actor names."},
 				"confidence":    {Type: genai.TypeNumber, Description: "Confidence score 0.0-1.0, 0 if not provided."},
 			},
-			Required: []string{"original_file", "en_title", "media_type"},
+			Required: []string{"id", "original_file", "en_title", "media_type", "confidence"},
 		},
 	}
 }

@@ -38,6 +38,7 @@ type MovieInfo struct {
 	TitleUA         string
 	TitleEN         string // Це насправді OriginalTitle (за базою)
 	SearchTitle     string // Знайдена локалізована назва (для TitleSimilarity)
+	MatchedAlias    string // Назва-аліас, яка дала найкращий бал при пошуку
 	Year            string
 	Genres          string
 	Plot            string

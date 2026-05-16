@@ -17,6 +17,9 @@ var (
 	rePunctFallback = regexp.MustCompile(`[._]`)
 	reSpaceFallback = regexp.MustCompile(`\s{2,}`)
 	zeroReplacer    = strings.NewReplacer("O", "0", "О", "0", "o", "0", "о", "0")
+	// reLangTag — знімає мовні теги виду [2xUkr,Eng] або [UKR_ENG] перед go-ptn.
+	// Без цього go-ptn плутає "2x" з лічильником сезону/епізоду і ставить IsMovie=false.
+	reLangTag = regexp.MustCompile(`(?i)\[\d*x?(?:Ukr|Eng|Rus|UA|EN|RU|UKR|ENG|RUS|DUB|VO|MVO|LF|MULTI)[^\]]*\]`)
 )
 
 // reFrontEpisode — детектор SххEхх на ПОЧАТКУ рядка (до назви фільму), що ламає go-ptn.
@@ -69,7 +72,12 @@ func ParseFilename(fullPath string) ParsedFile {
 	// Детектуємо S07 без епізоду ДО парсингу go-ptn
 	isSeasonOnly := reSeason.MatchString(name)
 
-	info, err := ptn.Parse(name + ext)
+	// 🛡️ ПЕРЕДОБРОБКА: Знімаємо мовні теги типу [2xUkr,Eng] або [UKR_ENG] ДО go-ptn.
+	// Без цього go-ptn бачить "2x" як ознаку серіалу і ставить IsMovie=false.
+	nameForPTN := reLangTag.ReplaceAllString(name, "")
+	nameForPTN = strings.TrimSpace(nameForPTN)
+
+	info, err := ptn.Parse(nameForPTN + ext)
 	if err != nil || info == nil {
 		result.CleanTitle = cleanFallback(name)
 		result.MediaType = MediaTypeMovie

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/url"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -36,9 +37,10 @@ type tmdbSearchResponse struct {
 
 // scoredResult — кандидат з підрахованим балом
 type scoredResult struct {
-	result tmdbSearchResult
-	score  int
-	year   int
+	result       tmdbSearchResult
+	score        int
+	year         int
+	matchedAlias string
 }
 
 // SearchWithFallbacks — каскадний пошук з fallback-стратегіями.
@@ -91,7 +93,7 @@ func buildAttempts(parsed ParsedFile, originalFilename string) []searchAttempt {
 		slog.Info("media_type_changed_to_tv", slog.String("filename", originalFilename))
 	}
 
-	candidates := generateTitleCandidates(parsed.CleanTitle, originalFilename)
+	candidates := generateTitleCandidates(parsed.CleanTitle, filepath.Base(originalFilename))
 	var attempts []searchAttempt
 
 	for i, title := range candidates {
@@ -115,8 +117,11 @@ func buildAttempts(parsed ParsedFile, originalFilename string) []searchAttempt {
 		attempts = append(attempts, searchAttempt{bestTitle, 0, opposite, "Протилежний тип"})
 	}
 
-	// 🟢 Додаємо фоллбек на батьківську папку з низьким пріоритетом
-	if parsed.ParentDir != "" && parsed.ParentDir != "." && parsed.ParentDir != "/" {
+	// 🟢 Додаємо фоллбек на батьківську папку з низьким пріоритетом.
+	// Пропускаємо якщо ParentDir є коренем медіатеки або не несе інформації.
+	parentBase := filepath.Base(parsed.ParentDir)
+	if parsed.ParentDir != "" && parsed.ParentDir != "." && parsed.ParentDir != "/" &&
+		!isGenericFolderName(parentBase) {
 		// Парсимо ім'я папки, щоб дістати рік і чисту назву
 		dirParsed := ParseFilename(parsed.ParentDir)
 		if dirParsed.CleanTitle != parsed.CleanTitle && len(dirParsed.CleanTitle) > 2 {
@@ -147,7 +152,11 @@ func (c *Client) searchAndFetch(
 	}
 
 	// 🟢 Спочатку перевіряємо кеш пошуку (уніфікований формат з client.go)
-	cacheKey := fmt.Sprintf("%s|%d|%s", strings.ToLower(query), targetYear, preferredType)
+	cacheKey := SearchCacheKey{
+		query:     strings.ToLower(query),
+		year:      targetYear,
+		mediaType: preferredType,
+	}
 	if val, ok := c.searchCache.Load(cacheKey); ok {
 		info, _ := val.(*MovieInfo)
 		utils.LoggerWithTrace(ctx).Debug("search_cache_hit", slog.String("query", query))
@@ -185,7 +194,7 @@ func (c *Client) searchAndFetch(
 			baseURL, endpoint, c.apiKey, url.QueryEscape(query), langParam, yearParam,
 		)
 
-		logger.Debug("search_attempt", slog.String("lang", langParam), slog.String("url", searchURL))
+		logger.Debug("search_attempt", slog.String("lang", langParam), slog.String("url", maskAPIKey(searchURL)))
 
 		var resp tmdbSearchResponse
 		if err := c.doRequestWithRetry(ctx, searchURL, &resp); err != nil {
@@ -250,6 +259,9 @@ func (c *Client) searchAndFetch(
 	if err == nil && info != nil {
 		if !hasCyrillicChars(query) {
 			info.SearchTitle = coalesce(bestGlobal.result.Title, bestGlobal.result.Name)
+		}
+		if bestGlobal.matchedAlias != "" {
+			info.MatchedAlias = bestGlobal.matchedAlias
 		}
 		c.searchCache.Store(cacheKey, info)
 	}
@@ -353,11 +365,12 @@ func (c *Client) scoreResult(
 		)
 	}
 
-	       // --- Збіг назви: точний → contains → fuzzy ---
-	       titleScore := matchScore(normQuery, resTitle, resOrig)
+	// --- Збіг назви: точний → contains → fuzzy ---
+	titleScore := matchScore(normQuery, resTitle, resOrig)
 
 	// --- ПЕРЕВІРКА АЛІАСІВ (ПУНКТ 1) ---
 	// Якщо базовий збіг низький, але це топовий результат TMDB — перевіряємо аліаси
+	var matchedAlias string
 	if titleScore < 100 && index < 3 {
 		mediaType := MediaTypeMovie
 		if res.MediaType == "tv" {
@@ -371,6 +384,7 @@ func (c *Client) scoreResult(
 				altScore := fuzzyMatchScoreJW(normQuery, altNorm)
 				if altScore > titleScore {
 					titleScore = altScore
+					matchedAlias = alt
 					if altScore >= 150 { // Ідеальний збіг в аліасах
 						break
 					}
@@ -437,7 +451,7 @@ func (c *Client) scoreResult(
 	}
 	score += popBonus
 
-	return scoredResult{result: res, score: score, year: resYear}
+	return scoredResult{result: res, score: score, year: resYear, matchedAlias: matchedAlias}
 }
 
 // matchScore повертає бал за збіг запиту з назвами результату.
@@ -623,6 +637,24 @@ func isGoodUkrainian(s string) bool {
 		case 'і', 'І', 'ї', 'Ї', 'є', 'Є', 'ґ', 'Ґ':
 			return true
 		}
+	}
+	return false
+}
+
+// isGenericFolderName повертає true якщо назва папки є "сміттєвою" і не містить
+// назви фільму (наприклад корінь медіатеки "Фильмы", "Movies", "Video" тощо).
+// Використовується для пропуску спроби "Папка" коли файл лежить у корені.
+func isGenericFolderName(name string) bool {
+	lower := strings.ToLower(name)
+	// Точні збіги кореневих директорій медіатек
+	switch lower {
+	case "movies", "movie", "фильмы", "фільми", "video", "videos",
+		"media", "downloads", "torrents", "content":
+		return true
+	}
+	// Якщо папка — диск (C:, D:, etc.)
+	if len(name) <= 3 && strings.ContainsAny(name, ":/\\") {
+		return true
 	}
 	return false
 }

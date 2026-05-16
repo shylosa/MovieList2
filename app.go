@@ -401,7 +401,7 @@ func (a *App) RunScan() {
 				return
 			}
 
-			fname := filepath.Base(path)
+			fname := a.getFileIdentifier(path)
 
 			// 🟢 СТВОРЮЄМО УНІКАЛЬНИЙ TRACE_ID ДЛЯ ЦЬОГО ФАЙЛУ
 			fileTraceID := uuid.New().String()[:8]
@@ -528,7 +528,9 @@ func (a *App) processGeminiQueue(ctx context.Context, paths []string, aiClient *
 
 		contexts := make([]ai.FileRecognitionContext, len(batch))
 		for j, path := range batch {
-			contexts[j] = ai.FileRecognitionContextFromPath(path)
+			ctxObj := ai.FileRecognitionContextFromPath(path)
+			ctxObj.ID = j
+			contexts[j] = ctxObj
 		}
 
 		results, err := aiClient.RecognizeBulk(ctx, contexts)
@@ -536,22 +538,22 @@ func (a *App) processGeminiQueue(ctx context.Context, paths []string, aiClient *
 			a.logFront(fmt.Sprintf("⚠️ Gemini помилка пачки %d: %v", currentBatchIdx, err))
 			var errorMovies []storage.Movie
 			for _, path := range batch {
-				errorMovies = append(errorMovies, storage.Movie{Filename: filepath.Base(path)})
+				errorMovies = append(errorMovies, storage.Movie{Filename: a.getFileIdentifier(path)})
 			}
 			_ = a.db.SaveMoviesBatch(ctx, errorMovies)
 			continue
 		}
 
-		recognizedMap := make(map[string]ai.RecognizedTitle, len(results))
+		recognizedMap := make(map[int]ai.RecognizedTitle, len(results))
 		for _, r := range results {
-			recognizedMap[strings.ToLower(r.OriginalFile)] = r
+			recognizedMap[r.ID] = r
 		}
 
 		var moviesToSave []storage.Movie
-		for _, path := range batch {
+		for j, path := range batch {
 			processed++
-			fname := filepath.Base(path)
-			rec, ok := recognizedMap[strings.ToLower(fname)]
+			fname := a.getFileIdentifier(path)
+			rec, ok := recognizedMap[j]
 
 			if !ok || rec.ENTitle == "" {
 				a.logFront(fmt.Sprintf("⚠️ Gemini не розпізнав: '%s'", fname))
@@ -595,7 +597,7 @@ func (a *App) processGeminiQueue(ctx context.Context, paths []string, aiClient *
 // мержить результати: TMDB має пріоритет, Gemini заповнює прогалини.
 // filePath — повний шлях або basename (для ParseFilename).
 func (a *App) mergeGeminiWithTMDB(ctx context.Context, filePath string, rec ai.RecognizedTitle) storage.Movie {
-	fname := filepath.Base(filePath)
+	fname := a.getFileIdentifier(filePath)
 
 	// 🛡️ КРОК 1: ПЕРЕВІРКА ВАЛІДНОСТІ ВІДПОВІДІ ШІ
 	if rec.ENTitle == "" {
@@ -662,11 +664,17 @@ func (a *App) mergeGeminiWithTMDB(ctx context.Context, filePath string, rec ai.R
 			jw = jwSearch
 		}
 	}
+	if tmdbInfo.MatchedAlias != "" {
+		jwAlias := tmdb.TitleSimilarity(rec.ENTitle, tmdbInfo.MatchedAlias)
+		if jwAlias > jw {
+			jw = jwAlias
+		}
+	}
 
 	if jw < geminiTMDBVerifyMinJW {
 		a.logFront(fmt.Sprintf(
-			"🛡️ [POST-VERIFY] Відхилено '%s': Gemini '%s' ≠ TMDB '%s' (Search: '%s', схожість %.2f)",
-			fname, rec.ENTitle, tmdbInfo.TitleEN, tmdbInfo.SearchTitle, jw,
+			"🛡️ [POST-VERIFY] Відхилено '%s': Gemini '%s' ≠ TMDB '%s' (Search: '%s', Alias: '%s', схожість %.2f)",
+			fname, rec.ENTitle, tmdbInfo.TitleEN, tmdbInfo.SearchTitle, tmdbInfo.MatchedAlias, jw,
 		))
 		return storage.Movie{Filename: fname}
 	}
@@ -872,6 +880,15 @@ func (a *App) UpdateMovie(ctx context.Context, filename, hint string) error {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
+// getFileIdentifier повертає відносний шлях до файлу (захищає від колізій імен файлів)
+func (a *App) getFileIdentifier(p string) string {
+	rel, err := filepath.Rel(a.cfg.MediaFolderPath, p)
+	if err != nil || strings.HasPrefix(rel, "..") {
+		return filepath.Base(p) // Фоллбек, якщо файл поза медіатекою
+	}
+	return filepath.ToSlash(rel)
+}
+
 // filterUnprocessed повертає файли яких немає в БД або які нерозпізнані
 func (a *App) filterUnprocessed(diskPaths []string) []string {
 	movies, _ := a.db.GetAllMovies(a.ctx)
@@ -885,7 +902,7 @@ func (a *App) filterUnprocessed(diskPaths []string) []string {
 
 	var result []string
 	for _, p := range diskPaths {
-		fname := filepath.Base(p)
+		fname := a.getFileIdentifier(p)
 		if !recognized[fname] {
 			result = append(result, p)
 		}
@@ -897,7 +914,7 @@ func (a *App) filterUnprocessed(diskPaths []string) []string {
 func (a *App) cleanDeletedFiles(diskPaths []string) {
 	diskMap := make(map[string]bool, len(diskPaths))
 	for _, p := range diskPaths {
-		diskMap[filepath.Base(p)] = true
+		diskMap[a.getFileIdentifier(p)] = true
 	}
 
 	dbFilenames, err := a.db.GetAllFilenames(a.ctx)

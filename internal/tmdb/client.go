@@ -26,8 +26,8 @@ const (
 	imageBaseURL = "https://image.tmdb.org/t/p/w500"
 )
 
-// searchCacheKey — ключ для кешування результатів пошуку (економія аллокацій)
-type searchCacheKey struct {
+// SearchCacheKey — ключ для кешування результатів пошуку (запобігає подвійним запитам).
+type SearchCacheKey struct {
 	query     string
 	year      int
 	mediaType MediaType
@@ -174,7 +174,7 @@ func (c *Client) FetchFromFilename(ctx context.Context, filename string) (*Movie
 	)
 
 	// 🟢 ПЕРЕВІРКА КЕШУ: struct-ключ не потребує алокацій strings.ToLower або fmt.Sprintf
-	cacheKey := searchCacheKey{
+	cacheKey := SearchCacheKey{
 		query:     strings.ToLower(parsed.CleanTitle),
 		year:      parsed.Year,
 		mediaType: parsed.MediaType,
