@@ -348,7 +348,11 @@ func (a *App) RunScan() {
 
 	// Очищуємо записи про видалені файли
 	a.cleanDeletedFiles(diskPaths)
-	_, _ = a.db.CleanMissingMovies(a.ctx, diskPaths)
+	diskIDs := make([]string, 0, len(diskPaths))
+	for _, p := range diskPaths {
+		diskIDs = append(diskIDs, a.getFileIdentifier(p))
+	}
+	_, _ = a.db.CleanMissingMovies(a.ctx, diskIDs)
 	a.db.CleanOrphanPosters(a.ctx, a.cfg.PostersDir)
 
 	// Визначаємо що треба обробити (нові + нерозпізнані)

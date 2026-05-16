@@ -208,7 +208,7 @@ func (db *DB) GetMovieByFilename(ctx context.Context, filename string) (*Movie, 
 func (db *DB) CleanMissingMovies(ctx context.Context, actualFiles []string) (int, error) {
 	actualMap := make(map[string]bool)
 	for _, f := range actualFiles {
-		actualMap[filepath.Base(f)] = true
+		actualMap[filepath.ToSlash(f)] = true
 	}
 	rows, err := db.db.QueryContext(ctx, "SELECT filename FROM movies")
 	if err != nil {
