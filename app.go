@@ -342,7 +342,7 @@ func (a *App) RunScan() {
 
 	diskPaths, err := scn.GetDiskFiles()
 	if err != nil {
-		a.finalizeScan(fmt.Sprintf("❌ Помилка сканування диску: %v", err))
+		a.finalizeScan(ctx, fmt.Sprintf("❌ Помилка сканування диску: %v", err))
 		return
 	}
 
@@ -358,7 +358,7 @@ func (a *App) RunScan() {
 	// Визначаємо що треба обробити (нові + нерозпізнані)
 	filesToProcess := a.filterUnprocessed(ctx, diskPaths)
 	if len(filesToProcess) == 0 {
-		a.finalizeScan("Змін не знайдено.")
+		a.finalizeScan(ctx, "Змін не знайдено.")
 		return
 	}
 
@@ -786,7 +786,7 @@ func (a *App) FixSelected(selected []map[string]interface{}) {
 		a.processTranslationQueue(ctx, translationQueue, a.aiClient)
 	}
 
-	a.finalizeScan(fmt.Sprintf("Виправлено %d файлів", total))
+	a.finalizeScan(ctx, fmt.Sprintf("Виправлено %d файлів", total))
 }
 
 // UpdateMovie — оновлення одного запису за hint від користувача.
@@ -1023,8 +1023,8 @@ func (a *App) emitProgress(current, total int, filename string) {
 	})
 }
 
-func (a *App) finalizeScan(msg string) {
-	movies, _ := a.db.GetAllMovies(a.ctx)
+func (a *App) finalizeScan(ctx context.Context, msg string) {
+	movies, _ := a.db.GetAllMovies(ctx)
 	_ = web.Generate(a.cfg, movies)
 	wailsRuntime.EventsEmit(a.ctx, "scan-finished", msg)
 }

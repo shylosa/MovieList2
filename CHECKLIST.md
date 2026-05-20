@@ -8,7 +8,7 @@
 
 - [x] **[app.go / filterUnprocessed]** Замінити `a.db.GetAllMovies(a.ctx)` на `a.db.GetAllMovies(ctx)` — прийняти `ctx context.Context` як параметр методу. Оновити всі виклики `filterUnprocessed` у `RunScan`.
 
-- [ ] **[app.go / finalizeScan]** Додати параметр `ctx context.Context` до `finalizeScan`. Замінити `a.db.GetAllMovies(a.ctx)` на `a.db.GetAllMovies(ctx)`. Оновити всі виклики.
+- [x] **[app.go / finalizeScan]** Додати параметр `ctx context.Context` до `finalizeScan`. Замінити `a.db.GetAllMovies(a.ctx)` на `a.db.GetAllMovies(ctx)`. Оновити всі виклики.
 
 - [ ] **[internal/utils/logger.go]** Зберегти `*os.File` у package-level змінній `var logFile *os.File`. У `CloseLogger` додати: `if logFile != nil { logFile.Sync(); logFile.Close() }`.
 

@@ -557,3 +557,6 @@ func (a *App) GetAIModels() ([]string, error) {
 
 ### 3. Передача `ctx` у `filterUnprocessed`
 - Змінено сигнатуру та реалізацію методу `filterUnprocessed`, який тепер приймає `ctx context.Context` та використовує його при виклику `a.db.GetAllMovies(ctx)`. Також оновлено всі виклики у `RunScan`.
+
+### 4. Передача `ctx` у `finalizeScan`
+- Змінено сигнатуру та реалізацію методу `finalizeScan`, який тепер приймає `ctx context.Context` та використовує його при виклику `a.db.GetAllMovies(ctx)`. Оновлено всі місця виклику у `RunScan` та `FixSelected`.
