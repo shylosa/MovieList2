@@ -590,3 +590,6 @@ func (a *App) GetAIModels() ([]string, error) {
 
 ### 14. Пом'якшення сірої зони у `needsTranslation`
 - У гілці без специфічних українських літер `needsTranslation` тепер повертає `true` лише для рядків довших за 5 символів; короткі кириличні назви без російських маркерів не відправляються на переклад.
+
+### 15. Документування partial save у `SaveMoviesBatch`
+- У `SaveMoviesBatch` додано коментар `// Partial save: errors per-row are logged but batch commit succeeds`, який фіксує рішення комітити batch навіть після per-row помилок.

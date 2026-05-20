@@ -169,6 +169,7 @@ func (db *DB) SaveMoviesBatch(ctx context.Context, movies []Movie) error {
 	}
 	defer stmt.Close()
 
+	// Partial save: errors per-row are logged but batch commit succeeds
 	// Виконуємо вставку в пам'яті
 	for _, m := range movies {
 		// 🔴 ХІРУРГІЧНЕ ВТРУЧАННЯ: Перериваємо цикл безпечно, якщо контекст скасовано.
