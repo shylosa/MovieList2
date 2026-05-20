@@ -4,7 +4,7 @@
 
 - [x] **[app.go / FixSelected]** Додати захист `isScanning` на початку `FixSelected`: встановити `a.isScanning = true` під `a.scanMutex` і скинути у `defer`. Перед встановленням перевіряти: якщо `isScanning == true` — виходити з лог-повідомленням.
 
-- [ ] **[app.go / FixSelected → setScanCancel]** Перед викликом `a.setScanCancel(cancel)` — перевірити, чи не висить попередній `a.scanCancel`, і якщо так — викликати його, щоб не залишити сиротливу goroutine.
+- [x] **[app.go / FixSelected → setScanCancel]** Перед викликом `a.setScanCancel(cancel)` — перевірити, чи не висить попередній `a.scanCancel`, і якщо так — викликати його, щоб не залишити сиротливу goroutine.
 
 - [ ] **[app.go / filterUnprocessed]** Замінити `a.db.GetAllMovies(a.ctx)` на `a.db.GetAllMovies(ctx)` — прийняти `ctx context.Context` як параметр методу. Оновити всі виклики `filterUnprocessed` у `RunScan`.
 

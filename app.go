@@ -716,6 +716,11 @@ func (a *App) FixSelected(selected []map[string]interface{}) {
 
 	// 1. Створюємо керований контекст 🟢
 	ctx, cancel := context.WithCancel(a.ctx)
+	a.scanMutex.Lock()
+	if a.scanCancel != nil {
+		a.scanCancel()
+	}
+	a.scanMutex.Unlock()
 	a.setScanCancel(cancel)
 	defer func() {
 		cancel()
