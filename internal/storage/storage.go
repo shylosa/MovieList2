@@ -71,10 +71,6 @@ func (db *DB) InitSchema(ctx context.Context) error {
 	);
 	CREATE INDEX IF NOT EXISTS idx_tmdb_id ON movies(tmdb_id);
 	CREATE INDEX IF NOT EXISTS idx_title_en ON movies(title_en);
-	PRAGMA journal_mode = WAL;
-	PRAGMA synchronous = NORMAL;
-	PRAGMA busy_timeout = 5000;
-
 	CREATE TABLE IF NOT EXISTS ai_resolutions (
 		original_filename TEXT PRIMARY KEY,
 		resolved_title TEXT,
@@ -85,6 +81,16 @@ func (db *DB) InitSchema(ctx context.Context) error {
 	`
 	_, err := db.db.ExecContext(ctx, query)
 	if err != nil {
+		return err
+	}
+
+	if _, err := db.db.ExecContext(ctx, "PRAGMA journal_mode = WAL;"); err != nil {
+		return err
+	}
+	if _, err := db.db.ExecContext(ctx, "PRAGMA synchronous = NORMAL;"); err != nil {
+		return err
+	}
+	if _, err := db.db.ExecContext(ctx, "PRAGMA busy_timeout = 5000;"); err != nil {
 		return err
 	}
 

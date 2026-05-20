@@ -569,3 +569,6 @@ func (a *App) GetAIModels() ([]string, error) {
 
 ### 7. Обробка помилок ітерації rows у `CleanMissingMovies`
 - Додано перевірку `rows.Err()` після завершення циклу `rows.Next()` у методі `CleanMissingMovies` для вчасного виявлення збоїв під час читання результатів запиту.
+
+### 8. Роздільне виконання PRAGMA-запитів в `InitSchema`
+- Винесено налаштування SQLite `PRAGMA journal_mode`, `PRAGMA synchronous` та `PRAGMA busy_timeout` з основного багаторядкового SQL-скрипту створення таблиць в окремі виклики `ExecContext` з індивідуальною перевіркою помилок.
