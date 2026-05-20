@@ -584,3 +584,6 @@ func (a *App) GetAIModels() ([]string, error) {
 
 ### 12. Захист від nil lastErr у `TranslateBulk`
 - Перед фінальним `fmt.Errorf` у `TranslateBulk` додано fallback `errors.New("невідома помилка")`, якщо каскад моделей завершується без конкретної помилки.
+
+### 13. Повторне використання HTTP-клієнта для `GetAIModels`
+- `App` отримав поле `aiModelsHTTPClient`, яке ініціалізується в `NewApp` і використовується в `GetAIModels` замість створення нового `http.Client` на кожен запит.

@@ -28,7 +28,7 @@
 
 - [x] **[internal/ai/gemini.go / TranslateBulk]** Перед `fmt.Errorf("всі моделі ... недоступні: %w", lastErr)` додати перевірку: `if lastErr == nil { lastErr = errors.New("невідома помилка") }`.
 
-- [ ] **[app.go / GetAIModels]** Винести `http.Client` з `&http.Client{Timeout: 10 * time.Second}` у поле структури `App` (або singleton) замість створення нового клієнта при кожному виклику.
+- [x] **[app.go / GetAIModels]** Винести `http.Client` з `&http.Client{Timeout: 10 * time.Second}` у поле структури `App` (або singleton) замість створення нового клієнта при кожному виклику.
 
 - [ ] **[app.go / needsTranslation]** Пом'якшити "сіру зону": замість `if !hasUkrainianLetter { return true }` — додати мінімальну умову: повертати `true` тільки якщо рядок довший за 5 символів і не містить специфічних українських літер. Для коротких назв (≤5 символів) — `return false`.
 

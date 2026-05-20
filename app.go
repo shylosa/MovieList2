@@ -35,17 +35,18 @@ import (
 )
 
 type App struct {
-	ctx           context.Context
-	cfg           *config.Config
-	db            *storage.DB
-	tmdbClient    *tmdb.Client
-	aiClient      *ai.Client
-	aiModelsCache []string
-	modelsMutex   sync.RWMutex
-	modelsGroup   singleflight.Group
-	scanCancel    context.CancelFunc
-	isScanning    bool
-	scanMutex     sync.Mutex
+	ctx                context.Context
+	cfg                *config.Config
+	db                 *storage.DB
+	tmdbClient         *tmdb.Client
+	aiClient           *ai.Client
+	aiModelsCache      []string
+	aiModelsHTTPClient *http.Client
+	modelsMutex        sync.RWMutex
+	modelsGroup        singleflight.Group
+	scanCancel         context.CancelFunc
+	isScanning         bool
+	scanMutex          sync.Mutex
 }
 
 // aiConfidenceThreshold — єдиний поріг для Gemini, L2-кешу та merge.
@@ -56,7 +57,11 @@ const geminiTMDBVerifyMinJW = 0.85
 
 var russianMarkers = []string{"из", "как", "что", "он", "это", "бы", "вот", "для"}
 
-func NewApp() *App { return &App{} }
+func NewApp() *App {
+	return &App{
+		aiModelsHTTPClient: &http.Client{Timeout: 10 * time.Second},
+	}
+}
 
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
@@ -247,7 +252,10 @@ func (a *App) GetAIModels() ([]string, error) {
 
 	value, err, _ := a.modelsGroup.Do("ai_models", func() (interface{}, error) {
 		url := "https://generativelanguage.googleapis.com/v1beta/models"
-		client := &http.Client{Timeout: 10 * time.Second}
+		client := a.aiModelsHTTPClient
+		if client == nil {
+			client = &http.Client{Timeout: 10 * time.Second}
+		}
 		req, err := http.NewRequestWithContext(a.ctx, "GET", url, nil)
 		if err != nil {
 			return nil, err
