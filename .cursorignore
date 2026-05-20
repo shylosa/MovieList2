@@ -1,0 +1,9 @@
+node_modules/
+.git/
+dist/
+build/
+.next/
+frontend/node_modules/
+*.log
+*.db
+*.sqlite

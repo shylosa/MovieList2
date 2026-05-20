@@ -57,6 +57,11 @@ const geminiTMDBVerifyMinJW = 0.85
 
 var russianMarkers = []string{"из", "как", "что", "он", "это", "бы", "вот", "для"}
 
+var (
+	reTMDBURL = regexp.MustCompile(`themoviedb\.org/(movie|tv)/(\d+)`)
+	reTMDBID  = regexp.MustCompile(`^\d{5,}$`)
+)
+
 func NewApp() *App {
 	return &App{
 		aiModelsHTTPClient: &http.Client{Timeout: 10 * time.Second},
@@ -99,6 +104,9 @@ func (a *App) logFront(msg string) {
 func (a *App) setScanCancel(cancel context.CancelFunc) {
 	a.scanMutex.Lock()
 	defer a.scanMutex.Unlock()
+	if a.scanCancel != nil {
+		a.scanCancel()
+	}
 	a.scanCancel = cancel
 }
 
@@ -241,7 +249,7 @@ func (a *App) SyncToCloud() {
 	}
 }
 
-func (a *App) GetAIModels() ([]string, error) {
+func (a *App) GetAIModels(ctx context.Context) ([]string, error) {
 	a.modelsMutex.RLock()
 	if len(a.aiModelsCache) > 0 {
 		cache := append([]string(nil), a.aiModelsCache...)
@@ -256,7 +264,7 @@ func (a *App) GetAIModels() ([]string, error) {
 		if client == nil {
 			client = &http.Client{Timeout: 10 * time.Second}
 		}
-		req, err := http.NewRequestWithContext(a.ctx, "GET", url, nil)
+		req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -339,7 +347,7 @@ func (a *App) RunScan() {
 	wailsRuntime.EventsEmit(a.ctx, "scan-started")
 
 	// 🟢 ДОДАНО: Асинхронно прогріваємо кеш моделей, щоб aiClient отримав актуальний список
-	go func() { _, _ = a.GetAIModels() }()
+	go func() { _, _ = a.GetAIModels(ctx) }()
 
 	scn := scanner.NewScanner(a.cfg)
 
@@ -355,7 +363,7 @@ func (a *App) RunScan() {
 	}
 
 	// Очищуємо записи про видалені файли
-	a.cleanDeletedFiles(diskPaths)
+	a.cleanDeletedFiles(ctx, diskPaths)
 	diskIDs := make([]string, 0, len(diskPaths))
 	for _, p := range diskPaths {
 		diskIDs = append(diskIDs, a.getFileIdentifier(p))
@@ -724,11 +732,6 @@ func (a *App) FixSelected(selected []map[string]interface{}) {
 
 	// 1. Створюємо керований контекст 🟢
 	ctx, cancel := context.WithCancel(a.ctx)
-	a.scanMutex.Lock()
-	if a.scanCancel != nil {
-		a.scanCancel()
-	}
-	a.scanMutex.Unlock()
 	a.setScanCancel(cancel)
 	defer func() {
 		cancel()
@@ -940,13 +943,13 @@ func (a *App) filterUnprocessed(ctx context.Context, diskPaths []string) []strin
 }
 
 // cleanDeletedFiles видаляє з БД записи файлів яких більше немає на диску
-func (a *App) cleanDeletedFiles(diskPaths []string) {
+func (a *App) cleanDeletedFiles(ctx context.Context, diskPaths []string) {
 	diskMap := make(map[string]bool, len(diskPaths))
 	for _, p := range diskPaths {
 		diskMap[a.getFileIdentifier(p)] = true
 	}
 
-	dbFilenames, err := a.db.GetAllFilenames(a.ctx)
+	dbFilenames, err := a.db.GetAllFilenames(ctx)
 	if err != nil || dbFilenames == nil {
 		return
 	}
@@ -1006,8 +1009,7 @@ func applyTMDBToMovie(movie *storage.Movie, info *tmdb.MovieInfo) {
 // Підтримує: https://themoviedb.org/movie/123, /tv/456, або просто "123456"
 func extractTMDBID(hint string) (int, tmdb.MediaType) {
 	// TMDB URL з типом
-	reURL := regexp.MustCompile(`themoviedb\.org/(movie|tv)/(\d+)`)
-	if m := reURL.FindStringSubmatch(hint); len(m) > 2 {
+	if m := reTMDBURL.FindStringSubmatch(hint); len(m) > 2 {
 		id, _ := strconv.Atoi(m[2])
 		mt := tmdb.MediaTypeMovie
 		if m[1] == "tv" {
@@ -1017,7 +1019,7 @@ func extractTMDBID(hint string) (int, tmdb.MediaType) {
 	}
 
 	// Чистий числовий ID (більше 4 цифр щоб не сплутати з роком)
-	if matched, _ := regexp.MatchString(`^\d{5,}$`, hint); matched {
+	if reTMDBID.MatchString(hint) {
 		id, _ := strconv.Atoi(hint)
 		return id, tmdb.MediaTypeMovie
 	}

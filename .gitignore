@@ -17,3 +17,4 @@ movies.db-shm
 movies.db-wal
 .vscode/
 _movies.db
+CHECKLIST.md

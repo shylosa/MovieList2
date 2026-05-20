@@ -47,6 +47,7 @@ func New(dbPath string) (*DB, error) {
 	if err != nil {
 		return nil, err
 	}
+	conn.SetMaxOpenConns(1)
 	return &DB{db: conn}, nil
 }
 
@@ -84,7 +85,8 @@ func (db *DB) InitSchema(ctx context.Context) error {
 		return err
 	}
 
-	if _, err := db.db.ExecContext(ctx, "PRAGMA journal_mode = WAL;"); err != nil {
+	var mode string
+	if err := db.db.QueryRowContext(ctx, "PRAGMA journal_mode = WAL;").Scan(&mode); err != nil {
 		return err
 	}
 	if _, err := db.db.ExecContext(ctx, "PRAGMA synchronous = NORMAL;"); err != nil {
@@ -260,6 +262,9 @@ func (db *DB) CleanOrphanPosters(ctx context.Context, postersDir string) (int, e
 			allValid[manualPath] = true
 		}
 	}
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
 	entries, err := os.ReadDir(postersDir)
 	if err != nil {
 		return 0, nil
@@ -292,6 +297,9 @@ func (db *DB) GetAllFilenames(ctx context.Context) (map[string]bool, error) {
 		if err := rows.Scan(&f); err == nil {
 			res[f] = true
 		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return res, nil
 }

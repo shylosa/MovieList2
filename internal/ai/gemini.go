@@ -168,7 +168,7 @@ func (c *Client) requestWithRetry(ctx context.Context, prompt string) ([]Recogni
 		// Перевіряємо чи не скасовано контекст користувачем
 		select {
 		case <-ctx.Done():
-			return nil, fmt.Errorf("контекст скасовано")
+			return nil, ctx.Err()
 		default:
 		}
 
@@ -284,7 +284,6 @@ For each item, "original_file" in your response MUST exactly match "original_fil
 
 MERGE STRATEGY (important to understand your role):
 - "en_title" → used to search TMDB. Must be exact TMDB-searchable title.
-- "title_ua", "plot", "genres", "cast" → used as FALLBACK only when TMDB returns empty or English-only fields.
 - TMDB data always wins over your data when both exist.
 - So: provide your best knowledge, but don't worry about perfection — TMDB will override where it can.
 
@@ -412,7 +411,7 @@ func (c *Client) TranslateBulk(ctx context.Context, items []BulkTranslateItem) (
 		return nil, fmt.Errorf("помилка клієнта genai: %w", err)
 	}
 
-	inputJSON, _ := json.MarshalIndent(items, "", "  ")
+	inputJSON, _ := json.Marshal(items)
 
 	prompt := fmt.Sprintf(`Твоя задача — масово знайти офіційні українські назви та описи для списку медіафайлів.
 

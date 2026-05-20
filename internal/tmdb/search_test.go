@@ -3,6 +3,9 @@ package tmdb
 import (
 	"context"
 	"net/http"
+	"net/http/httptest"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"golang.org/x/time/rate"
@@ -10,11 +13,11 @@ import (
 
 func TestMatchScore(t *testing.T) {
 	tests := []struct {
-		name      string
-		query     string
-		resTitle  string
-		resOrig   string
-		minScore  int // Очікуємо бал >= вказаного
+		name     string
+		query    string
+		resTitle string
+		resOrig  string
+		minScore int // Очікуємо бал >= вказаного
 	}{
 		{"Точний збіг", "rick and morty", "rick and morty", "rick and morty", ScoreExactMatch},
 		{"Contains збіг", "batman", "the batman begins", "batman begins", ScoreContainsMatch},
@@ -59,5 +62,27 @@ func TestScoreResult_DiamondMatch(t *testing.T) {
 	scoredTrash := c.scoreResult(ctx, res, 0, "batman", 2010, MediaTypeMovie)
 	if scoredTrash.score != -1000 {
 		t.Errorf("Сміттєвий результат не був жорстко відхилений. Score: %d", scoredTrash.score)
+	}
+}
+
+func TestDownloadPosterPreservesFlattenedPathPrefix(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("poster"))
+	}))
+	defer server.Close()
+
+	c := &Client{
+		client:     server.Client(),
+		postersDir: t.TempDir(),
+	}
+
+	path, err := c.DownloadPoster(context.Background(), server.URL, "12345_SeriesName/episode.mkv")
+	if err != nil {
+		t.Fatalf("DownloadPoster() error = %v", err)
+	}
+
+	got := filepath.Base(path)
+	if !strings.HasPrefix(got, "12345_SeriesName_episode_mkv") {
+		t.Fatalf("poster filename = %q, want flattened path prefix", got)
 	}
 }

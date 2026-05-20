@@ -169,7 +169,8 @@ Filename
   - `<strong id="filteredNum">` — динамічне оновлення числа знайдених (без цих елементів будуть помилки у консолі браузера)
 - **`processGeminiQueue()` повертає список верифікованих файлів** — тільки файли з `movie.TmdbID > 0` додаються до `translationQueue`, щоб не перекладати порожні записи.
 - **`FixSelected()` перевіряє помилку `UpdateMovie`** — файли додаються до `translationQueue` лише якщо `UpdateMovie` повернула `nil` (сукцес).
-- **`GetAIModels()` використовує `singleflight.Group`** — одночасні запити дедубліюються, перший отримує від API, рештві чекають результату без додаткових HTTP запитів.
+- **`GetAIModels(ctx context.Context)` використовує `singleflight.Group`** — одночасні запити дедубліюються, перший отримує від API, рештві чекають результату без додаткових HTTP запитів.
+- У `RunScan` warmup-горутині виклик змінено на `a.GetAIModels(ctx)`.
 - **`processTranslationQueue()` спрощено до послідовного батчингу** — без `errgroup`, але зі семафором 2 паралельних запити (реального паралелізму немає через `rate.Limiter` в SDK).
 - **`isGoodUkrainian()` для детекції української** — перевіряє наявність і,ї,є,ґ замість загальної кириличної перевірки.
 - **Двоїстий пошук для кириличних запитів** — uk-UA → ru-RU з вибором найкращого результату за балом.
@@ -472,7 +473,7 @@ type App struct {
     modelsGroup   singleflight.Group  // Нове
 }
 
-func (a *App) GetAIModels() ([]string, error) {
+func (a *App) GetAIModels(ctx context.Context) ([]string, error) {
     // 1. Перевіріємо L1 кеш під RLock (швидко)
     a.modelsMutex.RLock()
     if len(a.aiModelsCache) > 0 {
@@ -508,6 +509,7 @@ func (a *App) GetAIModels() ([]string, error) {
 Решта проблем залишена як низькопріоритетна або прийнятна:
 
 - `cleanDeletedFiles` дублює роботу `CleanMissingMovies` — не критично
+- `cleanDeletedFiles` тепер приймає `ctx context.Context` та використовує `a.db.GetAllFilenames(ctx)`.
 - L2 кеш має різні пороги (0.6 vs 0.5) — свідомо
 - `Movie.ID` не заповнюється — поле невикористовується, можна видалити в P3
 - `searchDirectly` — мертвий код, можна видалити в P3
@@ -517,9 +519,11 @@ func (a *App) GetAIModels() ([]string, error) {
 ## Ревізія 5 — логічні оптимізації пайплайну
 
 ### Зміни в ранжуванні TMDB (`search.go`)
+
 - **Перевірка аліасів:** Алгоритм тепер перевіряє альтернативні назви (аліаси) **до** жорсткого відхилення результату (`titleScore == 0`). Раніше фільми, які в TMDB мали зовсім іншу оригінальну назву (і нульовий базовий score), відкидалися до перевірки їх аліасів.
 
 ### Зміни в логіці застосунку (`app.go` та `internal/tmdb/search.go`)
+
 - **Анти-галюцинаційний фільтр року:** Пом'якшено контроль року від Gemini. Якщо Gemini повертає рік, що відрізняється від `parsed.Year` більше ніж на 1 рік, система більше **не перезаписує** його жорстко роком з файлу. Натомість вона логує попередження та дозволяє TMDB спробувати знайти фільм з роком від Gemini. (Захистом виступає жорстка перевірка `TitleSimilarity >= 0.85` на наступному кроці).
 - **Подвійна перевірка назви (Post-verify):** Для неангломовних фільмів `tmdbInfo.TitleEN` насправді містить оригінальну назву (наприклад, корейську "기생충"), через що порівняння з `rec.ENTitle` ("Parasite") давало Similarity ~0 і блокувало правильні результати. Тепер `searchAndFetch` зберігає локалізовану англійську назву в `tmdbInfo.SearchTitle`, і алгоритм звіряє Jaro-Winkler з обома варіантами.
 - **Логіка перекладу (`needsTranslation`):** Видалено "мертвий код" (блок перевірки `hasCyrillic && !hasRussianLetter`), який блокував переклад кириличних назв без специфічних російських маркерів ('ы', 'э'). Тепер будь-яка кирилична назва, яка не містить суто українських літер ('і', 'ї', 'є', 'ґ'), буде відправлена до Gemini на переклад.
@@ -531,17 +535,21 @@ func (a *App) GetAIModels() ([]string, error) {
 ## Ревізія 6 — Точність ідентифікації та оптимізація ШІ
 
 ### 1. Маппінг Gemini через ID (Захист від галюцинацій)
+
 - Замість маппінгу результатів Gemini за полем `original_file` (яке могло бути спотворене ШІ), запроваджено жорсткий цілочисельний `ID`.
 - Схема генерації Gemini очищена від невикористовуваних полів (`title_ua`, `plot`, `genres`, `cast`), що економить токени. Поле `confidence` зроблено обов'язковим.
 
 ### 2. Relative Path як первинний ключ бази даних
+
 - Для вирішення проблеми конфліктів імен (коли різні серіали мають `S01E01.mkv`), `app.go` тепер використовує відносний шлях (`Relative Path`) до файлу в межах медіатеки.
 - Збережено зворотну сумісність: відносний шлях просто записується в існуючу колонку `filename`, усуваючи необхідність міграції БД та фронтенду. `filepath.Base` замінено на `a.getFileIdentifier(path)`.
 
 ### 3. Уніфікація ключів L1-кешу
+
 - `searchCache` тепер скрізь використовує структуру `SearchCacheKey` замість різних способів форматування (рядків та структур).
 
 ### 4. Alias-Aware Post-Verify
+
 - Коли `scoreResult` знаходить кращий збіг завдяки альтернативній назві (аліасу), цей аліас зберігається в `MatchedAlias`.
 - `mergeGeminiWithTMDB` тепер звіряє Jaro-Winkler не тільки з `TitleEN` і `SearchTitle`, але й з `MatchedAlias`, що запобігає хибним відхиленням правильних розпізнавань, знайдених за аліасами.
 
@@ -550,46 +558,70 @@ func (a *App) GetAIModels() ([]string, error) {
 ## Ревізія 7 — Виправлення помилок та оптимізації
 
 ### 1. Захист `isScanning` у `FixSelected`
+
 - Додано перевірку та встановлення прапорця `a.isScanning` під `a.scanMutex` на початку `FixSelected`, а також скидання прапорця у `defer` блоці. Це запобігає одночасному запуску сканування та виправлення.
 
 ### 2. Запобігання висячим горутинам у `FixSelected`
+
 - Перед викликом `a.setScanCancel(cancel)` у `FixSelected` додано перевірку, чи не встановлено вже попередній `a.scanCancel`, і якщо так — викликається попередній cancel для запобігання сиротливим горутинам.
+- `setScanCancel` тепер виконує старий `scanCancel()` під тим самим `a.scanMutex.Lock()` перед збереженням нового `cancel`, щоб скасування і оновлення було атомарним.
 
 ### 3. Передача `ctx` у `filterUnprocessed`
+
 - Змінено сигнатуру та реалізацію методу `filterUnprocessed`, який тепер приймає `ctx context.Context` та використовує його при виклику `a.db.GetAllMovies(ctx)`. Також оновлено всі виклики у `RunScan`.
 
 ### 4. Передача `ctx` у `finalizeScan`
+
 - Змінено сигнатуру та реалізацію методу `finalizeScan`, який тепер приймає `ctx context.Context` та використовує його при виклику `a.db.GetAllMovies(ctx)`. Оновлено всі місця виклику у `RunScan` та `FixSelected`.
 
 ### 5. Керування ресурсом файлу логів у `logger.go`
+
 - Перенесено дескриптор `logFile` на рівень пакету (`var logFile *os.File`), а у функцію `CloseLogger` додано його скидання на диск (`Sync()`) та закриття (`Close()`) для уникнення витоку дескрипторів файлів.
 
 ### 6. Очищення дренування тіла в `client.go`
+
 - Прибрано ручний виклик `io.Copy` після `Decode` у методі `doRequest`, оскільки `defer resp.Body.Close()` вже надійно дренує та закриває з'єднання.
+- `requestWithRetry` тепер повертає `ctx.Err()` при відміні контексту, зберігаючи семантику `context.Canceled` / `context.DeadlineExceeded`.
+- `TranslateBulk` використовує `json.Marshal(items)` замість `json.MarshalIndent`, щоб зменшити розмір промпту для Gemini.
+- `buildPrompt` більше не містить мертвих інструкцій про `title_ua`, `plot`, `genres` та `cast`, оскільки ці поля відсутні у `buildGenAISchema`.
+- `extractTMDBID` тепер використовує package-level regexp змінні `reTMDBURL` і `reTMDBID` замість компіляції всередині виклику.
+- `storage.New` встановлює `conn.SetMaxOpenConns(1)` для SQLite, щоб уникнути конкурентних з'єднань.
+- `InitSchema` використовує `QueryRowContext` і `Scan(&mode)` для підтвердження активації `PRAGMA journal_mode = WAL`.
 
 ### 7. Обробка помилок ітерації rows у `CleanMissingMovies`
+
 - Додано перевірку `rows.Err()` після завершення циклу `rows.Next()` у методі `CleanMissingMovies` для вчасного виявлення збоїв під час читання результатів запиту.
+- Додано перевірку `rows.Err()` у `GetAllFilenames` для правильного оброблення помилок ітерації SQL-рядків.
+- Додано перевірку `rows.Err()` у `CleanOrphanPosters` для вчасного виявлення помилок при читанні `movies` перед скануванням постерів.
 
 ### 8. Роздільне виконання PRAGMA-запитів в `InitSchema`
+
 - Винесено налаштування SQLite `PRAGMA journal_mode`, `PRAGMA synchronous` та `PRAGMA busy_timeout` з основного багаторядкового SQL-скрипту створення таблиць в окремі виклики `ExecContext` з індивідуальною перевіркою помилок.
 
 ### 9. Логування відсутніх обов'язкових env-змінних
+
 - У `getEnvRequired` замінено `log.Panicf` на структурований `slog.Error("missing_required_env", slog.String("key", key))` з подальшим `panic`, щоб помилка потрапляла у JSONL-лог перед аварійним завершенням.
 
 ### 10. Компактний JSON у Gemini recognition prompt
+
 - У `buildPrompt` замінено `json.MarshalIndent(contexts, "", "  ")` на `json.Marshal(contexts)`, щоб не витрачати вхідні токени на пробіли та відступи.
 
 ### 11. Очищення FIELD RULES у Gemini recognition prompt
+
 - З `FIELD RULES` у `buildPrompt` прибрано описи `title_ua`, `plot`, `genres` і `cast`, оскільки ці поля не входять до `buildGenAISchema`.
 
 ### 12. Захист від nil lastErr у `TranslateBulk`
+
 - Перед фінальним `fmt.Errorf` у `TranslateBulk` додано fallback `errors.New("невідома помилка")`, якщо каскад моделей завершується без конкретної помилки.
 
 ### 13. Повторне використання HTTP-клієнта для `GetAIModels`
+
 - `App` отримав поле `aiModelsHTTPClient`, яке ініціалізується в `NewApp` і використовується в `GetAIModels` замість створення нового `http.Client` на кожен запит.
 
 ### 14. Пом'якшення сірої зони у `needsTranslation`
+
 - У гілці без специфічних українських літер `needsTranslation` тепер повертає `true` лише для рядків довших за 5 символів; короткі кириличні назви без російських маркерів не відправляються на переклад.
 
 ### 15. Документування partial save у `SaveMoviesBatch`
+
 - У `SaveMoviesBatch` додано коментар `// Partial save: errors per-row are logged but batch commit succeeds`, який фіксує рішення комітити batch навіть після per-row помилок.
