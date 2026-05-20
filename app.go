@@ -705,12 +705,24 @@ func (a *App) mergeGeminiWithTMDB(ctx context.Context, filePath string, rec ai.R
 // FixSelected — виправлення вибраних записів.
 // hint може бути: TMDB URL/ID, назва фільму, рік, або порожнє (→ Gemini)
 func (a *App) FixSelected(selected []map[string]interface{}) {
+	a.scanMutex.Lock()
+	if a.isScanning {
+		a.scanMutex.Unlock()
+		a.logFront("⚠️ Сканування вже йде. Ігнорую виправлення.")
+		return
+	}
+	a.isScanning = true
+	a.scanMutex.Unlock()
+
 	// 1. Створюємо керований контекст 🟢
 	ctx, cancel := context.WithCancel(a.ctx)
 	a.setScanCancel(cancel)
 	defer func() {
 		cancel()
 		a.clearScanCancel()
+		a.scanMutex.Lock()
+		a.isScanning = false
+		a.scanMutex.Unlock()
 	}()
 
 	wailsRuntime.EventsEmit(a.ctx, "scan-started")

@@ -544,3 +544,10 @@ func (a *App) GetAIModels() ([]string, error) {
 ### 4. Alias-Aware Post-Verify
 - Коли `scoreResult` знаходить кращий збіг завдяки альтернативній назві (аліасу), цей аліас зберігається в `MatchedAlias`.
 - `mergeGeminiWithTMDB` тепер звіряє Jaro-Winkler не тільки з `TitleEN` і `SearchTitle`, але й з `MatchedAlias`, що запобігає хибним відхиленням правильних розпізнавань, знайдених за аліасами.
+
+---
+
+## Ревізія 7 — Виправлення помилок та оптимізації
+
+### 1. Захист `isScanning` у `FixSelected`
+- Додано перевірку та встановлення прапорця `a.isScanning` під `a.scanMutex` на початку `FixSelected`, а також скидання прапорця у `defer` блоці. Це запобігає одночасному запуску сканування та виправлення.
