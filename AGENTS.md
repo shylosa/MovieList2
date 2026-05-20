@@ -554,3 +554,6 @@ func (a *App) GetAIModels() ([]string, error) {
 
 ### 2. Запобігання висячим горутинам у `FixSelected`
 - Перед викликом `a.setScanCancel(cancel)` у `FixSelected` додано перевірку, чи не встановлено вже попередній `a.scanCancel`, і якщо так — викликається попередній cancel для запобігання сиротливим горутинам.
+
+### 3. Передача `ctx` у `filterUnprocessed`
+- Змінено сигнатуру та реалізацію методу `filterUnprocessed`, який тепер приймає `ctx context.Context` та використовує його при виклику `a.db.GetAllMovies(ctx)`. Також оновлено всі виклики у `RunScan`.

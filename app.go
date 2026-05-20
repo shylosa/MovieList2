@@ -356,7 +356,7 @@ func (a *App) RunScan() {
 	a.db.CleanOrphanPosters(a.ctx, a.cfg.PostersDir)
 
 	// Визначаємо що треба обробити (нові + нерозпізнані)
-	filesToProcess := a.filterUnprocessed(diskPaths)
+	filesToProcess := a.filterUnprocessed(ctx, diskPaths)
 	if len(filesToProcess) == 0 {
 		a.finalizeScan("Змін не знайдено.")
 		return
@@ -911,8 +911,8 @@ func (a *App) getFileIdentifier(p string) string {
 }
 
 // filterUnprocessed повертає файли яких немає в БД або які нерозпізнані
-func (a *App) filterUnprocessed(diskPaths []string) []string {
-	movies, _ := a.db.GetAllMovies(a.ctx)
+func (a *App) filterUnprocessed(ctx context.Context, diskPaths []string) []string {
+	movies, _ := a.db.GetAllMovies(ctx)
 	recognized := make(map[string]bool, len(movies))
 	for _, m := range movies {
 		// Файл вважається розпізнаним, ТІЛЬКИ якщо ми знайшли його в TMDB (є ID)
