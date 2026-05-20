@@ -30,6 +30,6 @@
 
 - [x] **[app.go / GetAIModels]** Винести `http.Client` з `&http.Client{Timeout: 10 * time.Second}` у поле структури `App` (або singleton) замість створення нового клієнта при кожному виклику.
 
-- [ ] **[app.go / needsTranslation]** Пом'якшити "сіру зону": замість `if !hasUkrainianLetter { return true }` — додати мінімальну умову: повертати `true` тільки якщо рядок довший за 5 символів і не містить специфічних українських літер. Для коротких назв (≤5 символів) — `return false`.
+- [x] **[app.go / needsTranslation]** Пом'якшити "сіру зону": замість `if !hasUkrainianLetter { return true }` — додати мінімальну умову: повертати `true` тільки якщо рядок довший за 5 символів і не містить специфічних українських літер. Для коротких назв (≤5 символів) — `return false`.
 
 - [ ] **[internal/storage/storage.go / SaveMoviesBatch]** Додати коментар `// Partial save: errors per-row are logged but batch commit succeeds` для явного документування архітектурного рішення.

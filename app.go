@@ -1112,7 +1112,7 @@ func needsTranslation(s string) bool {
 	// але є кирилиця та немає російських маркерів — скоріш за все OK.
 	// Якщо є російські маркери — вже обробили вище.
 	if !hasUkrainianLetter {
-		return true
+		return len([]rune(strings.TrimSpace(s))) > 5
 	}
 
 	return false
