@@ -566,3 +566,6 @@ func (a *App) GetAIModels() ([]string, error) {
 
 ### 6. Очищення дренування тіла в `client.go`
 - Прибрано ручний виклик `io.Copy` після `Decode` у методі `doRequest`, оскільки `defer resp.Body.Close()` вже надійно дренує та закриває з'єднання.
+
+### 7. Обробка помилок ітерації rows у `CleanMissingMovies`
+- Додано перевірку `rows.Err()` після завершення циклу `rows.Next()` у методі `CleanMissingMovies` для вчасного виявлення збоїв під час читання результатів запиту.

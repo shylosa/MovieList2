@@ -224,6 +224,9 @@ func (db *DB) CleanMissingMovies(ctx context.Context, actualFiles []string) (int
 			}
 		}
 	}
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
 	for _, fname := range toDelete {
 		_, _ = db.db.ExecContext(ctx, "DELETE FROM movies WHERE filename = ?", fname)
 	}

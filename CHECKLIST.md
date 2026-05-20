@@ -14,7 +14,7 @@
 
 - [x] **[internal/tmdb/client.go / doRequest]** Прибрати ручний `_, _ = io.Copy(io.Discard, resp.Body)` після `Decode` — `defer resp.Body.Close()` вже є і дренує тіло при закритті. Якщо є бажання явно дренувати для keep-alive — перемістити `io.Copy` до `defer`, але після `Close`.
 
-- [ ] **[internal/storage/storage.go / CleanMissingMovies]** Після `for rows.Next() {...}` додати `if err := rows.Err(); err != nil { return 0, err }` для детектування помилок ітерації.
+- [x] **[internal/storage/storage.go / CleanMissingMovies]** Після `for rows.Next() {...}` додати `if err := rows.Err(); err != nil { return 0, err }` для детектування помилок ітерації.
 
 - [ ] **[internal/storage/storage.go / InitSchema]** Розбити `PRAGMA journal_mode`, `PRAGMA synchronous`, `PRAGMA busy_timeout` на окремі `db.db.ExecContext(ctx, "PRAGMA ...")` виклики. Перевіряти `err` кожного.
 
