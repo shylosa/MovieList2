@@ -18,7 +18,7 @@
 
 - [x] **[internal/storage/storage.go / InitSchema]** Розбити `PRAGMA journal_mode`, `PRAGMA synchronous`, `PRAGMA busy_timeout` на окремі `db.db.ExecContext(ctx, "PRAGMA ...")` виклики. Перевіряти `err` кожного.
 
-- [ ] **[internal/config/config.go / getEnvRequired]** Замінити `log.Panicf(...)` на `slog.Error("missing_required_env", slog.String("key", key)); panic(...)` для запису в `logs/app.jsonl`.
+- [x] **[internal/config/config.go / getEnvRequired]** Замінити `log.Panicf(...)` на `slog.Error("missing_required_env", slog.String("key", key)); panic(...)` для запису в `logs/app.jsonl`.
 
 ## Оптимізації
 

@@ -2,6 +2,7 @@ package config
 
 import (
 	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -87,10 +88,8 @@ func Load() *Config {
 func getEnvRequired(key string) string {
 	val := os.Getenv(key)
 	if val == "" {
-		// ЗАМІНЕНО: Fatalf на Panicf.
-		// Fatal робить os.Exit(1) і блокує всі defer (логи не зберігалися).
-		// Panicf викликає паніку, яку перехопить наш файл main.go і запише у лог.
-		log.Panicf("❌ КРИТИЧНА ПОМИЛКА: Змінна оточення %s не встановлена!", key)
+		slog.Error("missing_required_env", slog.String("key", key))
+		panic("missing required env: " + key)
 	}
 	return val
 }

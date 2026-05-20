@@ -572,3 +572,6 @@ func (a *App) GetAIModels() ([]string, error) {
 
 ### 8. Роздільне виконання PRAGMA-запитів в `InitSchema`
 - Винесено налаштування SQLite `PRAGMA journal_mode`, `PRAGMA synchronous` та `PRAGMA busy_timeout` з основного багаторядкового SQL-скрипту створення таблиць в окремі виклики `ExecContext` з індивідуальною перевіркою помилок.
+
+### 9. Логування відсутніх обов'язкових env-змінних
+- У `getEnvRequired` замінено `log.Panicf` на структурований `slog.Error("missing_required_env", slog.String("key", key))` з подальшим `panic`, щоб помилка потрапляла у JSONL-лог перед аварійним завершенням.
