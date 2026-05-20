@@ -26,7 +26,7 @@
 
 - [x] **[internal/ai/gemini.go / buildPrompt]** Видалити з тексту промпту секції `FIELD RULES` пункти 2 (`title_ua`), 4 (`plot`), 5 (`genres`), 6 (`cast`) — ці поля відсутні у `buildGenAISchema`, і їх опис лише збиває модель та витрачає токени.
 
-- [ ] **[internal/ai/gemini.go / TranslateBulk]** Перед `fmt.Errorf("всі моделі ... недоступні: %w", lastErr)` додати перевірку: `if lastErr == nil { lastErr = errors.New("невідома помилка") }`.
+- [x] **[internal/ai/gemini.go / TranslateBulk]** Перед `fmt.Errorf("всі моделі ... недоступні: %w", lastErr)` додати перевірку: `if lastErr == nil { lastErr = errors.New("невідома помилка") }`.
 
 - [ ] **[app.go / GetAIModels]** Винести `http.Client` з `&http.Client{Timeout: 10 * time.Second}` у поле структури `App` (або singleton) замість створення нового клієнта при кожному виклику.
 

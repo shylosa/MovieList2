@@ -581,3 +581,6 @@ func (a *App) GetAIModels() ([]string, error) {
 
 ### 11. Очищення FIELD RULES у Gemini recognition prompt
 - З `FIELD RULES` у `buildPrompt` прибрано описи `title_ua`, `plot`, `genres` і `cast`, оскільки ці поля не входять до `buildGenAISchema`.
+
+### 12. Захист від nil lastErr у `TranslateBulk`
+- Перед фінальним `fmt.Errorf` у `TranslateBulk` додано fallback `errors.New("невідома помилка")`, якщо каскад моделей завершується без конкретної помилки.

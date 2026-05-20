@@ -3,6 +3,7 @@ package ai
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -67,8 +68,8 @@ type RecognizedTitle struct {
 }
 
 type Client struct {
-	cfg          *config.Config
-	limiter      *rate.Limiter
+	cfg     *config.Config
+	limiter *rate.Limiter
 	// 🟢 ДОДАНО: Динамічний каскад та м'ютекс для його захисту
 	activeModels []string
 	modelsMu     sync.RWMutex
@@ -319,7 +320,6 @@ FIELD RULES:
 8. year: prefer "parsed_year" from input when present and valid.`, string(filesJSON))
 }
 
-
 // translateWithRetry — універсальний метод перекладу з каскадом моделей та ретраями
 func (c *Client) translateWithRetry(ctx context.Context, prompt string, fallbackText string) string {
 	models := c.getModels()
@@ -456,5 +456,8 @@ func (c *Client) TranslateBulk(ctx context.Context, items []BulkTranslateItem) (
 		utils.LoggerWithTrace(ctx).Warn("bulk_translate_failed", slog.String("model", modelName), slog.Any("error", err))
 	}
 
+	if lastErr == nil {
+		lastErr = errors.New("невідома помилка")
+	}
 	return nil, fmt.Errorf("всі моделі для масового перекладу недоступні: %w", lastErr)
 }
