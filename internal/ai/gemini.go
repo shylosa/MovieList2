@@ -272,7 +272,7 @@ func buildBulkTranslateSchema() *genai.Schema {
 
 // buildPrompt — промпт з прикладами транслітератів і правилами мержу
 func buildPrompt(contexts []FileRecognitionContext) string {
-	filesJSON, _ := json.MarshalIndent(contexts, "", "  ")
+	filesJSON, _ := json.Marshal(contexts)
 
 	return fmt.Sprintf(`You are a movie database expert. Your goal is to find the OFFICIAL ORIGINAL (English) title of the movie on IMDB/TMDB based on the provided transliterated or localized name and year.
 CRITICAL: DO NOT translate localized titles literally! (e.g., DO NOT translate "Moj malenkij angel" as "My Little Angel" — find the actual release like "Foster"). Your data will be MERGED with TMDB results.

@@ -575,3 +575,6 @@ func (a *App) GetAIModels() ([]string, error) {
 
 ### 9. Логування відсутніх обов'язкових env-змінних
 - У `getEnvRequired` замінено `log.Panicf` на структурований `slog.Error("missing_required_env", slog.String("key", key))` з подальшим `panic`, щоб помилка потрапляла у JSONL-лог перед аварійним завершенням.
+
+### 10. Компактний JSON у Gemini recognition prompt
+- У `buildPrompt` замінено `json.MarshalIndent(contexts, "", "  ")` на `json.Marshal(contexts)`, щоб не витрачати вхідні токени на пробіли та відступи.
