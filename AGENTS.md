@@ -578,3 +578,6 @@ func (a *App) GetAIModels() ([]string, error) {
 
 ### 10. Компактний JSON у Gemini recognition prompt
 - У `buildPrompt` замінено `json.MarshalIndent(contexts, "", "  ")` на `json.Marshal(contexts)`, щоб не витрачати вхідні токени на пробіли та відступи.
+
+### 11. Очищення FIELD RULES у Gemini recognition prompt
+- З `FIELD RULES` у `buildPrompt` прибрано описи `title_ua`, `plot`, `genres` і `cast`, оскільки ці поля не входять до `buildGenAISchema`.

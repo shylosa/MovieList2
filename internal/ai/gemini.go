@@ -314,11 +314,7 @@ CRITICAL TRANSLATION RULES:
 
 FIELD RULES:
 1. en_title: exact TMDB title. For non-English originals use the most common TMDB search title. Empty string "" if uncertain.
-2. title_ua: official Ukrainian localization only. Empty string "" if unknown.
 3. year: from filename if present. null if no year or uncertain.
-4. plot: Ukrainian, 2-3 sentences. Empty string "" if you don't know this film.
-5. genres: Ukrainian names only. Empty string "" if uncertain.
-6. cast: real names, 3-5 actors. Empty string "" if uncertain.
 7. media_type: prefer "parsed_media_type" from input when present. Use "tv" only with explicit S01/Season markers. Otherwise "movie".
 8. year: prefer "parsed_year" from input when present and valid.`, string(filesJSON))
 }

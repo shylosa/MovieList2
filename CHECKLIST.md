@@ -24,7 +24,7 @@
 
 - [x] **[internal/ai/gemini.go / buildPrompt]** Замінити `json.MarshalIndent(contexts, "", "  ")` на `json.Marshal(contexts)` — прибрати відступи для зменшення кількості вхідних токенів.
 
-- [ ] **[internal/ai/gemini.go / buildPrompt]** Видалити з тексту промпту секції `FIELD RULES` пункти 2 (`title_ua`), 4 (`plot`), 5 (`genres`), 6 (`cast`) — ці поля відсутні у `buildGenAISchema`, і їх опис лише збиває модель та витрачає токени.
+- [x] **[internal/ai/gemini.go / buildPrompt]** Видалити з тексту промпту секції `FIELD RULES` пункти 2 (`title_ua`), 4 (`plot`), 5 (`genres`), 6 (`cast`) — ці поля відсутні у `buildGenAISchema`, і їх опис лише збиває модель та витрачає токени.
 
 - [ ] **[internal/ai/gemini.go / TranslateBulk]** Перед `fmt.Errorf("всі моделі ... недоступні: %w", lastErr)` додати перевірку: `if lastErr == nil { lastErr = errors.New("невідома помилка") }`.
 
