@@ -23,12 +23,15 @@ func (sw safeWriter) Write(p []byte) (n int, err error) {
 	return n, nil        // Завжди повертаємо nil, щоб MultiWriter не переривався
 }
 
+var logFile *os.File
+
 // InitLogger ініціалізує структуроване логування (slog) з виводом у консоль та файл.
 func InitLogger() {
 	os.MkdirAll("logs", 0755)
 
 	// Відкриваємо файл. Якщо не вдалося — просто не використовуємо його, але програма працює
-	logFile, err := os.OpenFile(filepath.Join("logs", "app.jsonl"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+	var err error
+	logFile, err = os.OpenFile(filepath.Join("logs", "app.jsonl"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
 
 	var writer io.Writer = os.Stdout
 	if err == nil {
@@ -67,4 +70,8 @@ func LoggerWithTrace(ctx context.Context) *slog.Logger {
 
 func CloseLogger() {
 	slog.Info("app_closed")
+	if logFile != nil {
+		logFile.Sync()
+		logFile.Close()
+	}
 }

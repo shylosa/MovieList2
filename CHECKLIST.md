@@ -10,7 +10,7 @@
 
 - [x] **[app.go / finalizeScan]** Додати параметр `ctx context.Context` до `finalizeScan`. Замінити `a.db.GetAllMovies(a.ctx)` на `a.db.GetAllMovies(ctx)`. Оновити всі виклики.
 
-- [ ] **[internal/utils/logger.go]** Зберегти `*os.File` у package-level змінній `var logFile *os.File`. У `CloseLogger` додати: `if logFile != nil { logFile.Sync(); logFile.Close() }`.
+- [x] **[internal/utils/logger.go]** Зберегти `*os.File` у package-level змінній `var logFile *os.File`. У `CloseLogger` додати: `if logFile != nil { logFile.Sync(); logFile.Close() }`.
 
 - [ ] **[internal/tmdb/client.go / doRequest]** Прибрати ручний `_, _ = io.Copy(io.Discard, resp.Body)` після `Decode` — `defer resp.Body.Close()` вже є і дренує тіло при закритті. Якщо є бажання явно дренувати для keep-alive — перемістити `io.Copy` до `defer`, але після `Close`.
 

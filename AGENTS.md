@@ -560,3 +560,6 @@ func (a *App) GetAIModels() ([]string, error) {
 
 ### 4. Передача `ctx` у `finalizeScan`
 - Змінено сигнатуру та реалізацію методу `finalizeScan`, який тепер приймає `ctx context.Context` та використовує його при виклику `a.db.GetAllMovies(ctx)`. Оновлено всі місця виклику у `RunScan` та `FixSelected`.
+
+### 5. Керування ресурсом файлу логів у `logger.go`
+- Перенесено дескриптор `logFile` на рівень пакету (`var logFile *os.File`), а у функцію `CloseLogger` додано його скидання на диск (`Sync()`) та закриття (`Close()`) для уникнення витоку дескрипторів файлів.
