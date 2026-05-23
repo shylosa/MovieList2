@@ -14,7 +14,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-// Movie РѕРїРёСЃСѓС” СЃС‚СЂСѓРєС‚СѓСЂСѓ С„С–Р»СЊРјСѓ РІ Р±Р°Р·С– РґР°РЅРёС… (СѓРЅС–С„С–РєРѕРІР°РЅРѕ)
+// Movie describes the movie record structure in the database (unified)
 type Movie struct {
 	ID              int    `json:"id"`
 	Filename        string `json:"filename"`
@@ -30,7 +30,7 @@ type Movie struct {
 	MediaType       string `json:"media_type"`
 }
 
-// AIResolution вЂ” РєРµС€ СЂРѕР·РїС–Р·РЅР°РІР°РЅРЅСЏ Gemini (L2 Cache)
+// AIResolution is the Gemini recognition cache entry (L2 Cache)
 type AIResolution struct {
 	OriginalFilename string
 	ResolvedTitle    string
@@ -60,7 +60,7 @@ func (db *DB) InitSchema(ctx context.Context) error {
 	query := `
 	CREATE TABLE IF NOT EXISTS movies (
 		filename TEXT PRIMARY KEY,
-		tmdb_id INTEGER, -- рџ‘€ Р”РѕРґР°РЅРѕ РєРѕР»РѕРЅРєСѓ
+		tmdb_id INTEGER, -- added column
 		title_ua TEXT,
 		title_en TEXT,
 		year TEXT,
@@ -100,9 +100,9 @@ func (db *DB) InitSchema(ctx context.Context) error {
 		return err
 	}
 
-	// рџ”ґ РҐР†Р РЈР Р“Р†Р§РќР• Р’РўР РЈР§РђРќРќРЇ: Р›С–РЅРёРІР° РјС–РіСЂР°С†С–СЏ РґР»СЏ СЃС‚Р°СЂРёС… Р±Р°Р·.
-	// РЇРєС‰Рѕ С‚Р°Р±Р»РёС†СЏ РІР¶Рµ С–СЃРЅСѓРІР°Р»Р°, РјРё РјР°С”РјРѕ СЏРІРЅРѕ РґРѕРґР°С‚Рё РЅРѕРІС– РєРѕР»РѕРЅРєРё.
-	// РњРё СЃРІС–РґРѕРјРѕ С–РіРЅРѕСЂСѓС”РјРѕ РїРѕРјРёР»РєСѓ С‚СѓС‚, Р±Рѕ СЏРєС‰Рѕ РєРѕР»РѕРЅРєР° РІР¶Рµ С”, SQLite РїРѕРІРµСЂРЅРµ РїРѕРјРёР»РєСѓ "duplicate column name", С‰Рѕ РґР»СЏ РЅР°СЃ РћРљ.
+	// Lazy migration for existing databases.
+	// If the table already exists, explicitly add new columns.
+	// We intentionally ignore errors here: if the column exists, SQLite returns "duplicate column name", which is OK.
 	_, _ = db.db.ExecContext(ctx, `ALTER TABLE movies ADD COLUMN tmdb_id INTEGER;`)
 	_, _ = db.db.ExecContext(ctx, `ALTER TABLE movies ADD COLUMN media_type TEXT;`)
 
@@ -158,12 +158,12 @@ func (db *DB) SaveMoviesBatch(ctx context.Context, movies []Movie) error {
 		return nil
 	}
 
-	// Р’С–РґРєСЂРёРІР°С”РјРѕ С‚СЂР°РЅР·Р°РєС†С–СЋ
+	// Begin transaction
 	tx, err := db.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin tx failed: %w", err)
 	}
-	defer tx.Rollback() // Р‘РµР·РїРµС‡РЅРёР№ РІС–РґРєР°С‚, СЏРєС‰Рѕ Commit РЅРµ СЃРїСЂР°С†СЋС”
+	defer tx.Rollback() // safe no-op if Commit succeeds
 
 	query := `
 		INSERT OR REPLACE INTO movies
@@ -171,7 +171,7 @@ func (db *DB) SaveMoviesBatch(ctx context.Context, movies []Movie) error {
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`
 
-	// РџС–РґРіРѕС‚РѕРІР»РµРЅРёР№ РІРёСЂР°Р· РґР»СЏ РѕРїС‚РёРјС–Р·Р°С†С–С—
+	// Prepare statement for performance
 	stmt, err := tx.PrepareContext(ctx, query)
 	if err != nil {
 		return fmt.Errorf("prepare stmt failed: %w", err)
@@ -179,9 +179,9 @@ func (db *DB) SaveMoviesBatch(ctx context.Context, movies []Movie) error {
 	defer stmt.Close()
 
 	// Partial save: errors per-row are logged but batch commit succeeds
-	// Р’РёРєРѕРЅСѓС”РјРѕ РІСЃС‚Р°РІРєСѓ РІ РїР°Рј'СЏС‚С–
+	// Execute inserts in memory
 	for _, m := range movies {
-		// рџ”ґ РҐР†Р РЈР Р“Р†Р§РќР• Р’РўР РЈР§РђРќРќРЇ: РџРµСЂРµСЂРёРІР°С”РјРѕ С†РёРєР» Р±РµР·РїРµС‡РЅРѕ, СЏРєС‰Рѕ РєРѕРЅС‚РµРєСЃС‚ СЃРєР°СЃРѕРІР°РЅРѕ.
+		// Abort safely if context is cancelled
 		if err := ctx.Err(); err != nil {
 			utils.LoggerWithTrace(ctx).Warn("batch_insert_cancelled", slog.Any("error", err))
 			return err
@@ -192,13 +192,13 @@ func (db *DB) SaveMoviesBatch(ctx context.Context, movies []Movie) error {
 			m.Genres, m.Cast, m.Plot, m.PosterURL, m.LocalPosterPath, m.MediaType,
 		)
 		if err != nil {
-			// рџ”ґ РҐР†Р РЈР Р“Р†Р§РќР• Р’РўР РЈР§РђРќРќРЇ: Р›РѕРіСѓС”РјРѕ РїРѕРјРёР»РєСѓ РґР»СЏ РєРѕРЅРєСЂРµС‚РЅРѕРіРѕ С„Р°Р№Р»Сѓ С– Р№РґРµРјРѕ РґР°Р»С–
+			// Log per-row error and continue
 			slog.Warn("batch_insert_skip", slog.String("file", m.Filename), slog.Any("err", err))
 			continue
 		}
 	}
 
-	// Р¤С–РєСЃСѓС”РјРѕ Р·РјС–РЅРё РЅР° РґРёСЃРє Р·Р° РѕРґРёРЅ СЂР°Р·
+	// Commit all changes at once
 	return tx.Commit()
 }
 
@@ -220,7 +220,7 @@ func (db *DB) GetMovieByFilename(ctx context.Context, filename string) (*Movie, 
 	return &m, nil
 }
 
-// Р РµС€С‚Р° РјРµС‚РѕРґС–РІ (CleanMissingMovies, CleanOrphanPosters, GetAllFilenames) Р·Р°Р»РёС€Р°СЋС‚СЊСЃСЏ Р±РµР· Р·РјС–РЅ
+// Remaining methods (CleanMissingMovies, CleanOrphanPosters, GetAllFilenames) are unchanged
 func (db *DB) CleanMissingMovies(ctx context.Context, actualFiles []string) (int, error) {
 	actualMap := make(map[string]bool)
 	for _, f := range actualFiles {
@@ -355,7 +355,7 @@ func (db *DB) GetStatsCounts(ctx context.Context) (total, unrec int, err error) 
 	return total, unrec, nil
 }
 
-// GetMoviesByFilenames РїРѕРІРµСЂС‚Р°С” РјР°РїСѓ С„С–Р»СЊРјС–РІ Р·Р° СЃРїРёСЃРєРѕРј С–РјРµРЅ С„Р°Р№Р»С–РІ
+// GetMoviesByFilenames returns a map of movies keyed by filename
 func (db *DB) GetMoviesByFilenames(ctx context.Context, filenames []string) (map[string]Movie, error) {
 	if len(filenames) == 0 {
 		return make(map[string]Movie), nil

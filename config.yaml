@@ -1,5 +1,0 @@
-model_list:
-  - model_name: claude-3-5-sonnet-20241022
-    litellm_params:
-      model: nvidia/meta/llama-3.3-70b-instruct
-      api_key: "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"
