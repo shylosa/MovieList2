@@ -1,73 +1,121 @@
-# 🤖 ШІ-Інструкції для проєкту MovieList (Go 1.26, Wails, SQLite, Gemini, TMDB)
+# MovieList — Cursor Rules
 
-## 📌 Робочий процес та Економія Лімітів
-- **Статус проекту:** ПЕРЕД початком будь-якої задачі прочитай актуальний стан із [AGENTS.md](file:///d:/movielist2/movielist-app/AGENTS.md).
-- **Актуалізація:** ПІСЛЯ кожної успішної зміни коду оновлюй [AGENTS.md](file:///d:/movielist2/movielist-app/AGENTS.md) — пиши детально, що змінено та які наступні кроки заплановано.
-- **Атомарність:** Працюй за принципом "один файл / одна функція за раз". Не пиши і не міняй великі блоки коду в різних файлах одночасно.
-- **Контроль помилок:** ЗАБОРОНЕНО запускати нескінченні цикли самовиправлення. Якщо компіляція або тест впали — зупинись і чекай інструкцій користувача.
-- **Мова коду:** Усі коментарі в коді залишай англійською мовою, але в чаті з користувачем спілкуйся виключно українською.
-- **ENCODING:
-  - After ANY edit to a .go file, verify encoding with:
-    python -c "open('path/to/file','rb').read().decode('utf-8')"
-    If this throws UnicodeDecodeError ? the file is corrupted. Restore from git before proceeding.
-** All source files must be saved in UTF-8 without BOM. Never use Windows-1251 or any other encoding. Verify with `file -i <filename>` if unsure.
-- **INDENTATION:** Use tabs (not spaces) for Go source indentation, as per gofmt standard.
+## Workflow
+- Read `AGENTS.md` before starting work.
+- Update `AGENTS.md` only for meaningful architectural or behavioral changes.
+- Work incrementally: one function / one subsystem at a time.
+- After compile/test failure: STOP and wait for user instructions.
+- Do not perform uncontrolled self-repair loops.
 
-## 🐹 Go 1.26+ & SQLite (CGO-free)
-- **Сучасний Go:** Використовуй можливості Go 1.26+ (наприклад, стандартні ітератори `iter.Seq` для обходу колекцій).
-- **SQLite Драйвер:** Використовуй CGO-free драйвер `modernc.org/sqlite`. Завжди перевіряй помилки (`if err != nil`).
-- **Транзакції:** Для масових операцій (`SaveMoviesBatch`) використовуй транзакції з обов'язковим `defer tx.Rollback()` (навіть після успішного `Commit` це no-op, але страхує від панік).
-- **Контексти та Скасування:** У циклах транзакцій та перед мережевими запитами обов'язково перевіряй стан контексту: `if err := ctx.Err(); err != nil { return err }`.
-- **Міграція бази:** Використовуй ліниву міграцію за допомогою `ALTER TABLE ... ADD COLUMN` в `InitSchema()` з ігноруванням помилки дублювання колонок ("duplicate column name").
-- **Налаштування Pragmas:** Для SQLite WAL-режиму завжди виставляй: `PRAGMA journal_mode = WAL;`, `PRAGMA synchronous = NORMAL;`, `PRAGMA busy_timeout = 5000;`.
-- **Первинний ключ ( filename ):** У БД колонку `filename` використовуй як PRIMARY KEY, але зберігай туди відносний шлях (`Relative Path`), отриманий через `a.getFileIdentifier(path)`, а не чистий `filepath.Base(path)`. Це запобігає колізіям однакових назв файлів (наприклад, `S01E01.mkv`) у різних папках серіалів.
+## Communication
+- Chat responses: Ukrainian only.
+- Code comments: English only.
 
-## 🌐 Wails & Взаємодія з Фронтендом
-- **Розподіл шарів:** Go-код керує логікою, БД та API. Фронтенд (JS/TS) лише робить виклики зв'язаних методів через `window.go` та слухає події.
-- **Події (Wails Events):** Бекенд повідомляє фронтенд про прогрес через:
-  - `scan-started` — початок сканування
-  - `scan-progress` — прогрес, передаючи об'єкт `{"current": int, "total": int, "filename": string}`
-  - `scan-finished` — завершення сканування (передає повідомлення результату)
-  - `log-message` — передача тексту логу для консолі інтерфейсу
-- **Елементи інтерфейсу:** У шаблоні HTML обов'язково мають бути присутні елементи з ID `filteredCount` (к-сть відфільтрованих результатів), `filteredNum` (динамічне число) та `noResults` (повідомлення про порожній пошук) — без них JS-код пошуку впаде з помилкою `null pointer`.
+## Formatting & Encoding
+- All source files must use UTF-8 without BOM.
+- Never introduce mojibake or mixed encodings.
+- Go indentation must use tabs (`gofmt` style).
+- Preserve existing formatting style.
 
-## 🤖 Google Gemini AI SDK (`google.golang.org/genai`)
-- **SDK:** Використовуй виключно офіційний пакет `google.golang.org/genai` (не `google.golang.org/api` і не прямі HTTP запити).
-- **Конфігурація:** API-ключ отримуй тільки через конфігурацію (`cfg.GeminiAPIKey`), яка зчитує `.env` через `godotenv`. Не використовуй `os.Getenv` напряму в коді логіки.
-- **Безпечна ініціалізація:** Використовуй `sync.Mutex` (`initMu`) для лінивої ініціалізації синглтона клієнта, щоб забезпечити безпечний retry при збоях мережі.
-- **Дедуплікація запитів:** Для отримання списку моделей `GetAIModels()` обов'язково використовуй `singleflight.Group` (`modelsGroup`), щоб дедуплікувати паралельні запити до API.
-- **Каскад моделей:** Отримуй список моделей динамічно через `GetAIModels()`. При запитах використовуй каскадний перебір моделей зі списку (наприклад, `gemini-2.5-flash`, `gemini-2.0-flash`, `gemini-2.5-flash-lite`).
-- **Схема виводу (ResponseSchema):** Завжди використовуй типізовану JSON-схему для structured output.
-- **Маппінг результатів:** Зіставляй результати `RecognizeBulk` з оригінальними файлами виключно за цілочисельним `ID` (починаючи з 0), оскільки поле назви файлу ШІ може спотворити або змінити регістр.
-- **Поріг впевненості:** Використовуй єдину константу `aiConfidenceThreshold = 0.55` (для перевірки результату Gemini, L2-кешу та мержу). Якщо `confidence < 0.55`, вважай файл нерозпізнаним (`TmdbID = 0`).
-- **L2-кешування:** Після кожного успішного розпізнавання Gemini зберігай результат у таблицю `ai_resolutions`. Перед запитом до ШІ завжди перевіряй цей кеш.
-- **Rate Limiting:** Дотримуйся RPM лімітів за допомогою спільного для клієнта `rate.Limiter` (встановлено 15 RPM, тобто `rate.Every(4*time.Second)`).
-- **Батчинг та паралелізм:**
-  - Розпізнавання: обробляй файли послідовно пачками по 10 штук без використання `errgroup`.
-  - Переклад (`TranslateBulk`): обробляй пачки по 10 штук з семафором на 2 паралельні запити (`chan struct{}`), пам'ятаючи про внутрішній rate limiter в SDK.
-- **Логіка перекладу:**
-  - Перекладай title_ua та plot тільки якщо `movie.TmdbID > 0` (файл успішно верифіковано в TMDB).
-  - Функція `needsTranslation` має шукати російські слова-маркери (`russianMarkers`: *из, как, что, он, это, бы, вот, для*) та перевіряти наявність суто українських літер (`і, ї, є, ґ`).
-  - При ручному оновленні в `FixSelected` додавай файли до черги перекладу тільки якщо `UpdateMovie` повернув `nil` (успіх).
+After editing any `.go` file verify UTF-8:
+```bash
+python -c "open('path/to/file','rb').read().decode('utf-8')"
 
-## 🎬 TMDB API & Пайплайн пошуку
-- **Локалізація запитів:** Обов'язково додавай параметр `language=uk-UA` у запитах детальної інформації (`/movie/{id}`, `/tv/{id}`, `/find/{id}`).
-- **Запит деталей:** Використовуй параметр `append_to_response=credits` для отримання акторського складу за один запит.
-- **Rate Limits:** Використовуй `rate.Limiter` з частотою 20 req/s (`rate.Every(50*time.Millisecond)`) та burst 5. При отриманні помилки 429 роби експоненціальний backoff, але при 404 (`ErrNotFound`) виходь негайно без повторних спроб.
-- **Маскування логів:** Завжди замінюй значення параметру `api_key=...` на `***MASKED***` у всіх записах URL в логах.
-- **Вибір Ендпоінтів:** Не використовуй `/search/multi` якщо тип медіа відомий — застосовуй `/search/movie` або `/search/tv`.
-- **Двоїстий пошук:** Для кириличних запитів у `searchAndFetch` роби послідовний пошук в індексах `uk-UA` та `ru-RU`, порівнюй фінальні бали кандидатів та обирай найкращий.
-- **Водоспад метаданих:** При отриманні деталей викликай каскад мов `uk-UA` -> `ru-RU` -> `en-US`. Дозаповнюй порожні або не-кириличні поля даними з наступної мови в каскаді. Зупиняй цикл завчасно, якщо назва і опис пройшли перевірку `isGoodUkrainian()`.
-- **Скор-картка (Scoring):**
-  - Точний збіг назви: `200`
-  - Частковий збіг (contains): `70`
-  - Точний збіг року: `150`
-  - Різниця року ±1: `80`, різниця > 2 роки: `-400`
-  - Співпадіння типу медіа: `30`
-  - Діамантовий бонус (точний збіг назви + точний рік): `+300` (гарантує перше місце в ранжуванні)
-  - Штрафи оригінальної мови: `uk` (+20), `en` (+10), `ru` після 2010 (-50), `ru` до 2010 (-300)
-  - Бонус популярності: `min(popularity/5, 50)`
-  - Жорстке відхилення: якщо базовий збіг назви `titleScore == 0`, то підсумковий бал встановлюється в `-1000`.
-- **Контроль року:** Якщо очікуваний рік задано і він відрізняється від знайденого в TMDB більше ніж на 2 роки — жорстко відхиляй результат (за винятком серіалів, де в TMDB рік початку шоу, а у файлі рік сезону).
-- **Post-Verification (Верифікація після Gemini):** Порівнюй назву від Gemini з отриманою від TMDB за алгоритмом Jaro-Winkler (поріг схожості `geminiTMDBVerifyMinJW = 0.85`). Звіряй не тільки з `TitleEN` та `SearchTitle`, але й з альтернативними назвами (`MatchedAlias`), отриманими з `/alternative_titles`.
-- **Продуктивність регулярних виразів:** Винось усі регулярні вирази в глобальні змінні пакета. ЗАБОРОНЕНО компілювати regex (`regexp.MustCompile`) всередині функцій, які викликаються в циклах.
+```
+
+If decoding fails:
+
+* restore file from git
+* do not continue editing corrupted file
+
+## Go Rules
+
+* Use modern Go 1.26+ patterns where appropriate.
+* Always check errors.
+* Use `context.Context` correctly.
+* Check `ctx.Err()`:
+* before network requests
+* inside long loops
+* before expensive operations
+
+
+
+Never:
+
+* compile regexp inside loops
+* use `time.After()` inside loops
+* mutate shared maps from goroutines
+* introduce uncontrolled goroutine fan-out
+
+Use:
+
+* package-level regexps
+* `strings.Builder`
+* reusable `strings.NewReplacer`
+
+## SQLite Rules
+
+* Use `modernc.org/sqlite`.
+* Use transactional batch writes.
+* Always keep `defer tx.Rollback()`.
+* Preserve WAL settings:
+* `PRAGMA journal_mode=WAL;`
+* `PRAGMA synchronous=NORMAL;`
+* `PRAGMA busy_timeout=5000;`
+
+
+* Keep `SetMaxOpenConns(1)`.
+* Do not replace batch operations with per-row writes.
+
+## Gemini Rules
+
+* Use only `google.golang.org/genai`.
+* Never use raw HTTP Gemini integrations.
+* Gemini processing must remain mostly sequential.
+* Respect shared `rate.Limiter`.
+* Use `singleflight.Group` for shared model loading.
+* Never trust Gemini-generated IDs directly.
+* Keep confidence validation centralized.
+
+## TMDB Rules
+
+* Never use `/search/multi` when media type is known.
+* Preserve recognition order:
+1. IMDB
+2. typed search
+3. transliteration
+4. parent folder
+5. Gemini fallback
+
+
+* Preserve metadata cascade: `uk-UA` → `ru-RU` → `en-US`
+* Keep TMDB verification mandatory before translation.
+
+## Frontend / Wails Rules
+
+Do not rename without explicit migration:
+
+* Wails events
+* HTML IDs
+* DB columns
+* JSON fields
+* exported Wails methods
+
+Required HTML IDs:
+
+* `filteredCount`
+* `filteredNum`
+* `noResults`
+
+## Safety Rules
+
+Never:
+
+* silently remove cancellation handling
+* remove rate limiting
+* bypass TMDB verification
+* replace batch persistence with per-row saves
+* introduce hidden background goroutines
+* rewrite architecture without request
+
+Prefer minimal targeted changes over broad refactors.
