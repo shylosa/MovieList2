@@ -3,7 +3,7 @@ package sheets
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -22,18 +22,18 @@ type Client struct {
 // NewClient створює підключення до Google Sheets (аналог __init__ в Python)
 func NewClient(ctx context.Context, cfg *config.Config) (*Client, error) {
 	if cfg.GoogleSheetURL == "" {
-		log.Println("[WARNING] [SHEETS] GOOGLE_SHEET_URL не знайдено у конфігурації")
+		slog.Warn("google_sheet_url_missing")
 		return nil, fmt.Errorf("GOOGLE_SHEET_URL не знайдено")
 	}
 
 	// Переконайся, що credentials.json лежить у корені проєкту
 	srv, err := sheets.NewService(ctx, option.WithCredentialsFile("credentials.json"))
 	if err != nil {
-		log.Printf("[CRITICAL] [SHEETS] Помилка авторизації Google: %v", err)
+		slog.Error("google_sheets_auth_failed", slog.Any("error", err))
 		return nil, fmt.Errorf("помилка авторизації Google: %v", err)
 	}
 
-	log.Println("[INFO] [SHEETS] ✅ Клієнт Google Sheets успішно ініціалізований")
+	slog.Info("google_sheets_client_initialized")
 	return &Client{
 		cfg:     cfg,
 		service: srv,
@@ -48,7 +48,9 @@ func (c *Client) SyncMovies(ctx context.Context, movies []storage.Movie) error {
 		sheetName = "base"
 	}
 
-	log.Printf("[INFO] [SHEETS] 🔄 Початок синхронізації з таблицею (ID: %s, Лист: %s)", spreadsheetID, sheetName)
+	slog.Info("google_sheets_sync_started",
+		slog.String("spreadsheet_id", spreadsheetID),
+		slog.String("sheet_name", sheetName))
 
 	// 1. Готуємо дані (Headers + Body)
 	headers := []interface{}{"File Path", "Title (UA)", "Title (EN)", "Year", "Genre", "Cast", "Plot", "Poster URL"}
@@ -71,18 +73,20 @@ func (c *Client) SyncMovies(ctx context.Context, movies []storage.Movie) error {
 	}
 
 	// 2. Очищення аркуша (аналог sheet.clear) з Retry-логікою
-	log.Printf("[INFO] [SHEETS] 🧹 Очищення вкладки '%s'...", sheetName)
+	slog.Info("google_sheets_clear_started", slog.String("sheet_name", sheetName))
 	err := c.retry(func() error {
 		_, err := c.service.Spreadsheets.Values.Clear(spreadsheetID, sheetName, &sheets.ClearValuesRequest{}).Context(ctx).Do()
 		return err
 	})
 	if err != nil {
-		log.Printf("[ERROR] [SHEETS] Не вдалося очистити таблицю: %v", err)
+		slog.Error("google_sheets_clear_failed",
+			slog.String("sheet_name", sheetName),
+			slog.Any("error", err))
 		return fmt.Errorf("не вдалося очистити таблицю: %v", err)
 	}
 
 	if len(movies) == 0 {
-		log.Println("[WARNING] [SHEETS] Немає даних для запису (база порожня)")
+		slog.Warn("google_sheets_no_movies_to_sync")
 		return nil
 	}
 
@@ -94,7 +98,7 @@ func (c *Client) SyncMovies(ctx context.Context, movies []storage.Movie) error {
 		Values: values,
 	}
 
-	log.Printf("[INFO] [SHEETS] 📦 Відправка %d записів у хмару...", len(movies))
+	slog.Info("google_sheets_upload_started", slog.Int("movies_count", len(movies)))
 	err = c.retry(func() error {
 		_, err := c.service.Spreadsheets.Values.Update(spreadsheetID, cellRange, valueRange).
 			ValueInputOption("RAW").
@@ -104,11 +108,13 @@ func (c *Client) SyncMovies(ctx context.Context, movies []storage.Movie) error {
 	})
 
 	if err != nil {
-		log.Printf("[ERROR] [SHEETS] Помилка запису в Google Sheets: %v", err)
+		slog.Error("google_sheets_update_failed",
+			slog.String("range", cellRange),
+			slog.Any("error", err))
 		return err
 	}
 
-	log.Printf("[INFO] [SHEETS] ✅ Хмарна таблиця успішно оновлена! (Записано %d рядків)", len(values))
+	slog.Info("google_sheets_sync_completed", slog.Int("rows_written", len(values)))
 	return nil
 }
 
@@ -117,7 +123,7 @@ func (c *Client) retry(fn func() error) error {
 	var lastErr error
 	for i := 0; i < 3; i++ {
 		if i > 0 {
-			log.Printf("[WARNING] [SHEETS] API Гугла перевантажено, спроба %d/3 через 5 сек...", i+1)
+			slog.Warn("google_sheets_retry_scheduled", slog.Int("attempt", i+1))
 			time.Sleep(5 * time.Second)
 		}
 		if err := fn(); err == nil {

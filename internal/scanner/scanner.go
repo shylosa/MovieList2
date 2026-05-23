@@ -68,7 +68,7 @@ func (s *Scanner) getFirstVideoInDir(dirPath string) string {
 	var largestVideo string
 	var maxSize int64
 
-	filepath.WalkDir(dirPath, func(path string, d os.DirEntry, err error) error {
+	if err := filepath.WalkDir(dirPath, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return nil
 		}
@@ -83,7 +83,9 @@ func (s *Scanner) getFirstVideoInDir(dirPath string) string {
 			}
 		}
 		return nil
-	})
+	}); err != nil {
+		slog.Warn("walkdir_error", slog.String("dir", dirPath), slog.Any("error", err))
+	}
 
 	return largestVideo
 }

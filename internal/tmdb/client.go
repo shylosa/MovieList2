@@ -34,9 +34,10 @@ type SearchCacheKey struct {
 }
 
 var (
-	ErrNotFound      = fmt.Errorf("resource not found")
-	reLatinOnly      = regexp.MustCompile(`^[a-zA-Z0-9\s\-\:\.,!?']+$`)
-	homoglyphToLatin = strings.NewReplacer(
+	ErrNotFound            = fmt.Errorf("resource not found")
+	reLatinOnly            = regexp.MustCompile(`^[a-zA-Z0-9\s\-\:\.,!?']+$`)
+	reInvalidFilenameChars = regexp.MustCompile(`[^\w\-]`)
+	homoglyphToLatin       = strings.NewReplacer(
 		"а", "a", "о", "o", "е", "e", "с", "c", "р", "p", "х", "x", "у", "y", "і", "i",
 		"А", "A", "О", "O", "Е", "E", "С", "C", "Р", "P", "Х", "X", "У", "Y", "І", "I",
 	)
@@ -598,7 +599,7 @@ func (c *Client) doRequest(ctx context.Context, url string, target any) error {
 func (c *Client) DownloadPoster(ctx context.Context, posterURL, filename string) (string, error) {
 	flatName := strings.NewReplacer("\\", "_", "/", "_").Replace(filename)
 	// Безпечне ім'я файлу — прибираємо все крім букв, цифр і дефісу
-	safeName := regexp.MustCompile(`[^\w\-]`).ReplaceAllString(filepath.Base(flatName), "_")
+	safeName := reInvalidFilenameChars.ReplaceAllString(filepath.Base(flatName), "_")
 	path := filepath.Join(c.postersDir, safeName+".jpg")
 
 	// Вже є на диску — не качаємо повторно

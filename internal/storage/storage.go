@@ -7,13 +7,14 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"movielist-app/internal/utils"
 
 	_ "modernc.org/sqlite"
 )
 
-// Movie описує структуру фільму в базі даних (уніфіковано)
+// Movie РѕРїРёСЃСѓС” СЃС‚СЂСѓРєС‚СѓСЂСѓ С„С–Р»СЊРјСѓ РІ Р±Р°Р·С– РґР°РЅРёС… (СѓРЅС–С„С–РєРѕРІР°РЅРѕ)
 type Movie struct {
 	ID              int    `json:"id"`
 	Filename        string `json:"filename"`
@@ -29,7 +30,7 @@ type Movie struct {
 	MediaType       string `json:"media_type"`
 }
 
-// AIResolution — кеш розпізнавання Gemini (L2 Cache)
+// AIResolution вЂ” РєРµС€ СЂРѕР·РїС–Р·РЅР°РІР°РЅРЅСЏ Gemini (L2 Cache)
 type AIResolution struct {
 	OriginalFilename string
 	ResolvedTitle    string
@@ -59,7 +60,7 @@ func (db *DB) InitSchema(ctx context.Context) error {
 	query := `
 	CREATE TABLE IF NOT EXISTS movies (
 		filename TEXT PRIMARY KEY,
-		tmdb_id INTEGER, -- 👈 Додано колонку
+		tmdb_id INTEGER, -- рџ‘€ Р”РѕРґР°РЅРѕ РєРѕР»РѕРЅРєСѓ
 		title_ua TEXT,
 		title_en TEXT,
 		year TEXT,
@@ -89,6 +90,9 @@ func (db *DB) InitSchema(ctx context.Context) error {
 	if err := db.db.QueryRowContext(ctx, "PRAGMA journal_mode = WAL;").Scan(&mode); err != nil {
 		return err
 	}
+	if mode != "wal" {
+		slog.Warn("wal_mode_unavailable", slog.String("actual_mode", mode))
+	}
 	if _, err := db.db.ExecContext(ctx, "PRAGMA synchronous = NORMAL;"); err != nil {
 		return err
 	}
@@ -96,9 +100,9 @@ func (db *DB) InitSchema(ctx context.Context) error {
 		return err
 	}
 
-	// 🔴 ХІРУРГІЧНЕ ВТРУЧАННЯ: Лінива міграція для старих баз.
-	// Якщо таблиця вже існувала, ми маємо явно додати нові колонки.
-	// Ми свідомо ігноруємо помилку тут, бо якщо колонка вже є, SQLite поверне помилку "duplicate column name", що для нас ОК.
+	// рџ”ґ РҐР†Р РЈР Р“Р†Р§РќР• Р’РўР РЈР§РђРќРќРЇ: Р›С–РЅРёРІР° РјС–РіСЂР°С†С–СЏ РґР»СЏ СЃС‚Р°СЂРёС… Р±Р°Р·.
+	// РЇРєС‰Рѕ С‚Р°Р±Р»РёС†СЏ РІР¶Рµ С–СЃРЅСѓРІР°Р»Р°, РјРё РјР°С”РјРѕ СЏРІРЅРѕ РґРѕРґР°С‚Рё РЅРѕРІС– РєРѕР»РѕРЅРєРё.
+	// РњРё СЃРІС–РґРѕРјРѕ С–РіРЅРѕСЂСѓС”РјРѕ РїРѕРјРёР»РєСѓ С‚СѓС‚, Р±Рѕ СЏРєС‰Рѕ РєРѕР»РѕРЅРєР° РІР¶Рµ С”, SQLite РїРѕРІРµСЂРЅРµ РїРѕРјРёР»РєСѓ "duplicate column name", С‰Рѕ РґР»СЏ РЅР°СЃ РћРљ.
 	_, _ = db.db.ExecContext(ctx, `ALTER TABLE movies ADD COLUMN tmdb_id INTEGER;`)
 	_, _ = db.db.ExecContext(ctx, `ALTER TABLE movies ADD COLUMN media_type TEXT;`)
 
@@ -126,6 +130,9 @@ func (db *DB) GetAllMovies(ctx context.Context) ([]Movie, error) {
 		}
 		movies = append(movies, m)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	if movies == nil {
 		movies = []Movie{}
 	}
@@ -151,12 +158,12 @@ func (db *DB) SaveMoviesBatch(ctx context.Context, movies []Movie) error {
 		return nil
 	}
 
-	// Відкриваємо транзакцію
+	// Р’С–РґРєСЂРёРІР°С”РјРѕ С‚СЂР°РЅР·Р°РєС†С–СЋ
 	tx, err := db.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin tx failed: %w", err)
 	}
-	defer tx.Rollback() // Безпечний відкат, якщо Commit не спрацює
+	defer tx.Rollback() // Р‘РµР·РїРµС‡РЅРёР№ РІС–РґРєР°С‚, СЏРєС‰Рѕ Commit РЅРµ СЃРїСЂР°С†СЋС”
 
 	query := `
 		INSERT OR REPLACE INTO movies
@@ -164,7 +171,7 @@ func (db *DB) SaveMoviesBatch(ctx context.Context, movies []Movie) error {
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`
 
-	// Підготовлений вираз для оптимізації
+	// РџС–РґРіРѕС‚РѕРІР»РµРЅРёР№ РІРёСЂР°Р· РґР»СЏ РѕРїС‚РёРјС–Р·Р°С†С–С—
 	stmt, err := tx.PrepareContext(ctx, query)
 	if err != nil {
 		return fmt.Errorf("prepare stmt failed: %w", err)
@@ -172,9 +179,9 @@ func (db *DB) SaveMoviesBatch(ctx context.Context, movies []Movie) error {
 	defer stmt.Close()
 
 	// Partial save: errors per-row are logged but batch commit succeeds
-	// Виконуємо вставку в пам'яті
+	// Р’РёРєРѕРЅСѓС”РјРѕ РІСЃС‚Р°РІРєСѓ РІ РїР°Рј'СЏС‚С–
 	for _, m := range movies {
-		// 🔴 ХІРУРГІЧНЕ ВТРУЧАННЯ: Перериваємо цикл безпечно, якщо контекст скасовано.
+		// рџ”ґ РҐР†Р РЈР Р“Р†Р§РќР• Р’РўР РЈР§РђРќРќРЇ: РџРµСЂРµСЂРёРІР°С”РјРѕ С†РёРєР» Р±РµР·РїРµС‡РЅРѕ, СЏРєС‰Рѕ РєРѕРЅС‚РµРєСЃС‚ СЃРєР°СЃРѕРІР°РЅРѕ.
 		if err := ctx.Err(); err != nil {
 			utils.LoggerWithTrace(ctx).Warn("batch_insert_cancelled", slog.Any("error", err))
 			return err
@@ -185,13 +192,13 @@ func (db *DB) SaveMoviesBatch(ctx context.Context, movies []Movie) error {
 			m.Genres, m.Cast, m.Plot, m.PosterURL, m.LocalPosterPath, m.MediaType,
 		)
 		if err != nil {
-			// 🔴 ХІРУРГІЧНЕ ВТРУЧАННЯ: Логуємо помилку для конкретного файлу і йдемо далі
+			// рџ”ґ РҐР†Р РЈР Р“Р†Р§РќР• Р’РўР РЈР§РђРќРќРЇ: Р›РѕРіСѓС”РјРѕ РїРѕРјРёР»РєСѓ РґР»СЏ РєРѕРЅРєСЂРµС‚РЅРѕРіРѕ С„Р°Р№Р»Сѓ С– Р№РґРµРјРѕ РґР°Р»С–
 			slog.Warn("batch_insert_skip", slog.String("file", m.Filename), slog.Any("err", err))
 			continue
 		}
 	}
 
-	// Фіксуємо зміни на диск за один раз
+	// Р¤С–РєСЃСѓС”РјРѕ Р·РјС–РЅРё РЅР° РґРёСЃРє Р·Р° РѕРґРёРЅ СЂР°Р·
 	return tx.Commit()
 }
 
@@ -213,7 +220,7 @@ func (db *DB) GetMovieByFilename(ctx context.Context, filename string) (*Movie, 
 	return &m, nil
 }
 
-// Решта методів (CleanMissingMovies, CleanOrphanPosters, GetAllFilenames) залишаються без змін
+// Р РµС€С‚Р° РјРµС‚РѕРґС–РІ (CleanMissingMovies, CleanOrphanPosters, GetAllFilenames) Р·Р°Р»РёС€Р°СЋС‚СЊСЃСЏ Р±РµР· Р·РјС–РЅ
 func (db *DB) CleanMissingMovies(ctx context.Context, actualFiles []string) (int, error) {
 	actualMap := make(map[string]bool)
 	for _, f := range actualFiles {
@@ -238,6 +245,7 @@ func (db *DB) CleanMissingMovies(ctx context.Context, actualFiles []string) (int
 	}
 	for _, fname := range toDelete {
 		_, _ = db.db.ExecContext(ctx, "DELETE FROM movies WHERE filename = ?", fname)
+		_, _ = db.db.ExecContext(ctx, "DELETE FROM ai_resolutions WHERE original_filename = ?", fname)
 	}
 	return len(toDelete), nil
 }
@@ -328,6 +336,84 @@ func (db *DB) SaveAIResolution(ctx context.Context, r AIResolution) error {
 	query := `INSERT OR REPLACE INTO ai_resolutions (original_filename, resolved_title, year, media_type, confidence) VALUES (?, ?, ?, ?, ?)`
 	_, err := db.db.ExecContext(ctx, query, r.OriginalFilename, r.ResolvedTitle, r.Year, r.MediaType, r.Confidence)
 	return err
+}
+
+// GetStatsCounts returns the total number of movies and the number of unrecognized movies.
+func (db *DB) GetStatsCounts(ctx context.Context) (total, unrec int, err error) {
+	// Total count
+	err = db.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM movies").Scan(&total)
+	if err != nil {
+		return 0, 0, fmt.Errorf("failed to get total count: %w", err)
+	}
+
+	// Unrecognized count (tmdb_id = 0)
+	err = db.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM movies WHERE tmdb_id = 0").Scan(&unrec)
+	if err != nil {
+		return 0, 0, fmt.Errorf("failed to get unrecognized count: %w", err)
+	}
+
+	return total, unrec, nil
+}
+
+// GetMoviesByFilenames РїРѕРІРµСЂС‚Р°С” РјР°РїСѓ С„С–Р»СЊРјС–РІ Р·Р° СЃРїРёСЃРєРѕРј С–РјРµРЅ С„Р°Р№Р»С–РІ
+func (db *DB) GetMoviesByFilenames(ctx context.Context, filenames []string) (map[string]Movie, error) {
+	if len(filenames) == 0 {
+		return make(map[string]Movie), nil
+	}
+
+	const chunkSize = 500
+
+	if len(filenames) > chunkSize {
+		slog.Warn("large_filenames_batch", slog.Int("count", len(filenames)))
+	}
+
+	result := make(map[string]Movie)
+	for start := 0; start < len(filenames); start += chunkSize {
+		end := start + chunkSize
+		if end > len(filenames) {
+			end = len(filenames)
+		}
+
+		chunk := filenames[start:end]
+		placeholders := make([]string, len(chunk))
+		args := make([]interface{}, len(chunk))
+		for i, fname := range chunk {
+			placeholders[i] = "?"
+			args[i] = fname
+		}
+
+		query := fmt.Sprintf(
+			`SELECT filename, COALESCE(tmdb_id, 0), title_ua, title_en, year, genres, "cast", plot, poster_url, local_poster_path, COALESCE(media_type, '')
+			 FROM movies WHERE filename IN (%s)`,
+			strings.Join(placeholders, ","))
+
+		if err := func() error {
+			rows, err := db.db.QueryContext(ctx, query, args...)
+			if err != nil {
+				return fmt.Errorf("GetMoviesByFilenames query failed: %w", err)
+			}
+			defer rows.Close()
+
+			for rows.Next() {
+				var m Movie
+				err := rows.Scan(
+					&m.Filename, &m.TmdbID, &m.TitleUA, &m.TitleEN, &m.Year,
+					&m.Genres, &m.Cast, &m.Plot, &m.PosterURL, &m.LocalPosterPath, &m.MediaType,
+				)
+				if err != nil {
+					slog.Error("storage_scan_error", slog.Any("error", err))
+					continue
+				}
+				result[m.Filename] = m
+			}
+
+			return rows.Err()
+		}(); err != nil {
+			return nil, err
+		}
+	}
+
+	return result, nil
 }
 
 func (db *DB) DeleteAIResolution(ctx context.Context, filename string) error {

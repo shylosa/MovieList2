@@ -140,26 +140,17 @@ func (a *App) GetMovies() ([]storage.Movie, error) {
 }
 
 func (a *App) GetStats() map[string]interface{} {
-	movies, err := a.db.GetAllMovies(a.ctx)
+	total, unrec, err := a.db.GetStatsCounts(a.ctx)
 	if err != nil {
 		return map[string]interface{}{"total": 0, "unrec": 0, "last": "Помилка"}
 	}
-	if movies == nil {
-		movies = []storage.Movie{}
-	}
 
-	unrec := 0
-	for _, m := range movies {
-		if m.TmdbID == 0 {
-			unrec++
-		}
-	}
 	lastScan := "Ніколи"
 	if info, err := os.Stat(a.cfg.DBPath); err == nil {
 		lastScan = info.ModTime().Format("2006-01-02 15:04")
 	}
 	return map[string]interface{}{
-		"total": len(movies),
+		"total": total,
 		"unrec": unrec,
 		"last":  lastScan,
 	}
@@ -180,7 +171,9 @@ func (a *App) DeleteMovie(filename string) error {
 	}
 
 	// 🔴 ХІРУРГІЧНЕ ВТРУЧАННЯ: Очищаємо сліди з L2 кешу ШІ
-	_ = a.db.DeleteAIResolution(a.ctx, filename)
+	if err := a.db.DeleteAIResolution(a.ctx, filename); err != nil {
+		slog.Warn("delete_ai_resolution_failed", slog.String("file", filename), slog.Any("error", err))
+	}
 
 	a.logFront(fmt.Sprintf("🗑 Видалено: %s", filename))
 	return nil
@@ -249,7 +242,24 @@ func (a *App) SyncToCloud() {
 	}
 }
 
-func (a *App) GetAIModels(ctx context.Context) ([]string, error) {
+// GetAIModels is the exported Wails method (no context param).
+// It delegates to fetchAIModels using the app context and ensures
+// any error is recorded in the logs for observability.
+func (a *App) GetAIModels() ([]string, error) {
+	names, err := a.fetchAIModels(a.ctx)
+	if err != nil {
+		slog.Error("get_ai_models_error", slog.Any("error", err))
+	}
+	return names, err
+}
+
+// fetchAIModels is the internal implementation that accepts a context.
+// This allows internal callers (like RunScan warmup) to pass their
+// scan-specific context while keeping the exported signature RPC-friendly.
+func (a *App) fetchAIModels(ctx context.Context) ([]string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	a.modelsMutex.RLock()
 	if len(a.aiModelsCache) > 0 {
 		cache := append([]string(nil), a.aiModelsCache...)
@@ -264,7 +274,7 @@ func (a *App) GetAIModels(ctx context.Context) ([]string, error) {
 		if client == nil {
 			client = &http.Client{Timeout: 10 * time.Second}
 		}
-		req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+		req, err := http.NewRequestWithContext(context.WithoutCancel(ctx), "GET", url, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -347,7 +357,7 @@ func (a *App) RunScan() {
 	wailsRuntime.EventsEmit(a.ctx, "scan-started")
 
 	// 🟢 ДОДАНО: Асинхронно прогріваємо кеш моделей, щоб aiClient отримав актуальний список
-	go func() { _, _ = a.GetAIModels(ctx) }()
+	go func() { _, _ = a.fetchAIModels(ctx) }()
 
 	scn := scanner.NewScanner(a.cfg)
 
@@ -363,13 +373,12 @@ func (a *App) RunScan() {
 	}
 
 	// Очищуємо записи про видалені файли
-	a.cleanDeletedFiles(ctx, diskPaths)
 	diskIDs := make([]string, 0, len(diskPaths))
 	for _, p := range diskPaths {
 		diskIDs = append(diskIDs, a.getFileIdentifier(p))
 	}
-	_, _ = a.db.CleanMissingMovies(a.ctx, diskIDs)
-	a.db.CleanOrphanPosters(a.ctx, a.cfg.PostersDir)
+	_, _ = a.db.CleanMissingMovies(ctx, diskIDs)
+	a.db.CleanOrphanPosters(ctx, a.cfg.PostersDir)
 
 	// Визначаємо що треба обробити (нові + нерозпізнані)
 	filesToProcess := a.filterUnprocessed(ctx, diskPaths)
@@ -497,7 +506,9 @@ func (a *App) RunScan() {
 
 	// Зберігаємо всіх знайдених одним запитом
 	if len(moviesToSave) > 0 {
-		_ = a.db.SaveMoviesBatch(ctx, moviesToSave)
+		if err := a.db.SaveMoviesBatch(ctx, moviesToSave); err != nil {
+			slog.Error("batch_save_failed", slog.Any("error", err))
+		}
 	}
 
 	// Спроба 2: Gemini для тих що TMDB не знайшов
@@ -534,6 +545,7 @@ func (a *App) processGeminiQueue(ctx context.Context, paths []string, aiClient *
 	for i := 0; i < total; i += batchSize {
 		if ctx.Err() != nil {
 			a.logFront("🛑 Gemini черга перервана користувачем.")
+			a.emitProgress(total, total, "🛑 Зупинено")
 			break
 		}
 
@@ -560,7 +572,9 @@ func (a *App) processGeminiQueue(ctx context.Context, paths []string, aiClient *
 			for _, path := range batch {
 				errorMovies = append(errorMovies, storage.Movie{Filename: a.getFileIdentifier(path)})
 			}
-			_ = a.db.SaveMoviesBatch(ctx, errorMovies)
+			if err := a.db.SaveMoviesBatch(ctx, errorMovies); err != nil {
+				slog.Error("batch_save_failed", slog.Any("error", err))
+			}
 			continue
 		}
 
@@ -603,7 +617,9 @@ func (a *App) processGeminiQueue(ctx context.Context, paths []string, aiClient *
 		}
 
 		if len(moviesToSave) > 0 {
-			_ = a.db.SaveMoviesBatch(ctx, moviesToSave)
+			if err := a.db.SaveMoviesBatch(ctx, moviesToSave); err != nil {
+				slog.Error("batch_save_failed", slog.Any("error", err))
+			}
 		}
 	}
 
@@ -753,7 +769,7 @@ func (a *App) FixSelected(selected []map[string]interface{}) {
 		if hint != "" && hint != "skip" {
 			withHint = append(withHint, s)
 		} else {
-			geminiQueue = append(geminiQueue, filename)
+			geminiQueue = append(geminiQueue, filepath.Join(a.cfg.MediaFolderPath, filename))
 		}
 	}
 
@@ -883,7 +899,7 @@ func (a *App) UpdateMovie(ctx context.Context, filename, hint string) error {
 	}
 
 	a.logFront(fmt.Sprintf("🤖 Gemini: '%s' → '%s'", filename, rec.ENTitle))
-	movie := a.mergeGeminiWithTMDB(ctx, filename, rec)
+	movie := a.mergeGeminiWithTMDB(ctx, filepath.Join(a.cfg.MediaFolderPath, filename), rec)
 
 	if movie.TmdbID > 0 {
 		yearVal := 0
@@ -940,30 +956,6 @@ func (a *App) filterUnprocessed(ctx context.Context, diskPaths []string) []strin
 		}
 	}
 	return result
-}
-
-// cleanDeletedFiles видаляє з БД записи файлів яких більше немає на диску
-func (a *App) cleanDeletedFiles(ctx context.Context, diskPaths []string) {
-	diskMap := make(map[string]bool, len(diskPaths))
-	for _, p := range diskPaths {
-		diskMap[a.getFileIdentifier(p)] = true
-	}
-
-	dbFilenames, err := a.db.GetAllFilenames(ctx)
-	if err != nil || dbFilenames == nil {
-		return
-	}
-
-	removed := 0
-	for dbFile := range dbFilenames {
-		if !diskMap[dbFile] {
-			a.logFront(fmt.Sprintf("🗑 Видалено з диску: %s", dbFile))
-			removed++
-		}
-	}
-	if removed > 0 {
-		a.logFront(fmt.Sprintf("🧹 Очищено %d застарілих записів", removed))
-	}
 }
 
 // movieFromTMDB — створює storage.Movie з результату TMDB (без Gemini)
@@ -1083,37 +1075,37 @@ func needsTranslation(s string) bool {
 		}
 	}
 
-	hasCyrillic := false
-	hasRussianLetter := false
-	hasUkrainianLetter := false
+	foundCyrillic := false
+	foundRussianLetter := false
+	foundUkrainianLetter := false
 
 	for _, r := range s {
 		if unicode.Is(unicode.Cyrillic, r) {
-			hasCyrillic = true
+			foundCyrillic = true
 		}
 		// Яскраві маркери російської (ы, э, ъ, ё)
 		if r == 'ы' || r == 'э' || r == 'ъ' || r == 'ё' || r == 'Ы' || r == 'Э' || r == 'Ъ' || r == 'Ё' {
-			hasRussianLetter = true
+			foundRussianLetter = true
 		}
 		// Яскраві маркери української (і, ї, є, ґ)
 		if r == 'і' || r == 'ї' || r == 'є' || r == 'ґ' || r == 'І' || r == 'Ї' || r == 'Є' || r == 'Ґ' {
-			hasUkrainianLetter = true
+			foundUkrainianLetter = true
 		}
 	}
 
 	// 2. Немає кирилиці (англійська) -> перекладаємо
-	if !hasCyrillic {
+	if !foundCyrillic {
 		return true
 	}
-	// 3. Є специфічні російські літери -> перекладаємо[cite: 12]
-	if hasRussianLetter {
+	// 3. Є специфічні російські літери -> перекладаємо
+	if foundRussianLetter {
 		return true
 	}
 
 	// 5. СІРА ЗОНА: якщо немає специфічних українських літер (і, ї, є, ґ),
 	// але є кирилиця та немає російських маркерів — скоріш за все OK.
 	// Якщо є російські маркери — вже обробили вище.
-	if !hasUkrainianLetter {
+	if !foundUkrainianLetter {
 		return len([]rune(strings.TrimSpace(s))) > 5
 	}
 
@@ -1127,16 +1119,21 @@ func (a *App) processTranslationQueue(ctx context.Context, filenames []string, a
 	movieMap := make(map[string]storage.Movie)
 
 	// 1. Фільтруємо чергу: збираємо ТІЛЬКИ те, що дійсно треба перекладати
-	for i, fname := range filenames {
+	// 🟢 ОПТИМІЗАЦІЯ: Один масований запит замість N окремих
+	movies, err := a.db.GetMoviesByFilenames(ctx, filenames)
+	if err != nil {
+		slog.Error("failed_to_fetch_movies_for_translation", slog.Any("error", err))
+		return
+	}
+
+	for _, fname := range filenames {
 		if ctx.Err() != nil {
 			a.logFront("🛑 Підготовку перервано.")
 			return
 		}
 
-		a.emitProgress(i+1, len(filenames), "🔄 Перевірка тексту: "+fname)
-
-		movie, err := a.db.GetMovieByFilename(ctx, fname)
-		if err != nil || movie == nil {
+		movie, ok := movies[fname]
+		if !ok {
 			continue
 		}
 
@@ -1158,7 +1155,7 @@ func (a *App) processTranslationQueue(ctx context.Context, filenames []string, a
 				OriginalTitle: movie.TitleEN, // 🟢 НОВЕ: Передаємо оригінал для 100% контексту
 				Plot:          movie.Plot,
 			})
-			movieMap[fname] = *movie
+			movieMap[fname] = movie
 		}
 	}
 
@@ -1229,7 +1226,9 @@ func (a *App) processTranslationQueue(ctx context.Context, filenames []string, a
 		}
 
 		if len(moviesToSave) > 0 {
-			_ = a.db.SaveMoviesBatch(ctx, moviesToSave)
+			if err := a.db.SaveMoviesBatch(ctx, moviesToSave); err != nil {
+				slog.Error("translation_batch_save_failed", slog.Any("error", err))
+			}
 		}
 	}
 

@@ -505,11 +505,17 @@ func (a *App) GetAIModels(ctx context.Context) ([]string, error) {
 | P1 | `GetAIModels` робить подвійні запити | ✅ Виправлено (singleflight) |
 | P1 | `processTranslationQueue` зі складністю errgroup | ✅ Спрощено |
 | P2 | Дефолт містить `gemini-3-flash-preview` | ✅ Видалено |
+| P3 | `cleanDeletedFiles` дублює роботу `CleanMissingMovies` | ✅ Видалено |
+
+### Ревізія 8 — Виправлення помилок та оптимізації
+
+#### Крок 1 — Видалення cleanDeletedFiles
+
+- **[app.go / RunScan]** Видалено виклик `cleanDeletedFiles` та оновлено коментар поряд з `CleanMissingMovies`.
+- **[app.go]** Видалено функцію `cleanDeletedFiles` повністю, оскільки її логіку повністю покриває `CleanMissingMovies`.
 
 Решта проблем залишена як низькопріоритетна або прийнятна:
 
-- `cleanDeletedFiles` дублює роботу `CleanMissingMovies` — не критично
-- `cleanDeletedFiles` тепер приймає `ctx context.Context` та використовує `a.db.GetAllFilenames(ctx)`.
 - L2 кеш має різні пороги (0.6 vs 0.5) — свідомо
 - `Movie.ID` не заповнюється — поле невикористовується, можна видалити в P3
 - `searchDirectly` — мертвий код, можна видалити в P3
@@ -565,6 +571,26 @@ func (a *App) GetAIModels(ctx context.Context) ([]string, error) {
 
 - Перед викликом `a.setScanCancel(cancel)` у `FixSelected` додано перевірку, чи не встановлено вже попередній `a.scanCancel`, і якщо так — викликається попередній cancel для запобігання сиротливим горутинам.
 - `setScanCancel` тепер виконує старий `scanCancel()` під тим самим `a.scanMutex.Lock()` перед збереженням нового `cancel`, щоб скасування і оновлення було атомарним.
+
+### 3. Виправлення шляху у `FixSelected`
+
+- Замінено `geminiQueue = append(geminiQueue, filename)` на `geminiQueue = append(geminiQueue, filepath.Join(a.cfg.MediaFolderPath, filename))` щоб `processGeminiQueue` отримував повний шлях, як і в `RunScan`.
+
+### 4. Виправлення `singleflight closure` у `fetchAIModels`
+
+- Замінено `http.NewRequestWithContext(ctx, "GET", url, nil)` на `http.NewRequestWithContext(context.WithoutCancel(ctx), "GET", url, nil)` щоб скасування scan-ctx не переривало глобальний кеш моделей для Wails-binding.
+
+### 5. Очищення L2 кешу в `CleanMissingMovies`
+
+- Додано видалення записів з таблиці `ai_resolutions` при очищенні відсутніх файлів: `DELETE FROM ai_resolutions WHERE original_filename = ?`
+
+### 6. Оптимізація `GetMoviesByFilenames`
+
+- Додано метод `GetMoviesByFilenames(ctx context.Context, filenames []string) (map[string]Movie, error)` з запитом `WHERE filename IN (?)` для масового отримання фільмів за списком імен файлів.
+
+### 7. Використання `GetMoviesByFilenames` у `processTranslationQueue`
+
+- Замінено цикл з N викликами `GetMovieByFilename` на один виклик `a.db.GetMoviesByFilenames(ctx, filenames)`. Заповнюється `movieMap` з результату. Прибрано `a.emitProgress` всередині фільтрувального циклу (він вже є у основному циклі батчів).
 
 ### 3. Передача `ctx` у `filterUnprocessed`
 
@@ -625,3 +651,91 @@ func (a *App) GetAIModels(ctx context.Context) ([]string, error) {
 ### 15. Документування partial save у `SaveMoviesBatch`
 
 - У `SaveMoviesBatch` додано коментар `// Partial save: errors per-row are logged but batch commit succeeds`, який фіксує рішення комітити batch навіть після per-row помилок.
+
+### Крок 1 — Контекстне скасування в RunScan
+
+- [app.go / RunScan] Використано контекст `ctx` замість `a.ctx` для викликів `CleanMissingMovies` та `CleanOrphanPosters`, що повертає коректне припинення операцій при ручному скасуванні сканування.
+
+### Крок 2 — Перейменування getAIModels → fetchAIModels
+
+- [app.go / GetAIModels, fetchAIModels] Перейменовано приватний метод getAIModels на fetchAIModels. Оновлено всі виклики: GetAIModels делегує до fetchAIModels(a.ctx), RunScan використовує fetchAIModels(ctx).
+
+### Крок 3 — rows.Err() у GetAllMovies
+
+- [internal/storage/storage.go / GetAllMovies] Додано перевірку rows.Err() після циклу for rows.Next() для виявлення помилок ітерації.
+
+### Крок 4 — Винесення regexp у package-level змінну
+
+- [internal/tmdb/client.go / DownloadPoster] Винесено `regexp.MustCompile(\`[^\w\-]\`)` у package-level змінну `reInvalidFilenameChars`. Замінено inline компіляцію на використання змінної.
+
+### Крок 5 — Оптимізація GetStats
+
+- [app.go / GetStats] Замінено `a.db.GetAllMovies(a.ctx)` на два окремі SQL-запити через `db.db.QueryRowContext`:
+  `SELECT COUNT(*) FROM movies` → `total`
+  `SELECT COUNT(*) FROM movies WHERE tmdb_id = 0` → `unrec`
+- [internal/storage/storage.go / GetStatsCounts] Додано приватний метод `func (db *DB) GetStatsCounts(ctx context.Context) (total, unrec int, err error)` для оптимізації запитів.
+
+### Крок 1 — Shadowing у `needsTranslation`
+
+- [app.go / needsTranslation] Перевірено та підтверджено, що локальні змінні вже названі `foundCyrillic`, `foundRussianLetter`, `foundUkrainianLetter`; додаткових змін у коді не потрібно.
+
+### Крок 2 — Повний шлях у UpdateMovie
+
+- [app.go / UpdateMovie] Перевірено, що виклик mergeGeminiWithTMDB вже отримує filepath.Join(a.cfg.MediaFolderPath, filename). Додаткових змін у коді не потрібно.
+
+### Крок 3 — Логування помилок SaveMoviesBatch
+
+- [app.go / processGeminiQueue] Замінено два виклики `_ = a.db.SaveMoviesBatch(...)` на перевірку `if err := a.db.SaveMoviesBatch(...); err != nil { slog.Error("batch_save_failed", slog.Any("error", err)) }`. Виклик у RunScan вже був у правильному вигляді.
+
+### Крок 4 — Уточнення FIELD RULES для media_type
+
+- [internal/ai/gemini.go / buildPrompt] Оновлено пункт 3 у секції FIELD RULES: prompt тепер прямо каже використовувати `parsed_media_type` з input, а за його відсутності обирати `tv` лише для явних маркерів серіалу `(S01, Season N)`, інакше `movie`.
+
+### Крок 5 — Прибрано зайвий progress у фільтрі перекладу
+
+- [app.go / processTranslationQueue] Видалено `a.emitProgress(i+1, len(filenames), "🔄 Перевірка тексту: "+fname)` з початкового фільтрувального циклу перед батч-обробкою, щоб не генерувати зайвий IPC-трафік.
+
+### Крок 6 — Chunk-логіка для GetMoviesByFilenames
+
+- [internal/storage/storage.go / GetMoviesByFilenames] Додано chunk-обробку по 500 filename за запит, мердж результатів у спільну `map[string]Movie` та `slog.Warn("large_filenames_batch", slog.Int("count", len(filenames)))` для великих пакетів.
+
+### Крок 7 — Логування batch-save у перекладі
+
+- [app.go / processTranslationQueue] Замінено `_ = a.db.SaveMoviesBatch(ctx, moviesToSave)` на перевірку з `slog.Error("translation_batch_save_failed", slog.Any("error", err))`, щоб помилки збереження після `TranslateBulk` не губилися.
+
+### Крок 8 — Перевірка помилки WalkDir
+
+- [internal/scanner/scanner.go / getFirstVideoInDir] `filepath.WalkDir` обгорнуто в `if err := ...; err != nil` з `slog.Warn("walkdir_error", slog.String("dir", dirPath), slog.Any("error", err))`, щоб не губити помилки обходу директорії.
+
+### Крок 9 — Closure для rows у GetMoviesByFilenames
+
+- [internal/storage/storage.go / GetMoviesByFilenames] Тіло кожної chunk-ітерації перенесено в локальну closure з `defer rows.Close()` та `return rows.Err()`, щоб закриття `rows` гарантовано відбувалося на кожному проході циклу.
+
+### Крок 10 — Перехід sheets на slog
+
+- [internal/sheets/sheets.go / NewClient, SyncMovies, retry] Усі `log.Printf` і `log.Println` замінено на `slog.Info` / `slog.Warn` / `slog.Error` зі структурованими атрибутами; імпорт `log` прибрано.
+
+### Крок 11 — Логування завантаження .env через slog
+
+- [internal/config/config.go / Load] `log.Printf` для успішного завантаження `.env` замінено на `slog.Info("env_loaded", slog.String("path", envPath))`; імпорт `log` прибрано.
+
+### Крок 12 — Фінальний progress при зупинці Gemini
+
+- [app.go / processGeminiQueue] У гілку `if ctx.Err() != nil` перед `break` додано `a.emitProgress(total, total, "🛑 Зупинено")`, щоб UI коректно завершував progress-bar при ручній зупинці.
+
+
+### Крок 13 — UTF-8 рядок зупинки у Gemini queue
+
+- [app.go / processGeminiQueue] Замінено пошкоджений виклик a.emitProgress(...) на коректний UTF-8 текст 🛑 Зупинено і вирівняно відступ трьома табами.
+
+### Крок 14 — UTF-8 коментар у SaveMoviesBatch
+
+- [internal/storage/storage.go / SaveMoviesBatch] Замінено пошкоджений коментар над методом на коректний UTF-8 текст про масовий запис через єдину транзакцію.
+
+### Крок 15 — Логування помилки видалення AI resolution
+
+- [app.go / DeleteMovie] Замінено ігнорування помилки DeleteAIResolution на slog.Warn з іменем файлу та об'єктом помилки.
+
+### Крок 16 — Правила кодування та відступів у .cursorrules
+
+- [.cursorrules] Додано явні вимоги зберігати вихідні файли у UTF-8 без BOM і використовувати таби для відступів у Go-коді за стандартом gofmt.

@@ -314,9 +314,8 @@ CRITICAL TRANSLATION RULES:
 
 FIELD RULES:
 1. en_title: exact TMDB title. For non-English originals use the most common TMDB search title. Empty string "" if uncertain.
-3. year: from filename if present. null if no year or uncertain.
-7. media_type: prefer "parsed_media_type" from input when present. Use "tv" only with explicit S01/Season markers. Otherwise "movie".
-8. year: prefer "parsed_year" from input when present and valid.`, string(filesJSON))
+2. year: use parsed_year from input if present, otherwise from filename, null if uncertain.
+3. media_type: use "parsed_media_type" from input. If absent, use "tv" only for explicit series markers (S01, Season N). Default: "movie".`, string(filesJSON))
 }
 
 // translateWithRetry — універсальний метод перекладу з каскадом моделей та ретраями

@@ -1,7 +1,6 @@
 package config
 
 import (
-	"log"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -41,7 +40,7 @@ func Load() *Config {
 			// Якщо не вийшло (наприклад, при wails dev), пробуємо стандартний fallback
 			_ = godotenv.Load(".env")
 		} else {
-			log.Printf("[INFO] [CONFIG] Файл .env завантажено з: %s", envPath)
+			slog.Info("env_loaded", slog.String("path", envPath))
 		}
 	} else {
 		_ = godotenv.Load(".env")
