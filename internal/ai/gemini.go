@@ -3,7 +3,6 @@ package ai
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -197,8 +196,21 @@ func (c *Client) requestWithRetry(ctx context.Context, prompt string) ([]Recogni
 		)
 	}
 
-	// Якщо цикл завершився, значить ВСІ моделі зі списку впали
-	return nil, fmt.Errorf("всі моделі ШІ недоступні: %w", lastErr)
+	// Grok fallback — last resort after all Gemini models failed
+	if c.cfg.GrokAPIKey != "" {
+		utils.LoggerWithTrace(ctx).Info("grok_recognize_fallback")
+		raw, grokErr := c.callGrok(ctx, prompt)
+		if grokErr == nil {
+			parsed, parseErr := parseRecognizeResponse(raw)
+			if parseErr == nil {
+				return parsed, nil
+			}
+			lastErr = fmt.Errorf("grok parse error: %w", parseErr)
+		} else {
+			lastErr = grokErr
+		}
+	}
+	return nil, fmt.Errorf("all AI models unavailable (incl. Grok): %w", lastErr)
 }
 
 func (c *Client) makeRequest(ctx context.Context, prompt, modelName string) ([]RecognizedTitle, error) {
@@ -226,13 +238,14 @@ func (c *Client) makeRequest(ctx context.Context, prompt, modelName string) ([]R
 		return nil, fmt.Errorf("модель повернула порожню відповідь")
 	}
 
-	rawText := resp.Text()
+	return parseRecognizeResponse(resp.Text())
+}
 
+func parseRecognizeResponse(raw string) ([]RecognizedTitle, error) {
 	var results []RecognizedTitle
-	if err := json.Unmarshal([]byte(rawText), &results); err != nil {
+	if err := json.Unmarshal([]byte(raw), &results); err != nil {
 		return nil, fmt.Errorf("неможливо розпарсити JSON від моделі: %w", err)
 	}
-
 	return results, nil
 }
 
@@ -454,8 +467,20 @@ func (c *Client) TranslateBulk(ctx context.Context, items []BulkTranslateItem) (
 		utils.LoggerWithTrace(ctx).Warn("bulk_translate_failed", slog.String("model", modelName), slog.Any("error", err))
 	}
 
-	if lastErr == nil {
-		lastErr = errors.New("невідома помилка")
+	// Grok fallback — last resort after all Gemini models failed
+	if c.cfg.GrokAPIKey != "" {
+		utils.LoggerWithTrace(ctx).Info("grok_translate_fallback")
+		raw, grokErr := c.callGrok(ctx, prompt)
+		if grokErr == nil {
+			var results []BulkTranslateItem
+			if parseErr := json.Unmarshal([]byte(raw), &results); parseErr == nil {
+				return results, nil
+			} else {
+				lastErr = fmt.Errorf("grok translate parse error: %w", parseErr)
+			}
+		} else {
+			lastErr = grokErr
+		}
 	}
-	return nil, fmt.Errorf("всі моделі для масового перекладу недоступні: %w", lastErr)
+	return nil, fmt.Errorf("all AI models unavailable for translation (incl. Grok): %w", lastErr)
 }

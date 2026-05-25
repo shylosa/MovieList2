@@ -24,6 +24,7 @@ type Config struct {
 	PostersDir         string
 	GoogleSheetURL     string
 	SheetWorksheetName string
+	GrokAPIKey         string
 }
 
 // Load зчитує .env та заповнює структуру Config
@@ -80,6 +81,7 @@ func Load() *Config {
 		PostersDir:         getEnvOrDefault("POSTERS_DIR", "posters"),
 		GoogleSheetURL:     getEnvOrDefault("GOOGLE_SHEET_URL", ""),
 		SheetWorksheetName: getEnvOrDefault("GOOGLE_SHEET_WORKSHEET_NAME", "base"),
+		GrokAPIKey:         os.Getenv("GROK_API_KEY"),
 	}
 }
 

@@ -295,3 +295,20 @@ POSTERS_DIR=posters
 * mojibake text
 * mixed encodings
 * malformed UTF-8
+
+---
+
+## Grok Fallback Integration
+
+* **internal/config/config.go** — `Load()`: Added `GrokAPIKey` string to `Config` struct and parsed `GROK_API_KEY` from environment.
+* **.env**: Verified `GROK_API_KEY` is present.
+* **internal/ai/grok.go** — `callGrok()`: Created a new file implementing a private `callGrok` method on the `Client` struct to support OpenAI-compatible requests to x.ai.
+* **internal/ai/gemini.go** — `parseRecognizeResponse()`: Extracted parsing logic from `makeRequest` to a private function `parseRecognizeResponse` so it can be reused by Grok fallback.
+* **internal/ai/gemini.go** — `requestWithRetry()`: Added Grok API fallback after the loop through all Gemini models has failed.
+* **internal/ai/gemini.go** — `TranslateBulk()`: Added Grok API fallback after the loop through all Gemini models has failed.
+
+
+
+
+
+
