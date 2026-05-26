@@ -60,7 +60,7 @@ func TestGeminiCascadeFallback(t *testing.T) {
 	client := &Client{
 		cfg:          cfg,
 		limiter:      rate.NewLimiter(rate.Every(1*time.Millisecond), 1),
-		activeModels: []string{"gemini-fail-model", "gemini-success-model"},
+		activeModels: []string{"gemini-fail-flash-model", "gemini-success-flash-model"},
 		// 🔴 ВИПРАВЛЕННЯ: Використовуємо наш кастомний транспорт
 		httpClient:   &http.Client{Transport: &mockTransport{serverURL: server.URL}},
 	}

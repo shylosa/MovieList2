@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"log/slog"
 	"net/http"
@@ -97,7 +98,12 @@ func (a *App) shutdown(ctx context.Context) {
 }
 
 func (a *App) logFront(msg string) {
-	wailsRuntime.EventsEmit(a.ctx, "log-message", msg)
+	if a.ctx != nil {
+		defer func() {
+			_ = recover()
+		}()
+		wailsRuntime.EventsEmit(a.ctx, "log-message", msg)
+	}
 	log.Output(2, msg)
 }
 
@@ -260,6 +266,9 @@ func (a *App) fetchAIModels(ctx context.Context) ([]string, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	if a.cfg.GeminiAPIKey == "" {
+		return nil, fmt.Errorf("Gemini API key is not configured in .env")
+	}
 	a.modelsMutex.RLock()
 	if len(a.aiModelsCache) > 0 {
 		cache := append([]string(nil), a.aiModelsCache...)
@@ -284,6 +293,11 @@ func (a *App) fetchAIModels(ctx context.Context) ([]string, error) {
 			return nil, err
 		}
 		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			body, _ := io.ReadAll(resp.Body)
+			return nil, fmt.Errorf("API request failed with status %d: %s", resp.StatusCode, string(body))
+		}
 
 		var result struct {
 			Models []struct {
@@ -794,6 +808,12 @@ func (a *App) FixSelected(selected []map[string]interface{}) {
 
 		// Передаємо локальний ctx
 		if err := a.UpdateMovie(ctx, filename, hint); err == nil {
+			if m, err := a.db.GetMovieByFilename(ctx, filename); err == nil && m != nil {
+				if m.TitleUA != "" && m.Plot != "" && hasCyrillic(m.TitleUA) {
+					a.logFront(fmt.Sprintf("🎯 [TMDB Істина] Пропуск черги локалізації для '%s' (офіційний переклад та опис вже є)", m.TitleUA))
+					continue
+				}
+			}
 			translationQueue = append(translationQueue, filename)
 		}
 	}
@@ -835,6 +855,11 @@ func (a *App) UpdateMovie(ctx context.Context, filename, hint string) error {
 			return err
 		}
 		if info != nil {
+			if info.TitleUA != "" && hasCyrillic(info.TitleUA) {
+				applyTMDBToMovie(existing, info)
+				a.logFront(fmt.Sprintf("🎯 [TMDB Істина] Знайдено офіційний переклад '%s', пропуск Gemini", info.TitleUA))
+				return a.db.SaveMovie(ctx, *existing)
+			}
 			applyTMDBToMovie(existing, info)
 
 			return a.db.SaveMovie(ctx, *existing)
@@ -870,6 +895,11 @@ func (a *App) UpdateMovie(ctx context.Context, filename, hint string) error {
 		info, err := a.tmdbClient.SearchWithFallbacks(ctx, targetToSearch, filename)
 
 		if err == nil && info != nil {
+			if info.TitleUA != "" && hasCyrillic(info.TitleUA) {
+				applyTMDBToMovie(existing, info)
+				a.logFront(fmt.Sprintf("🎯 [TMDB Істина] Знайдено офіційний переклад за підказкою '%s', пропуск Gemini", info.TitleUA))
+				return a.db.SaveMovie(ctx, *existing)
+			}
 			a.logFront(fmt.Sprintf("✅ TMDB знайшов за підказкою: '%s'", info.TitleUA))
 			applyTMDBToMovie(existing, info)
 			return a.db.SaveMovie(ctx, *existing)

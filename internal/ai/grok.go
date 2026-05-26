@@ -5,12 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
-	"time"
 )
 
-// TODO: verify current model name at https://docs.x.ai/api
-const grokModel = "grok-2-1212"
+const grokModel = "grok-3-mini"
 const grokAPIURL = "https://api.x.ai/v1/chat/completions"
 
 type grokRequest struct {
@@ -53,14 +52,25 @@ func (c *Client) callGrok(ctx context.Context, prompt string) (string, error) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+c.cfg.GrokAPIKey)
 
-	httpClient := &http.Client{Timeout: 60 * time.Second}
-	resp, err := httpClient.Do(req)
+	resp, err := c.grokHTTPClient.Do(req)
 	if err != nil {
 		return "", err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
+		var apiErr struct {
+			Error struct {
+				Message string `json:"message"`
+				Code    string `json:"code"`
+			} `json:"error"`
+		}
+		body, _ := io.ReadAll(resp.Body)
+		_ = json.Unmarshal(body, &apiErr)
+		if apiErr.Error.Message != "" {
+			return "", fmt.Errorf("grok: status %d — %s (code: %s)",
+				resp.StatusCode, apiErr.Error.Message, apiErr.Error.Code)
+		}
 		return "", fmt.Errorf("grok: unexpected status %d", resp.StatusCode)
 	}
 

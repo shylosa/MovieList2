@@ -75,6 +75,7 @@ type Client struct {
 	genaiClient  *genai.Client
 	initMu       sync.Mutex
 	httpClient   *http.Client // 🔴 ДОДАНО ДЛЯ ТЕСТІВ: Дозволяє мокувати відповіді API
+	grokHTTPClient *http.Client
 }
 
 func NewClient(cfg *config.Config) *Client {
@@ -82,6 +83,7 @@ func NewClient(cfg *config.Config) *Client {
 		cfg: cfg,
 		// rate.Every(4 * time.Second) = 15 RPM. Burst = 1.
 		limiter: rate.NewLimiter(rate.Every(4*time.Second), 1),
+		grokHTTPClient: &http.Client{Timeout: 60 * time.Second},
 	}
 }
 
@@ -98,16 +100,36 @@ func (c *Client) getModels() []string {
 	c.modelsMu.RLock()
 	defer c.modelsMu.RUnlock()
 
+	var candidates []string
 	// Пріоритет 1: Динамічний список від API
 	if len(c.activeModels) > 0 {
-		return append([]string(nil), c.activeModels...)
+		candidates = append([]string(nil), c.activeModels...)
+	} else if len(c.cfg.GeminiModels) > 0 {
+		// Пріоритет 2: Конфіг
+		candidates = append([]string(nil), c.cfg.GeminiModels...)
+	} else {
+		// Пріоритет 3: Хардкод-фолбек
+		candidates = []string{"gemini-2.0-flash", "gemini-2.0-pro", "gemini-1.5-flash"}
 	}
-	// Пріоритет 2: Конфіг
-	if len(c.cfg.GeminiModels) > 0 {
-		return append([]string(nil), c.cfg.GeminiModels...)
+
+	var filtered []string
+	for _, m := range candidates {
+		mLower := strings.ToLower(m)
+		// Exclude embedding, audio, robotics, computer-use
+		if strings.Contains(mLower, "embedding") ||
+			strings.Contains(mLower, "audio") ||
+			strings.Contains(mLower, "robotics") ||
+			strings.Contains(mLower, "computer-use") {
+			continue
+		}
+		// Include only flash, pro, and lite
+		if strings.Contains(mLower, "flash") ||
+			strings.Contains(mLower, "pro") ||
+			strings.Contains(mLower, "lite") {
+			filtered = append(filtered, m)
+		}
 	}
-	// Пріоритет 3: Хардкод-фолбек
-	return []string{"gemini-2.0-flash", "gemini-2.0-pro", "gemini-1.5-flash"}
+	return filtered
 }
 
 func (c *Client) waitForRateLimit(ctx context.Context) error {
@@ -194,6 +216,10 @@ func (c *Client) requestWithRetry(ctx context.Context, prompt string) ([]Recogni
 			slog.String("model", modelName),
 			slog.Any("error", err),
 		)
+	}
+
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
 	}
 
 	// Grok fallback — last resort after all Gemini models failed
@@ -434,7 +460,8 @@ func (c *Client) TranslateBulk(ctx context.Context, items []BulkTranslateItem) (
 4. ЗАХИСТ ВІД ГАЛЮЦИНАЦІЙ: Якщо офіційної української прокатної назви не існує або ти її не знаєш, ЗАЛИШ "original_title" БЕЗ ЗМІН у полі "title". Не вигадуй назви.
 
 Вхідні дані:
-%s`, string(inputJSON))
+%s
+IMPORTANT: Return ONLY a raw JSON array. No markdown, no code blocks, no explanation.`, string(inputJSON))
 
 	var lastErr error
 	for _, modelName := range c.getModels() {
@@ -465,6 +492,10 @@ func (c *Client) TranslateBulk(ctx context.Context, items []BulkTranslateItem) (
 
 		lastErr = err
 		utils.LoggerWithTrace(ctx).Warn("bulk_translate_failed", slog.String("model", modelName), slog.Any("error", err))
+	}
+
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
 	}
 
 	// Grok fallback — last resort after all Gemini models failed

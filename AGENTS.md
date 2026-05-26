@@ -302,10 +302,19 @@ POSTERS_DIR=posters
 
 * **internal/config/config.go** — `Load()`: Added `GrokAPIKey` string to `Config` struct and parsed `GROK_API_KEY` from environment.
 * **.env**: Verified `GROK_API_KEY` is present.
-* **internal/ai/grok.go** — `callGrok()`: Created a new file implementing a private `callGrok` method on the `Client` struct to support OpenAI-compatible requests to x.ai.
+* **internal/ai/grok.go** — `callGrok()`: Created a new file implementing a private `callGrok` method on the `Client` struct to support OpenAI-compatible requests to x.ai using `grok-3-mini`, refactored HTTP client to Client-level field `grokHTTPClient`, and improved non-200 HTTP status response parsing to extract API errors.
 * **internal/ai/gemini.go** — `parseRecognizeResponse()`: Extracted parsing logic from `makeRequest` to a private function `parseRecognizeResponse` so it can be reused by Grok fallback.
-* **internal/ai/gemini.go** — `requestWithRetry()`: Added Grok API fallback after the loop through all Gemini models has failed.
-* **internal/ai/gemini.go** — `TranslateBulk()`: Added Grok API fallback after the loop through all Gemini models has failed.
+* **internal/ai/gemini.go** — `requestWithRetry()`: Added Grok API fallback after the loop through all Gemini models has failed, and added a context cancellation check before executing the Grok fallback.
+* **internal/ai/gemini.go** — `TranslateBulk()`: Added Grok API fallback after the loop through all Gemini models has failed, added a context cancellation check before executing the Grok fallback, and added formatting instructions to the translation prompt to prevent markdown wrappers from Grok.
+
+---
+
+## Overrides and Translation Bypasses
+
+* **app.go** — `UpdateMovie()`: Added a check for official Cyrillic translation (`TitleUA` contains Cyrillic) from TMDB. If found, saved immediately to database and returned `nil` bypassing Gemini recognition.
+* **app.go** — `FixSelected()`: Bypassed adding a movie to the translation queue if a manual fix was specified and the TMDB details already contain a Cyrillic TitleUA and a Plot.
+* **app.go** — `mergeGeminiWithTMDB()`: Implemented post-verification check using Jaro-Winkler similarity threshold (`geminiTMDBVerifyMinJW`) to reject Gemini results that deviate significantly from official TMDB titles.
+* **internal/ai/gemini.go** — `getModels()`: Filtered the active models list to include only flash, pro, and lite line text models, and excluded embedding, audio, robotics, and computer-use models to prevent 404/400 errors.
 
 
 

@@ -103,6 +103,10 @@ func (c *Client) Close() {
 	// Новий rate.Limiter не потребує явного закриття
 }
 
+func (c *Client) SetTransport(tr http.RoundTripper) {
+	c.client.Transport = tr
+}
+
 // ClearCaches — безпечне очищення кешу між скануваннями
 func (c *Client) ClearCaches() {
 	c.searchCache.Range(func(key, value any) bool {
