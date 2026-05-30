@@ -303,8 +303,10 @@ POSTERS_DIR=posters
 * **internal/config/config.go** — `Load()`: Added `GrokAPIKey` string to `Config` struct and parsed `GROK_API_KEY` from environment.
 * **.env**: Verified `GROK_API_KEY` is present.
 * **internal/ai/grok.go** — `callGrok()`: Created a new file implementing a private `callGrok` method on the `Client` struct to support OpenAI-compatible requests to x.ai using `grok-3-mini`, refactored HTTP client to Client-level field `grokHTTPClient`, and improved non-200 HTTP status response parsing to extract API errors.
+* **internal/ai/grok.go** — `grokRequest`: Added `ReasoningEffort: "none"` to disable xAI thinking tokens for `grok-3-mini` and avoid XML thinking tags in response.
+* **internal/ai/gemini.go** — `buildPrompt()`: Added JSON-fence formatting instruction at the end of the prompt to prevent Grok fallback from wrapping response in markdown code blocks.
 * **internal/ai/gemini.go** — `parseRecognizeResponse()`: Extracted parsing logic from `makeRequest` to a private function `parseRecognizeResponse` so it can be reused by Grok fallback.
-* **internal/ai/gemini.go** — `requestWithRetry()`: Added Grok API fallback after the loop through all Gemini models has failed, and added a context cancellation check before executing the Grok fallback.
+* **internal/ai/gemini.go** — `requestWithRetry()`: Added Grok API fallback after the loop through all Gemini models has failed, a context cancellation check, and structured logging of success (`grok_recognize_success`).
 * **internal/ai/gemini.go** — `TranslateBulk()`: Added Grok API fallback after the loop through all Gemini models has failed, added a context cancellation check before executing the Grok fallback, and added formatting instructions to the translation prompt to prevent markdown wrappers from Grok.
 
 ---
@@ -315,9 +317,29 @@ POSTERS_DIR=posters
 * **app.go** — `FixSelected()`: Bypassed adding a movie to the translation queue if a manual fix was specified and the TMDB details already contain a Cyrillic TitleUA and a Plot.
 * **app.go** — `mergeGeminiWithTMDB()`: Implemented post-verification check using Jaro-Winkler similarity threshold (`geminiTMDBVerifyMinJW`) to reject Gemini results that deviate significantly from official TMDB titles.
 * **internal/ai/gemini.go** — `getModels()`: Filtered the active models list to include only flash, pro, and lite line text models, and excluded embedding, audio, robotics, and computer-use models to prevent 404/400 errors.
+* **internal/ai/grok_test.go** — `TestCallGrok_EmptyAPIKey()`: Added test verifying that `callGrok` returns an error when `GrokAPIKey` is empty.
+* **internal/ai/grok_test.go** — `TestCallGrok_CancelledContext()`: Added test verifying that `callGrok` returns an error when the context is already cancelled before the call.
+* **internal/ai/grok.go** — `callGrok()`: Added special `rate_limited` error format for HTTP 429 responses so callers can log rate-limit events distinctly via slog.
+* **internal/ai/grok.go** — `callGrok()`: Added NOTE comment documenting that callGrok has no rate limiter and is only used as a last-resort fallback.
 
 
+* **app.go** — file: Converted line endings from CRLF to LF and verified UTF-8 decoding.
+* **app_getaimodels_test.go** — file: Converted line endings from CRLF to LF and verified UTF-8 decoding.
+* **internal/ai/gemini_test.go** — file: Converted line endings from CRLF to LF and verified UTF-8 decoding.
+* **internal/sheets/sheets.go** — file: Converted line endings from CRLF to LF and verified UTF-8 decoding.
+* **internal/tmdb/parser_test.go** — file: Converted line endings from CRLF to LF and verified UTF-8 decoding.
+* **.editorconfig** — file: Added root Go formatting rules for UTF-8, LF endings, tab indentation, trailing whitespace trimming, and final newline.
+* **.gitattributes** — file: Added repository text normalization rules for Go and Markdown LF endings.
+* **app_getaimodels_test.go**, **internal/ai/gemini.go**, **internal/ai/gemini_test.go**, **internal/ai/grok_test.go**, **internal/tmdb/parser_test.go** — file: Applied `gofmt` to clear final formatting check output.
 
 
+## Checklist Updates
+
+* **internal/ai/gemini_test.go** — `mockTransport.RoundTrip()`: Cloned the request before rewriting the target URL for test transport forwarding.
+* **app.go** — `RunScan()`: Logged `CleanMissingMovies` failures with `slog.Warn` instead of discarding the error.
+* **app.go** — `RunScan()`: Logged `CleanOrphanPosters` failures with `slog.Warn` instead of discarding the error.
+* **app.go** — `finalizeScan()`: Logged static showcase generation failures with `slog.Error`.
+* **app.go** — `processGeminiQueue()`: Logged `SaveAIResolution` failures with the related filename.
+* **app.go** — `UpdateMovie()`: Logged `SaveAIResolution` failures with the related filename.
 
 

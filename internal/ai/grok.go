@@ -13,8 +13,10 @@ const grokModel = "grok-3-mini"
 const grokAPIURL = "https://api.x.ai/v1/chat/completions"
 
 type grokRequest struct {
-	Model    string        `json:"model"`
-	Messages []grokMessage `json:"messages"`
+	Model           string        `json:"model"`
+	Messages        []grokMessage `json:"messages"`
+	Temperature     float32       `json:"temperature"`
+	ReasoningEffort string        `json:"reasoning_effort,omitempty"`
 }
 
 type grokMessage struct {
@@ -30,6 +32,9 @@ type grokResponse struct {
 	} `json:"choices"`
 }
 
+// NOTE: callGrok has no rate limiter — it is called only as a last-resort fallback
+// after all Gemini models fail. If called more frequently, add rate limiting.
+//
 // callGrok sends a prompt to the Grok API and returns raw content string.
 // The prompt must already instruct the model to respond in JSON.
 func (c *Client) callGrok(ctx context.Context, prompt string) (string, error) {
@@ -38,8 +43,10 @@ func (c *Client) callGrok(ctx context.Context, prompt string) (string, error) {
 	}
 
 	payload, err := json.Marshal(grokRequest{
-		Model:    grokModel,
-		Messages: []grokMessage{{Role: "user", Content: prompt}},
+		Model:           grokModel,
+		Messages:        []grokMessage{{Role: "user", Content: prompt}},
+		Temperature:     0.1,
+		ReasoningEffort: "none",
 	})
 	if err != nil {
 		return "", err
@@ -68,6 +75,10 @@ func (c *Client) callGrok(ctx context.Context, prompt string) (string, error) {
 		body, _ := io.ReadAll(resp.Body)
 		_ = json.Unmarshal(body, &apiErr)
 		if apiErr.Error.Message != "" {
+			if resp.StatusCode == http.StatusTooManyRequests {
+				return "", fmt.Errorf("grok: rate_limited (429) — %s (code: %s)",
+					apiErr.Error.Message, apiErr.Error.Code)
+			}
 			return "", fmt.Errorf("grok: status %d — %s (code: %s)",
 				resp.StatusCode, apiErr.Error.Message, apiErr.Error.Code)
 		}

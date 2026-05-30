@@ -70,11 +70,11 @@ type Client struct {
 	cfg     *config.Config
 	limiter *rate.Limiter
 	// 🟢 ДОДАНО: Динамічний каскад та м'ютекс для його захисту
-	activeModels []string
-	modelsMu     sync.RWMutex
-	genaiClient  *genai.Client
-	initMu       sync.Mutex
-	httpClient   *http.Client // 🔴 ДОДАНО ДЛЯ ТЕСТІВ: Дозволяє мокувати відповіді API
+	activeModels   []string
+	modelsMu       sync.RWMutex
+	genaiClient    *genai.Client
+	initMu         sync.Mutex
+	httpClient     *http.Client // 🔴 ДОДАНО ДЛЯ ТЕСТІВ: Дозволяє мокувати відповіді API
 	grokHTTPClient *http.Client
 }
 
@@ -82,7 +82,7 @@ func NewClient(cfg *config.Config) *Client {
 	return &Client{
 		cfg: cfg,
 		// rate.Every(4 * time.Second) = 15 RPM. Burst = 1.
-		limiter: rate.NewLimiter(rate.Every(4*time.Second), 1),
+		limiter:        rate.NewLimiter(rate.Every(4*time.Second), 1),
 		grokHTTPClient: &http.Client{Timeout: 60 * time.Second},
 	}
 }
@@ -229,6 +229,9 @@ func (c *Client) requestWithRetry(ctx context.Context, prompt string) ([]Recogni
 		if grokErr == nil {
 			parsed, parseErr := parseRecognizeResponse(raw)
 			if parseErr == nil {
+				utils.LoggerWithTrace(ctx).Info("grok_recognize_success",
+					slog.Int("results_count", len(parsed)),
+				)
 				return parsed, nil
 			}
 			lastErr = fmt.Errorf("grok parse error: %w", parseErr)
@@ -354,7 +357,8 @@ CRITICAL TRANSLATION RULES:
 FIELD RULES:
 1. en_title: exact TMDB title. For non-English originals use the most common TMDB search title. Empty string "" if uncertain.
 2. year: use parsed_year from input if present, otherwise from filename, null if uncertain.
-3. media_type: use "parsed_media_type" from input. If absent, use "tv" only for explicit series markers (S01, Season N). Default: "movie".`, string(filesJSON))
+3. media_type: use "parsed_media_type" from input. If absent, use "tv" only for explicit series markers (S01, Season N). Default: "movie".
+IMPORTANT: Return ONLY a raw JSON array. No markdown, no code blocks, no explanation.`, string(filesJSON))
 }
 
 // translateWithRetry — універсальний метод перекладу з каскадом моделей та ретраями
@@ -505,6 +509,9 @@ IMPORTANT: Return ONLY a raw JSON array. No markdown, no code blocks, no explana
 		if grokErr == nil {
 			var results []BulkTranslateItem
 			if parseErr := json.Unmarshal([]byte(raw), &results); parseErr == nil {
+				utils.LoggerWithTrace(ctx).Info("grok_translate_success",
+					slog.Int("results_count", len(results)),
+				)
 				return results, nil
 			} else {
 				lastErr = fmt.Errorf("grok translate parse error: %w", parseErr)

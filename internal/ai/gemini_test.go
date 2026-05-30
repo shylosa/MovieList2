@@ -19,10 +19,11 @@ type mockTransport struct {
 }
 
 func (m *mockTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	u, _ := url.Parse(m.serverURL)
-	req.URL.Scheme = u.Scheme
-	req.URL.Host = u.Host
-	return http.DefaultTransport.RoundTrip(req)
+	clonedURL, _ := url.Parse(m.serverURL)
+	reqClone := req.Clone(req.Context())
+	reqClone.URL.Scheme = clonedURL.Scheme
+	reqClone.URL.Host = clonedURL.Host
+	return http.DefaultTransport.RoundTrip(reqClone)
 }
 
 // Цей тест перевіряє РЕГРЕСІЮ: чи перемикається каскад на іншу модель
@@ -62,7 +63,7 @@ func TestGeminiCascadeFallback(t *testing.T) {
 		limiter:      rate.NewLimiter(rate.Every(1*time.Millisecond), 1),
 		activeModels: []string{"gemini-fail-flash-model", "gemini-success-flash-model"},
 		// 🔴 ВИПРАВЛЕННЯ: Використовуємо наш кастомний транспорт
-		httpClient:   &http.Client{Transport: &mockTransport{serverURL: server.URL}},
+		httpClient: &http.Client{Transport: &mockTransport{serverURL: server.URL}},
 	}
 
 	// 3. Запускаємо запит

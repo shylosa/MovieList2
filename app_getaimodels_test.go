@@ -10,10 +10,10 @@ import (
 	"movielist-app/internal/config"
 )
 
-type rewriteTransport struct{
-	base http.RoundTripper
+type rewriteTransport struct {
+	base   http.RoundTripper
 	scheme string
-	host string
+	host   string
 }
 
 func (r *rewriteTransport) RoundTrip(req *http.Request) (*http.Response, error) {

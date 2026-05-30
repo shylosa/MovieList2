@@ -391,8 +391,12 @@ func (a *App) RunScan() {
 	for _, p := range diskPaths {
 		diskIDs = append(diskIDs, a.getFileIdentifier(p))
 	}
-	_, _ = a.db.CleanMissingMovies(ctx, diskIDs)
-	a.db.CleanOrphanPosters(ctx, a.cfg.PostersDir)
+	if _, err := a.db.CleanMissingMovies(ctx, diskIDs); err != nil {
+		slog.Warn("clean_missing_movies_failed", slog.Any("error", err))
+	}
+	if _, err := a.db.CleanOrphanPosters(ctx, a.cfg.PostersDir); err != nil {
+		slog.Warn("clean_orphan_posters_failed", slog.Any("error", err))
+	}
 
 	// Визначаємо що треба обробити (нові + нерозпізнані)
 	filesToProcess := a.filterUnprocessed(ctx, diskPaths)
@@ -619,13 +623,16 @@ func (a *App) processGeminiQueue(ctx context.Context, paths []string, aiClient *
 				if rec.Year != nil {
 					yearVal = *rec.Year
 				}
-				_ = a.db.SaveAIResolution(ctx, storage.AIResolution{
+				if err := a.db.SaveAIResolution(ctx, storage.AIResolution{
 					OriginalFilename: fname,
 					ResolvedTitle:    rec.ENTitle,
 					Year:             yearVal,
 					MediaType:        rec.MediaType,
 					Confidence:       rec.Confidence,
-				})
+				}); err != nil {
+					slog.Warn("save_ai_resolution_failed",
+						slog.String("file", fname), slog.Any("error", err))
+				}
 				recognizedFiles = append(recognizedFiles, fname)
 			}
 		}
@@ -936,13 +943,16 @@ func (a *App) UpdateMovie(ctx context.Context, filename, hint string) error {
 		if rec.Year != nil {
 			yearVal = *rec.Year
 		}
-		_ = a.db.SaveAIResolution(ctx, storage.AIResolution{
+		if err := a.db.SaveAIResolution(ctx, storage.AIResolution{
 			OriginalFilename: filename,
 			ResolvedTitle:    rec.ENTitle,
 			Year:             yearVal,
 			MediaType:        rec.MediaType,
 			Confidence:       rec.Confidence,
-		})
+		}); err != nil {
+			slog.Warn("save_ai_resolution_failed",
+				slog.String("file", filename), slog.Any("error", err))
+		}
 	}
 
 	// Зберігаємо існуючі поля якщо нові порожні
@@ -1057,7 +1067,9 @@ func (a *App) emitProgress(current, total int, filename string) {
 
 func (a *App) finalizeScan(ctx context.Context, msg string) {
 	movies, _ := a.db.GetAllMovies(ctx)
-	_ = web.Generate(a.cfg, movies)
+	if err := web.Generate(a.cfg, movies); err != nil {
+		slog.Error("web_generate_failed", slog.Any("error", err))
+	}
 	wailsRuntime.EventsEmit(a.ctx, "scan-finished", msg)
 }
 
