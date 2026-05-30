@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"log/slog"
 	"net/http"
 	"os"
@@ -89,6 +88,7 @@ func (a *App) startup(ctx context.Context) {
 }
 
 func (a *App) shutdown(ctx context.Context) {
+	a.cancelScan()
 	if a.tmdbClient != nil {
 		a.tmdbClient.Close()
 	}
@@ -104,7 +104,7 @@ func (a *App) logFront(msg string) {
 		}()
 		wailsRuntime.EventsEmit(a.ctx, "log-message", msg)
 	}
-	log.Output(2, msg)
+	slog.Info("log_front_fallback", slog.String("msg", msg))
 }
 
 func (a *App) setScanCancel(cancel context.CancelFunc) {
@@ -1242,7 +1242,7 @@ func (a *App) processTranslationQueue(ctx context.Context, filenames []string, a
 			}
 
 			changed := false
-			if res.Title != "" && res.Title != movie.TitleUA && !strings.Contains(strings.ToLower(res.Title), "thought") {
+			if res.Title != "" && res.Title != movie.TitleUA && !strings.HasPrefix(strings.TrimSpace(res.Title), "<think>") {
 				// 🔴 ХІРУРГІЧНЕ ВТРУЧАННЯ: Закон пріоритету кирилиці.
 				// Не дозволяємо Gemini перезаписувати назву на англійську, якщо в базі вже є кирилиця.
 				if hasCyrillic(movie.TitleUA) && !hasCyrillic(res.Title) {

@@ -53,9 +53,9 @@ func (s *Scanner) GetDiskFiles() ([]string, error) {
 				results = append(results, fullPath)
 			}
 		} else {
-			firstVideo := s.getFirstVideoInDir(fullPath)
-			if firstVideo != "" {
-				results = append(results, firstVideo)
+			largestVideo := s.getLargestVideoInDir(fullPath)
+			if largestVideo != "" {
+				results = append(results, largestVideo)
 			}
 		}
 	}
@@ -64,7 +64,7 @@ func (s *Scanner) GetDiskFiles() ([]string, error) {
 	return results, nil
 }
 
-func (s *Scanner) getFirstVideoInDir(dirPath string) string {
+func (s *Scanner) getLargestVideoInDir(dirPath string) string {
 	var largestVideo string
 	var maxSize int64
 

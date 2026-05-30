@@ -335,6 +335,12 @@ POSTERS_DIR=posters
 
 ## Checklist Updates
 
+* **.gitattributes** — file: Added LF normalization rules for JSON and env files.
+* **.editorconfig** — file: Added Markdown UTF-8, LF endings, trailing whitespace trimming, and final newline rules.
+* **internal/scanner/scanner.go** — `getLargestVideoInDir()`: Renamed `getFirstVideoInDir` and updated the `GetDiskFiles()` call site to reflect largest-file selection.
+* **app.go** — `logFront()`: Replaced `log.Output` fallback with structured `slog.Info` and removed the unused `log` import.
+* **app.go** — `processTranslationQueue()`: Replaced broad `thought` title filtering with a `<think>` prefix check on trimmed titles.
+* **app.go** — `shutdown()`: Added `a.cancelScan()` before closing TMDB and database resources.
 * **internal/ai/gemini_test.go** — `mockTransport.RoundTrip()`: Cloned the request before rewriting the target URL for test transport forwarding.
 * **app.go** — `RunScan()`: Logged `CleanMissingMovies` failures with `slog.Warn` instead of discarding the error.
 * **app.go** — `RunScan()`: Logged `CleanOrphanPosters` failures with `slog.Warn` instead of discarding the error.
