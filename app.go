@@ -106,15 +106,19 @@ func (a *App) shutdown(ctx context.Context) {
 }
 
 func (a *App) logFront(msg string) {
-	if a.ctx != nil {
+	if a.ctx == nil {
+		slog.Info("log_front_fallback", slog.String("msg", msg))
+		return
+	}
+	func() {
 		defer func() {
 			if r := recover(); r != nil {
 				slog.Warn("log_front_emit_panic", slog.Any("panic", r))
+				slog.Info("log_front_fallback", slog.String("msg", msg))
 			}
 		}()
 		wailsRuntime.EventsEmit(a.ctx, "log-message", msg)
-	}
-	slog.Info("log_front_fallback", slog.String("msg", msg))
+	}()
 }
 
 func (a *App) setScanCancel(cancel context.CancelFunc) {
@@ -362,7 +366,12 @@ func (a *App) fetchAIModels(ctx context.Context) ([]string, error) {
 		return nil, err
 	}
 
-	return value.([]string), nil
+	names, ok := value.([]string)
+	if !ok {
+		slog.Error("fetch_ai_models_type_assertion_failed", slog.String("type", fmt.Sprintf("%T", value)))
+		return nil, fmt.Errorf("fetchAIModels: unexpected type %T", value)
+	}
+	return names, nil
 }
 
 // ── Сканування ───────────────────────────────────────────────────────────────
@@ -378,92 +387,98 @@ func (a *App) RunScan() {
 	a.isScanning = true
 	a.scanMutex.Unlock()
 
-	// 1. Створюємо контекст, який можна скасувати
-	ctx, cancel := context.WithCancel(a.ctx)
-	a.setScanCancel(cancel)
+	go func() {
+		// 1. Створюємо контекст, який можна скасувати
+		ctx, cancel := context.WithCancel(a.ctx)
+		a.setScanCancel(cancel)
+		scanFinished := false
 
-	defer func() {
-		stoppedByUser := ctx.Err() != nil
-		cancel()
-		a.clearScanCancel()
-		a.scanMutex.Lock()
-		a.isScanning = false
-		a.scanMutex.Unlock()
+		defer func() {
+			stoppedByUser := ctx.Err() != nil
+			cancel()
+			a.clearScanCancel()
+			a.scanMutex.Lock()
+			a.isScanning = false
+			a.scanMutex.Unlock()
 
-		// Якщо контекст був скасований штучно - пишемо що зупинено, інакше - завершено
-		msg := "Сканування завершено"
-		if stoppedByUser {
-			msg = "Сканування перервано користувачем"
+			if !scanFinished {
+				msg := "Сканування завершено"
+				if stoppedByUser {
+					msg = "Сканування перервано користувачем"
+				}
+				a.finalizeScan(ctx, msg)
+			}
+		}()
+
+		wailsRuntime.EventsEmit(a.ctx, "scan-started")
+
+		// 🟢 ДОДАНО: Асинхронно прогріваємо кеш моделей, щоб aiClient отримав актуальний список
+		go func() {
+			if _, err := a.fetchAIModels(ctx); err != nil {
+				slog.Debug("ai_models_warmup_failed", slog.Any("error", err))
+			}
+		}()
+
+		scn := scanner.NewScanner(a.cfg)
+
+		// 🟢 Очищуємо кеш від попереднього сканування
+		if a.tmdbClient != nil {
+			a.tmdbClient.ClearCaches()
 		}
 
-		wailsRuntime.EventsEmit(a.ctx, "scan-finished", msg)
-		a.logFront("🏁 [ФІНАЛ] " + msg)
+		diskPaths, err := scn.GetDiskFiles()
+		if err != nil {
+			a.finalizeScan(ctx, fmt.Sprintf("❌ Помилка сканування диску: %v", err))
+			scanFinished = true
+			return
+		}
+
+		// Очищуємо записи про видалені файли
+		diskIDs := make([]string, 0, len(diskPaths))
+		for _, p := range diskPaths {
+			diskIDs = append(diskIDs, a.getFileIdentifier(p))
+		}
+		if _, err := a.db.CleanMissingMovies(ctx, diskIDs); err != nil {
+			slog.Warn("clean_missing_movies_failed", slog.Any("error", err))
+		}
+		if _, err := a.db.CleanOrphanPosters(ctx, a.cfg.PostersDir); err != nil {
+			slog.Warn("clean_orphan_posters_failed", slog.Any("error", err))
+		}
+
+		// Визначаємо що треба обробити (нові + нерозпізнані)
+		filesToProcess := a.filterUnprocessed(ctx, diskPaths)
+		if len(filesToProcess) == 0 {
+			a.finalizeScan(ctx, "Змін не знайдено.")
+			scanFinished = true
+			return
+		}
+
+		a.logFront(fmt.Sprintf("📂 Файлів для обробки: %d", len(filesToProcess)))
+
+		resultsChan := a.runTMDBScan(ctx, filesToProcess)
+
+		// 🛡️ Єдиний Writer для SQLite: збирає батч і пише транзакцією
+		moviesToSave, geminiQueue, translationQueue := a.processScanResults(ctx, resultsChan)
+
+		// Зберігаємо всіх знайдених одним запитом
+		if len(moviesToSave) > 0 {
+			if err := a.db.SaveMoviesBatch(ctx, moviesToSave); err != nil {
+				slog.Error("batch_save_failed", slog.Any("error", err))
+			}
+		}
+
+		// Спроба 2: Gemini для тих що TMDB не знайшов
+		if len(geminiQueue) > 0 {
+			a.logFront(fmt.Sprintf("🤖 Черга Gemini: %d файлів", len(geminiQueue)))
+
+			recognizedByGemini := a.processGeminiQueue(ctx, geminiQueue, a.aiClient)
+			translationQueue = append(translationQueue, recognizedByGemini...)
+		}
+
+		if len(translationQueue) > 0 {
+			a.processTranslationQueue(ctx, translationQueue, a.aiClient)
+		}
 	}()
-
-	wailsRuntime.EventsEmit(a.ctx, "scan-started")
-
-	// 🟢 ДОДАНО: Асинхронно прогріваємо кеш моделей, щоб aiClient отримав актуальний список
-	go func() { _, _ = a.fetchAIModels(ctx) }()
-
-	scn := scanner.NewScanner(a.cfg)
-
-	// 🟢 Очищуємо кеш від попереднього сканування
-	if a.tmdbClient != nil {
-		a.tmdbClient.ClearCaches()
-	}
-
-	diskPaths, err := scn.GetDiskFiles()
-	if err != nil {
-		a.finalizeScan(ctx, fmt.Sprintf("❌ Помилка сканування диску: %v", err))
-		return
-	}
-
-	// Очищуємо записи про видалені файли
-	diskIDs := make([]string, 0, len(diskPaths))
-	for _, p := range diskPaths {
-		diskIDs = append(diskIDs, a.getFileIdentifier(p))
-	}
-	if _, err := a.db.CleanMissingMovies(ctx, diskIDs); err != nil {
-		slog.Warn("clean_missing_movies_failed", slog.Any("error", err))
-	}
-	if _, err := a.db.CleanOrphanPosters(ctx, a.cfg.PostersDir); err != nil {
-		slog.Warn("clean_orphan_posters_failed", slog.Any("error", err))
-	}
-
-	// Визначаємо що треба обробити (нові + нерозпізнані)
-	filesToProcess := a.filterUnprocessed(ctx, diskPaths)
-	if len(filesToProcess) == 0 {
-		a.finalizeScan(ctx, "Змін не знайдено.")
-		return
-	}
-
-	a.logFront(fmt.Sprintf("📂 Файлів для обробки: %d", len(filesToProcess)))
-
-	resultsChan := a.runTMDBScan(ctx, filesToProcess)
-
-	// 🛡️ Єдиний Writer для SQLite: збирає батч і пише транзакцією
-	moviesToSave, geminiQueue, translationQueue := a.processScanResults(ctx, resultsChan)
-
-	// Зберігаємо всіх знайдених одним запитом
-	if len(moviesToSave) > 0 {
-		if err := a.db.SaveMoviesBatch(ctx, moviesToSave); err != nil {
-			slog.Error("batch_save_failed", slog.Any("error", err))
-		}
-	}
-
-	// Спроба 2: Gemini для тих що TMDB не знайшов
-	if len(geminiQueue) > 0 {
-		a.logFront(fmt.Sprintf("🤖 Черга Gemini: %d файлів", len(geminiQueue)))
-
-		// 🟢 СТАЛО: processGeminiQueue тепер повертає успішні файли
-		recognizedByGemini := a.processGeminiQueue(ctx, geminiQueue, a.aiClient)
-		translationQueue = append(translationQueue, recognizedByGemini...)
-	}
-
-	// 🟢 НОВЕ: ФАЗА 3 - Асинхронний відкладений переклад
-	if len(translationQueue) > 0 {
-		a.processTranslationQueue(ctx, translationQueue, a.aiClient)
-	}
 }
 
 // StopScan зупиняє поточний процес сканування
@@ -474,7 +489,7 @@ func (a *App) StopScan() {
 
 func (a *App) runTMDBScan(ctx context.Context, paths []string) <-chan scanResult {
 	totalFiles := len(paths)
-	resultsChan := make(chan scanResult, totalFiles)
+	resultsChan := make(chan scanResult, 10)
 	sem := make(chan struct{}, 10) // Ліміт у 10 одночасних запитів до TMDB (rate-limit safe)
 	var wg sync.WaitGroup
 	var processedCount int32
@@ -552,7 +567,9 @@ func (a *App) processScanResults(ctx context.Context, results <-chan scanResult)
 			movie := movieFromTMDB(res.fname, res.info)
 			toSave = append(toSave, movie)
 			a.logFront(fmt.Sprintf("✅ TMDB: '%s' → '%s'", res.fname, res.info.TitleUA))
-			translationQueue = append(translationQueue, res.fname)
+			if a.movieInfoNeedsTranslation(res.info) {
+				translationQueue = append(translationQueue, res.fname)
+			}
 		} else {
 			// 🟢 ПЕРЕВІРКА L2 КЕШУ: Чи не розпізнавали ми цей файл раніше через ШІ?
 			cached, err := a.db.GetAIResolution(ctx, res.fname)
@@ -575,7 +592,9 @@ func (a *App) processScanResults(ctx context.Context, results <-chan scanResult)
 						movie := movieFromTMDB(res.fname, info)
 						toSave = append(toSave, movie)
 						a.logFront(fmt.Sprintf("⚡ L2-Кеш: '%s' → '%s'", res.fname, info.TitleUA))
-						translationQueue = append(translationQueue, res.fname)
+						if a.movieInfoNeedsTranslation(info) {
+							translationQueue = append(translationQueue, res.fname)
+						}
 						continue
 					}
 				}
@@ -623,13 +642,7 @@ func (a *App) processGeminiQueue(ctx context.Context, paths []string, aiClient *
 		results, err := aiClient.RecognizeBulk(ctx, contexts)
 		if err != nil {
 			a.logFront(fmt.Sprintf("⚠️ Gemini помилка пачки %d: %v", currentBatchIdx, err))
-			var errorMovies []storage.Movie
-			for _, path := range batch {
-				errorMovies = append(errorMovies, storage.Movie{Filename: a.getFileIdentifier(path)})
-			}
-			if err := a.db.SaveMoviesBatch(ctx, errorMovies); err != nil {
-				slog.Error("batch_save_failed", slog.Any("error", err))
-			}
+			slog.Warn("gemini_batch_failed", slog.Int("batch", currentBatchIdx), slog.Any("error", err))
 			continue
 		}
 
@@ -647,7 +660,6 @@ func (a *App) processGeminiQueue(ctx context.Context, paths []string, aiClient *
 			if !ok || rec.ENTitle == "" {
 				a.logFront(fmt.Sprintf("⚠️ Gemini не розпізнав: '%s'", fname))
 				a.emitProgress(processed, total, "❓ Не розпізнано: "+fname)
-				moviesToSave = append(moviesToSave, storage.Movie{Filename: fname})
 				continue
 			}
 
@@ -821,9 +833,11 @@ func (a *App) FixSelected(selected []map[string]interface{}) {
 	var geminiQueue []string
 
 	for _, s := range selected {
-		// safe to ignore: missing or non-string UI fields naturally fall back to empty strings.
-		filename, _ := s["filename"].(string)
-		// safe to ignore: missing or non-string hints are treated as no hint.
+		filename, ok := s["filename"].(string)
+		if !ok || filename == "" {
+			slog.Warn("fix_selected_invalid_filename", slog.Any("entry", s))
+			continue
+		}
 		hint, _ := s["hint"].(string)
 
 		if hint != "" && hint != "skip" {
@@ -848,12 +862,16 @@ func (a *App) FixSelected(selected []map[string]interface{}) {
 		}
 
 		current++
-		filename := fix["filename"].(string)
-		hint := fix["hint"].(string)
+		filename, ok := fix["filename"].(string)
+		if !ok || filename == "" {
+			slog.Warn("fix_selected_invalid_filename", slog.Any("entry", fix))
+			continue
+		}
+		hint, _ := fix["hint"].(string)
 		a.emitProgress(current, total, "🔄 "+filename)
 
 		// Передаємо локальний ctx
-		if err := a.UpdateMovie(ctx, filename, hint); err == nil {
+		if err := a.updateMovie(ctx, filename, hint); err == nil {
 			if m, err := a.db.GetMovieByFilename(ctx, filename); err == nil && m != nil {
 				if m.TitleUA != "" && m.Plot != "" && hasCyrillic(m.TitleUA) {
 					a.logFront(fmt.Sprintf("🎯 [TMDB Істина] Пропуск черги локалізації для '%s' (офіційний переклад та опис вже є)", m.TitleUA))
@@ -882,9 +900,14 @@ func (a *App) FixSelected(selected []map[string]interface{}) {
 	a.finalizeScan(ctx, fmt.Sprintf("Виправлено %d файлів", total))
 }
 
-// UpdateMovie — оновлення одного запису за hint від користувача.
+// UpdateMovie — Wails API: оновлення одного запису за hint від користувача.
+func (a *App) UpdateMovie(filename, hint string) error {
+	return a.updateMovie(a.ctx, filename, hint)
+}
+
+// updateMovie — внутрішня реалізація з контекстом (FixSelected, тести).
 // hint може бути: TMDB URL (themoviedb.org/movie/123), числовий ID, або текстова назва/рік.
-func (a *App) UpdateMovie(ctx context.Context, filename, hint string) error {
+func (a *App) updateMovie(ctx context.Context, filename, hint string) error {
 	hint = strings.TrimSpace(hint)
 
 	existing, err := a.db.GetMovieByFilename(ctx, filename)
@@ -1023,7 +1046,8 @@ func (a *App) getFileIdentifier(p string) string {
 func (a *App) filterUnprocessed(ctx context.Context, diskPaths []string) []string {
 	movies, err := a.db.GetAllMovies(ctx)
 	if err != nil {
-		slog.Warn("filter_unprocessed_get_movies_failed", slog.Any("error", err))
+		slog.Error("filter_unprocessed_get_movies_failed", slog.Any("error", err))
+		return nil
 	}
 	recognized := make(map[string]bool, len(movies))
 	for _, m := range movies {
@@ -1127,6 +1151,7 @@ func (a *App) finalizeScan(ctx context.Context, msg string) {
 		slog.Error("web_generate_failed", slog.Any("error", err))
 	}
 	wailsRuntime.EventsEmit(a.ctx, "scan-finished", msg)
+	a.logFront("🏁 [ФІНАЛ] " + msg)
 }
 
 func (a *App) openInExplorer(path string) {
@@ -1152,6 +1177,15 @@ func hasCyrillic(s string) bool {
 		}
 	}
 	return false
+}
+
+func (a *App) movieInfoNeedsTranslation(info *tmdb.MovieInfo) bool {
+	if info == nil {
+		return false
+	}
+	needTitle := info.TitleUA == "" || needsTranslation(info.TitleUA)
+	needPlot := info.Plot == "" || needsTranslation(info.Plot)
+	return needTitle || needPlot
 }
 
 // needsTranslation повертає true, якщо текст треба перекласти (англійська або підозріла кирилиця)
@@ -1247,12 +1281,15 @@ func (a *App) processTranslationQueue(ctx context.Context, filenames []string, a
 				}
 			}
 
-			itemsToTranslate = append(itemsToTranslate, ai.BulkTranslateItem{
+			item := ai.BulkTranslateItem{
 				Filename:      fname,
 				Title:         fallbackTitle,
-				OriginalTitle: movie.TitleEN, // 🟢 НОВЕ: Передаємо оригінал для 100% контексту
-				Plot:          movie.Plot,
-			})
+				OriginalTitle: movie.TitleEN,
+			}
+			if needPlot {
+				item.Plot = movie.Plot
+			}
+			itemsToTranslate = append(itemsToTranslate, item)
 			movieMap[fname] = movie
 		}
 	}
@@ -1264,7 +1301,7 @@ func (a *App) processTranslationQueue(ctx context.Context, filenames []string, a
 
 	a.logFront(fmt.Sprintf("🚀 Відправка в Gemini: %d файлів...", len(itemsToTranslate)))
 
-	const batchSize = 10
+	const batchSize = 5
 	totalItems := len(itemsToTranslate)
 	totalBatches := (totalItems + batchSize - 1) / batchSize
 	var updatedCount int32

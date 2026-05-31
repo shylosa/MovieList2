@@ -175,65 +175,84 @@ func (c *Client) searchAndFetch(
 	logger := utils.LoggerWithTrace(ctx).With(slog.String("component", "tmdb_search_cascade"))
 
 	for _, langParam := range langs {
-		// 🟢 ВИБІР ЕНДПОІНТА: /search/movie або /search/tv якщо тип відомий
-		endpoint := "multi"
-		yearParam := ""
-		if preferredType == MediaTypeMovie {
-			endpoint = "movie"
+		type searchEndpoint struct {
+			name             string
+			yearParam        string
+			defaultMediaType string
+		}
+
+		var endpoints []searchEndpoint
+		switch preferredType {
+		case MediaTypeMovie:
+			yearParam := ""
 			if targetYear > 0 {
 				yearParam = fmt.Sprintf("&year=%d", targetYear)
 			}
-		} else if preferredType == MediaTypeTV {
-			endpoint = "tv"
+			endpoints = []searchEndpoint{{"movie", yearParam, "movie"}}
+		case MediaTypeTV:
+			yearParam := ""
 			if targetYear > 0 {
 				yearParam = fmt.Sprintf("&first_air_date_year=%d", targetYear)
 			}
-		}
-
-		searchURL := fmt.Sprintf(
-			"%s/search/%s?api_key=%s&query=%s&language=%s%s",
-			baseURL, endpoint, c.apiKey, url.QueryEscape(query), langParam, yearParam,
-		)
-
-		logger.Debug("search_attempt", slog.String("lang", langParam), slog.String("url", maskAPIKey(searchURL)))
-
-		var resp tmdbSearchResponse
-		if err := c.doRequestWithRetry(ctx, searchURL, &resp); err != nil {
-			logger.Debug("search_failed_for_lang", slog.String("lang", langParam), slog.Any("error", err))
-			continue
-		}
-
-		// Для /search/movie та /search/tv поле media_type у результатах ВІДСУТНЄ
-		// Додаємо його вручну, щоб rankResults знав з чим працює
-		for i := range resp.Results {
-			if resp.Results[i].MediaType == "" {
-				if preferredType != "" {
-					resp.Results[i].MediaType = string(preferredType)
-				} else if endpoint == "movie" {
-					resp.Results[i].MediaType = "movie"
-				} else if endpoint == "tv" {
-					resp.Results[i].MediaType = "tv"
-				}
+			endpoints = []searchEndpoint{{"tv", yearParam, "tv"}}
+		default:
+			movieYear := ""
+			tvYear := ""
+			if targetYear > 0 {
+				movieYear = fmt.Sprintf("&year=%d", targetYear)
+				tvYear = fmt.Sprintf("&first_air_date_year=%d", targetYear)
+			}
+			endpoints = []searchEndpoint{
+				{"movie", movieYear, "movie"},
+				{"tv", tvYear, "tv"},
 			}
 		}
 
-		if len(resp.Results) == 0 {
-			logger.Debug("no_results_for_lang", slog.String("lang", langParam))
-			continue
-		}
-
-		// Ранжуємо результати для цієї мови
-		bestForLang := c.rankResults(ctx, resp.Results, query, targetYear, preferredType)
-		if bestForLang != nil {
-			logger.Debug("best_for_lang",
-				slog.String("lang", langParam),
-				slog.String("title", coalesce(bestForLang.result.Title, bestForLang.result.Name)),
-				slog.Int("score", bestForLang.score),
+		for _, ep := range endpoints {
+			searchURL := fmt.Sprintf(
+				"%s/search/%s?api_key=%s&query=%s&language=%s%s",
+				baseURL, ep.name, c.apiKey, url.QueryEscape(query), langParam, ep.yearParam,
 			)
 
-			// ПОРІВНЯННЯ: якщо в цій мові бал вищий (точніший збіг) — оновлюємо глобальний результат
-			if bestGlobal == nil || bestForLang.score > bestGlobal.score {
-				bestGlobal = bestForLang
+			logger.Debug("search_attempt",
+				slog.String("lang", langParam),
+				slog.String("endpoint", ep.name),
+				slog.String("url", maskAPIKey(searchURL)),
+			)
+
+			var resp tmdbSearchResponse
+			if err := c.doRequestWithRetry(ctx, searchURL, &resp); err != nil {
+				logger.Debug("search_failed_for_lang", slog.String("lang", langParam), slog.Any("error", err))
+				continue
+			}
+
+			for i := range resp.Results {
+				if resp.Results[i].MediaType == "" {
+					if preferredType != "" {
+						resp.Results[i].MediaType = string(preferredType)
+					} else {
+						resp.Results[i].MediaType = ep.defaultMediaType
+					}
+				}
+			}
+
+			if len(resp.Results) == 0 {
+				logger.Debug("no_results_for_lang", slog.String("lang", langParam), slog.String("endpoint", ep.name))
+				continue
+			}
+
+			bestForLang := c.rankResults(ctx, resp.Results, query, targetYear, preferredType)
+			if bestForLang != nil {
+				logger.Debug("best_for_lang",
+					slog.String("lang", langParam),
+					slog.String("endpoint", ep.name),
+					slog.String("title", coalesce(bestForLang.result.Title, bestForLang.result.Name)),
+					slog.Int("score", bestForLang.score),
+				)
+
+				if bestGlobal == nil || bestForLang.score > bestGlobal.score {
+					bestGlobal = bestForLang
+				}
 			}
 		}
 	}

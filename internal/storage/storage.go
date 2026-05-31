@@ -45,6 +45,25 @@ type DB struct {
 
 const filenameChunkSize = 500
 
+// movieUpsertQuery inserts a row or merges non-empty incoming fields into an existing row.
+// Avoids INSERT OR REPLACE, which deletes the old row and wipes metadata when partial structs are saved.
+const movieUpsertQuery = `
+	INSERT INTO movies
+		(filename, tmdb_id, title_ua, title_en, year, genres, "cast", plot, poster_url, local_poster_path, media_type)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	ON CONFLICT(filename) DO UPDATE SET
+		tmdb_id = CASE WHEN excluded.tmdb_id != 0 THEN excluded.tmdb_id ELSE movies.tmdb_id END,
+		title_ua = COALESCE(NULLIF(excluded.title_ua, ''), movies.title_ua),
+		title_en = COALESCE(NULLIF(excluded.title_en, ''), movies.title_en),
+		year = COALESCE(NULLIF(excluded.year, ''), movies.year),
+		genres = COALESCE(NULLIF(excluded.genres, ''), movies.genres),
+		"cast" = COALESCE(NULLIF(excluded."cast", ''), movies."cast"),
+		plot = COALESCE(NULLIF(excluded.plot, ''), movies.plot),
+		poster_url = COALESCE(NULLIF(excluded.poster_url, ''), movies.poster_url),
+		local_poster_path = COALESCE(NULLIF(excluded.local_poster_path, ''), movies.local_poster_path),
+		media_type = COALESCE(NULLIF(excluded.media_type, ''), movies.media_type)
+`
+
 func New(dbPath string) (*DB, error) {
 	conn, err := sql.Open("sqlite", dbPath)
 	if err != nil {
@@ -130,13 +149,12 @@ func (db *DB) GetAllMovies(ctx context.Context) ([]Movie, error) {
 			&m.Genres, &m.Cast, &m.Plot, &m.PosterURL, &m.LocalPosterPath, &m.MediaType,
 		)
 		if err != nil {
-			slog.Error("storage_scan_error", slog.Any("error", err))
-			continue
+			return nil, fmt.Errorf("GetAllMovies scan failed: %w", err)
 		}
 		movies = append(movies, m)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("GetAllMovies rows iteration failed: %w", err)
 	}
 	if movies == nil {
 		movies = []Movie{}
@@ -145,16 +163,63 @@ func (db *DB) GetAllMovies(ctx context.Context) ([]Movie, error) {
 }
 
 func (db *DB) SaveMovie(ctx context.Context, m Movie) error {
-	query := `
-		INSERT OR REPLACE INTO movies
-		(filename, tmdb_id, title_ua, title_en, year, genres, "cast", plot, poster_url, local_poster_path, media_type)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`
-	_, err := db.db.ExecContext(ctx, query,
+	_, err := db.db.ExecContext(ctx, movieUpsertQuery,
 		m.Filename, m.TmdbID, m.TitleUA, m.TitleEN, m.Year,
 		m.Genres, m.Cast, m.Plot, m.PosterURL, m.LocalPosterPath, m.MediaType,
 	)
 	return err
+}
+
+// PatchMovie updates only non-zero / non-empty fields on an existing row.
+// Inserts a new row when the filename is not present yet.
+func (db *DB) PatchMovie(ctx context.Context, patch Movie) error {
+	if patch.Filename == "" {
+		return fmt.Errorf("PatchMovie: filename required")
+	}
+	existing, err := db.GetMovieByFilename(ctx, patch.Filename)
+	if err != nil {
+		return fmt.Errorf("PatchMovie lookup %q: %w", patch.Filename, err)
+	}
+	if existing == nil {
+		return db.SaveMovie(ctx, patch)
+	}
+	merged := mergeMoviePatch(*existing, patch)
+	return db.SaveMovie(ctx, merged)
+}
+
+func mergeMoviePatch(base, patch Movie) Movie {
+	out := base
+	if patch.TmdbID != 0 {
+		out.TmdbID = patch.TmdbID
+	}
+	if patch.TitleUA != "" {
+		out.TitleUA = patch.TitleUA
+	}
+	if patch.TitleEN != "" {
+		out.TitleEN = patch.TitleEN
+	}
+	if patch.Year != "" {
+		out.Year = patch.Year
+	}
+	if patch.Genres != "" {
+		out.Genres = patch.Genres
+	}
+	if patch.Cast != "" {
+		out.Cast = patch.Cast
+	}
+	if patch.Plot != "" {
+		out.Plot = patch.Plot
+	}
+	if patch.PosterURL != "" {
+		out.PosterURL = patch.PosterURL
+	}
+	if patch.LocalPosterPath != "" {
+		out.LocalPosterPath = patch.LocalPosterPath
+	}
+	if patch.MediaType != "" {
+		out.MediaType = patch.MediaType
+	}
+	return out
 }
 
 // SaveMoviesBatch — масовий запис через єдину транзакцію
@@ -170,23 +235,14 @@ func (db *DB) SaveMoviesBatch(ctx context.Context, movies []Movie) error {
 	}
 	defer tx.Rollback() // safe no-op if Commit succeeds
 
-	query := `
-		INSERT OR REPLACE INTO movies
-		(filename, tmdb_id, title_ua, title_en, year, genres, "cast", plot, poster_url, local_poster_path, media_type)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-	`
-
 	// Prepare statement for performance
-	stmt, err := tx.PrepareContext(ctx, query)
+	stmt, err := tx.PrepareContext(ctx, movieUpsertQuery)
 	if err != nil {
 		return fmt.Errorf("prepare stmt failed: %w", err)
 	}
 	defer stmt.Close()
 
-	// Partial save: errors per-row are logged but batch commit succeeds
-	// Execute inserts in memory
 	for _, m := range movies {
-		// Abort safely if context is cancelled
 		if err := ctx.Err(); err != nil {
 			utils.LoggerWithTrace(ctx).Warn("batch_insert_cancelled", slog.Any("error", err))
 			return err
@@ -197,14 +253,14 @@ func (db *DB) SaveMoviesBatch(ctx context.Context, movies []Movie) error {
 			m.Genres, m.Cast, m.Plot, m.PosterURL, m.LocalPosterPath, m.MediaType,
 		)
 		if err != nil {
-			// Log per-row error and continue
-			slog.Warn("batch_insert_skip", slog.String("file", m.Filename), slog.Any("err", err))
-			continue
+			return fmt.Errorf("batch insert %q: %w", m.Filename, err)
 		}
 	}
 
-	// Commit all changes at once
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("batch commit failed: %w", err)
+	}
+	return nil
 }
 
 func (db *DB) GetMovieByFilename(ctx context.Context, filename string) (*Movie, error) {

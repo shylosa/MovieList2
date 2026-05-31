@@ -69,10 +69,10 @@ func TestUpdateMovie_BypassesGeminiOnCyrillicTMDB(t *testing.T) {
 	app.tmdbClient = tmdb.NewClient(app.cfg)
 	app.tmdbClient.SetTransport(&mockTransport{base: http.DefaultTransport, scheme: u.Scheme, host: u.Host})
 
-	// 3. Call UpdateMovie with a TMDB ID hint.
+	// 3. Call updateMovie with a TMDB ID hint (no Wails ctx — avoids EventsEmit in tests).
 	// Since we mocked TMDB to return a Ukrainian title ("Зміна долі"),
 	// it must save the movie and return nil without calling Gemini.
-	err = app.UpdateMovie(ctx, "the-change-up.mkv", "12345")
+	err = app.updateMovie(ctx, "the-change-up.mkv", "12345")
 	if err != nil {
 		t.Fatalf("UpdateMovie failed: %v", err)
 	}

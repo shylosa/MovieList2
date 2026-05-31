@@ -73,7 +73,7 @@ func Load() *Config {
 		GithubURL:          getEnvOrDefault("GITHUB_URL", "https://github.com/shylosa/MovieList"),
 		MediaFolderPath:    getEnvOrDefault("MEDIA_FOLDER_PATH", ""),
 		ExcludeFolders:     excludeList,
-		GeminiAPIKey:       getEnvRequired("GEMINI_API_KEY"),
+		GeminiAPIKey:       os.Getenv("GEMINI_API_KEY"),
 		GeminiModels:       modelsList,
 		TMDBAPIKey:         getEnvOrDefault("TMDB_API_KEY", ""),
 		DBPath:             getEnvOrDefault("DB_PATH", "movies.db"),

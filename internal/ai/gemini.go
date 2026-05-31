@@ -144,6 +144,9 @@ func (c *Client) getGenaiClient(ctx context.Context) (*genai.Client, error) {
 	if c.genaiClient != nil {
 		return c.genaiClient, nil
 	}
+	if c.cfg.GeminiAPIKey == "" {
+		return nil, fmt.Errorf("gemini: API key not configured")
+	}
 
 	clientConfig := &genai.ClientConfig{
 		APIKey:  c.cfg.GeminiAPIKey,
@@ -177,10 +180,10 @@ func (c *Client) RecognizeBulk(ctx context.Context, contexts []FileRecognitionCo
 	prompt := buildPrompt(contexts)
 	utils.LoggerWithTrace(ctx).Info("gemini_recognition_start", slog.Int("file_count", len(contexts)))
 
-	return c.requestWithRetry(ctx, prompt)
+	return c.requestWithRetry(ctx, prompt, contexts)
 }
 
-func (c *Client) requestWithRetry(ctx context.Context, prompt string) ([]RecognizedTitle, error) {
+func (c *Client) requestWithRetry(ctx context.Context, prompt string, contexts []FileRecognitionContext) ([]RecognizedTitle, error) {
 	var lastErr error
 	models := c.getModels() // 🟢 ВИПРАВЛЕННЯ: Беремо актуальний каскад
 
@@ -225,7 +228,7 @@ func (c *Client) requestWithRetry(ctx context.Context, prompt string) ([]Recogni
 	// Grok fallback — last resort after all Gemini models failed
 	if c.cfg.GrokAPIKey != "" {
 		utils.LoggerWithTrace(ctx).Info("grok_recognize_fallback")
-		raw, grokErr := c.callGrok(ctx, prompt)
+		raw, grokErr := c.callGrok(ctx, buildGrokRecognitionPrompt(contexts))
 		if grokErr == nil {
 			parsed, parseErr := parseRecognizeResponse(raw)
 			if parseErr == nil {
@@ -313,39 +316,40 @@ func buildBulkTranslateSchema() *genai.Schema {
 	}
 }
 
-// buildPrompt — промпт з прикладами транслітератів і правилами мержу
+// buildPrompt — compact recognition prompt for Gemini (schema defines response fields).
 func buildPrompt(contexts []FileRecognitionContext) string {
-	// safe to ignore: FileRecognitionContext contains JSON-marshalable primitive fields.
-	filesJSON, _ := json.Marshal(contexts)
+	filesJSON, err := json.Marshal(contexts)
+	if err != nil {
+		slog.Error("build_prompt_marshal_failed", slog.Any("error", err))
+		return `[]`
+	}
+	if len(filesJSON) == 0 {
+		return `[]`
+	}
 
-	return fmt.Sprintf(`You are a movie database expert. Your goal is to find the OFFICIAL ORIGINAL (English) title of the movie on IMDB/TMDB based on the provided transliterated or localized name and year.
+	return fmt.Sprintf(`Find the official TMDB-searchable English "en_title" for each file. Trust parsed_year and parsed_media_type from input; echo original_file unchanged.
 
-PRE-PARSED FILE CONTEXT (from our local parser — TRUST these fields, do not re-guess year/media_type):
+Input JSON:
 %s
-For each item, "original_file" in your response MUST exactly match "original_file" from the input JSON.
 
-MERGE STRATEGY (important to understand your role):
-- "en_title" → used to search TMDB. Must be exact TMDB-searchable title.
-- TMDB data always wins over your data when both exist.
-- If uncertain, return an empty "en_title" instead of guessing.
+Transliteration examples (Latin script dub titles):
+- "Vrag" → "Enemy"
+- "Nochnoj Rejs" → "Red Eye"
+- "Banshi Inisherina" → "The Banshees of Inisherin"
 
-TRANSLITERATION EXAMPLES (Russian-dubbed titles stored in Latin script):
-- "Vrag" → en_title: "Enemy" (2013, Denis Villeneuve)
-- "Banshi Inisherina" → en_title: "The Banshees of Inisherin"
-- "Nochnoj Rejs" → en_title: "Red Eye" (2005, Wes Craven)
-- "Убийца 2. Против всех" → en_title: "Sicario: Day of the Soldado"
-- "Иллюзия обмана 3" → en_title: "Now You See Me 3"
-- "Отпуск на двоих" (2026) → en_title: "People We Meet on Vacation"
+If uncertain, use empty en_title. Return ONLY a raw JSON array (no markdown).`, string(filesJSON))
+}
 
-CRITICAL TRANSLATION RULES:
-1. Do not translate localized titles literally; find the actual global movie release matching that title and year.
-2. For transliterated files, reverse-engineer the original Cyrillic title and find the exact TMDB movie.
+// buildGrokRecognitionPrompt — minimal fallback prompt for Grok (no large rule blocks).
+func buildGrokRecognitionPrompt(contexts []FileRecognitionContext) string {
+	filesJSON, err := json.Marshal(contexts)
+	if err != nil {
+		slog.Error("grok_prompt_marshal_failed", slog.Any("error", err))
+		return `[]`
+	}
+	return fmt.Sprintf(`For each file in the JSON array, return en_title (TMDB English title), year, media_type (movie|tv), confidence. Echo original_file unchanged. Empty en_title if unsure. JSON array only.
 
-FIELD RULES:
-1. en_title: exact TMDB title. For non-English originals use the most common TMDB search title. Empty string "" if uncertain.
-2. year: use parsed_year from input if present, otherwise from filename, null if uncertain.
-3. media_type: use "parsed_media_type" from input. If absent, use "tv" only for explicit series markers (S01, Season N). Default: "movie".
-IMPORTANT: Return ONLY a raw JSON array. No markdown, no code blocks, no explanation.`, string(filesJSON))
+%s`, string(filesJSON))
 }
 
 type BulkTranslateItem struct {
@@ -371,17 +375,9 @@ func (c *Client) TranslateBulk(ctx context.Context, items []BulkTranslateItem) (
 		return nil, fmt.Errorf("bulk translate marshal error: %w", err)
 	}
 
-	prompt := fmt.Sprintf(`Твоя задача — масово знайти офіційні українські назви та описи для списку медіафайлів.
-
-ПРАВИЛА:
-1. Якщо title не є офіційною українською назвою (наприклад: російська, піратська, трансліт), знайди правильну українську назву з прокату/стрімінгів. Орієнтуйся на "original_title" для точного пошуку.
-2. Якщо plot порожній або не українською — знайди або переклади офіційний опис українською.
-3. КЛЮЧОВЕ: Збережи значення поля "filename" без змін, щоб я міг співставити результати!
-4. ЗАХИСТ ВІД ГАЛЮЦИНАЦІЙ: Якщо офіційної української прокатної назви не існує або ти її не знаєш, ЗАЛИШ "original_title" БЕЗ ЗМІН у полі "title". Не вигадуй назви.
-
-Вхідні дані:
+	prompt := fmt.Sprintf(`Localize each item to official Ukrainian title (and plot when provided). Keep "filename" unchanged. If no official UA title exists, keep original_title in "title". Input:
 %s
-IMPORTANT: Return ONLY a raw JSON array. No markdown, no code blocks, no explanation.`, string(inputJSON))
+Return ONLY a raw JSON array.`, string(inputJSON))
 
 	var lastErr error
 	for _, modelName := range c.getModels() {
