@@ -32,6 +32,7 @@ func TestGetAIModels_ReturnsGeminiModels(t *testing.T) {
 	srv := httptest.NewServer(handler)
 	defer srv.Close()
 
+	// safe to ignore: httptest.Server always provides a valid URL.
 	u, _ := url.Parse(srv.URL)
 
 	app := NewApp()

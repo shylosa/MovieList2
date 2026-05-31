@@ -315,10 +315,11 @@ func buildBulkTranslateSchema() *genai.Schema {
 
 // buildPrompt — промпт з прикладами транслітератів і правилами мержу
 func buildPrompt(contexts []FileRecognitionContext) string {
+	// safe to ignore: FileRecognitionContext contains JSON-marshalable primitive fields.
 	filesJSON, _ := json.Marshal(contexts)
 
 	return fmt.Sprintf(`You are a movie database expert. Your goal is to find the OFFICIAL ORIGINAL (English) title of the movie on IMDB/TMDB based on the provided transliterated or localized name and year.
-CRITICAL: DO NOT translate localized titles literally! (e.g., DO NOT translate "Moj malenkij angel" as "My Little Angel" — find the actual release like "Foster"). Your data will be MERGED with TMDB results.
+Your data will be MERGED with TMDB results.
 
 PRE-PARSED FILE CONTEXT (from our local parser — TRUST these fields, do not re-guess year/media_type):
 %s
@@ -327,112 +328,27 @@ For each item, "original_file" in your response MUST exactly match "original_fil
 MERGE STRATEGY (important to understand your role):
 - "en_title" → used to search TMDB. Must be exact TMDB-searchable title.
 - TMDB data always wins over your data when both exist.
-- So: provide your best knowledge, but don't worry about perfection — TMDB will override where it can.
+- If uncertain, return an empty "en_title" instead of guessing.
 
 TRANSLITERATION EXAMPLES (Russian-dubbed titles stored in Latin script):
 - "Vrag" → en_title: "Enemy" (2013, Denis Villeneuve)
-- "Ella Makkej" → en_title: "Elle McKee" (2025)
 - "Banshi Inisherina" → en_title: "The Banshees of Inisherin"
 - "Nochnoj Rejs" → en_title: "Red Eye" (2005, Wes Craven)
-- "Ubiystvennyiy podkast" → find actual EN title
-- "Kollektorsha" → find actual EN title
-- "Uspet Do Polunochi" → en_title: "Just Before Midnight" or similar
-- Russian localized titles can be completely different from the original meaning. Use the release year to find the exact US/Global movie.
-Example: "Отпуск на двоих" (2026) -> "People We Meet on Vacation"
-Example: "Список подозреваемых" (2024) -> "Boneyard"
-
-CYRILLIC EXAMPLES:
 - "Убийца 2. Против всех" → en_title: "Sicario: Day of the Soldado"
-- "Женщины" → en_title: "The Women" (2008)
 - "Иллюзия обмана 3" → en_title: "Now You See Me 3"
-- "Пригоди бравого вояка Швейка" → en_title: "The Good Soldier Švejk"
-- "Кошачьи мири Луиса Уэйна" → en_title: "The Electrical Life of Louis Wain"
+- "Отпуск на двоих" (2026) → en_title: "People We Meet on Vacation"
+- "Список подозреваемых" (2024) → en_title: "Boneyard"
 
 CRITICAL TRANSLATION RULES:
-1. DO NOT translate localized titles literally! If you see a Russian localized title (e.g. "Воздушное ограбление", "Решала. Агент на миллиард"), you MUST find the actual global movie release matching that title and year (e.g. "Lift", "Mercato").
-2. For transliterated files (e.g. "Vrag.2013", "Sekretnyi.Agent"), reverse-engineer the original Russian title ("Враг", "Секретный агент") and find the exact TMDB movie ("Enemy", "The Secret Agent").
-3. Always verify the movie release year matches the filename!
-4. CRITICAL RULE: If you are not 100%% sure about the match between the localized title and the original movie, return an empty string "" for the "en_title". DO NOT guess or hallucinate movies based solely on matching genres and release years. Accuracy is strictly prioritized over returning a result.
+1. Do not translate localized titles literally; find the actual global movie release matching that title and year.
+2. For transliterated files, reverse-engineer the original Cyrillic title and find the exact TMDB movie.
+3. Always verify the movie release year matches the filename.
 
 FIELD RULES:
 1. en_title: exact TMDB title. For non-English originals use the most common TMDB search title. Empty string "" if uncertain.
 2. year: use parsed_year from input if present, otherwise from filename, null if uncertain.
 3. media_type: use "parsed_media_type" from input. If absent, use "tv" only for explicit series markers (S01, Season N). Default: "movie".
 IMPORTANT: Return ONLY a raw JSON array. No markdown, no code blocks, no explanation.`, string(filesJSON))
-}
-
-// translateWithRetry — універсальний метод перекладу з каскадом моделей та ретраями
-func (c *Client) translateWithRetry(ctx context.Context, prompt string, fallbackText string) string {
-	models := c.getModels()
-	client, err := c.getGenaiClient(ctx)
-	if err != nil {
-		utils.LoggerWithTrace(ctx).Error("genai_client_init_failed", slog.Any("error", err))
-		return fallbackText
-	}
-
-	for _, modelName := range models {
-		if ctx.Err() != nil {
-			utils.LoggerWithTrace(ctx).Info("translation_cancelled")
-			return fallbackText
-		}
-
-		if err := c.waitForRateLimit(ctx); err != nil {
-			utils.LoggerWithTrace(ctx).Warn("translation_rate_limit_wait_failed", slog.Any("error", err))
-			return fallbackText
-		}
-
-		config := &genai.GenerateContentConfig{
-			Temperature: genai.Ptr[float32](0.2),
-		}
-
-		resp, err := client.Models.GenerateContent(ctx, modelName, genai.Text(prompt), config)
-		if err != nil {
-			utils.LoggerWithTrace(ctx).Warn("model_translation_failed", slog.String("model", modelName), slog.Any("error", err))
-			continue
-		}
-
-		if len(resp.Candidates) > 0 && len(resp.Candidates[0].Content.Parts) > 0 {
-			translated := strings.TrimSpace(resp.Text())
-			translated = strings.Trim(translated, `"'«»`)
-			if translated != "" {
-				return translated
-			}
-		}
-	}
-
-	utils.LoggerWithTrace(ctx).Error("all_translation_models_failed")
-	return fallbackText
-}
-
-// TranslateTitle адаптує назву українською мовою.
-func (c *Client) TranslateTitle(ctx context.Context, title string, fallback string) string {
-	if title == "" {
-		return fallback
-	}
-
-	prompt := fmt.Sprintf("Переклади назву фільму українською мовою. Поверни ТІЛЬКИ переклад. Жодних пояснень, роздумів, лапок чи додаткових слів.\n\nНазва: %s", title)
-
-	translated := c.translateWithRetry(ctx, prompt, fallback)
-
-	lowerTrans := strings.ToLower(translated)
-	if len(translated) > 100 || strings.Contains(lowerTrans, "thought") || strings.Contains(lowerTrans, "original:") {
-		utils.LoggerWithTrace(ctx).Warn("gemini_monologue_detected",
-			slog.String("translated", translated),
-			slog.String("fallback", fallback),
-		)
-		return fallback // ВИПРАВЛЕННЯ: Повертаємо оригінал (російський текст), а не англійський фолбек
-	}
-
-	return translated
-}
-
-func (c *Client) TranslatePlot(ctx context.Context, text string) string {
-	if text == "" {
-		return ""
-	}
-
-	prompt := "Переклади цей опис фільму на гарну літературну українську мову. Поверни ТІЛЬКИ перекладений текст, без жодних додаткових коментарів, лапок чи пояснень:\n\n" + text
-	return c.translateWithRetry(ctx, prompt, text)
 }
 
 type BulkTranslateItem struct {
@@ -453,7 +369,10 @@ func (c *Client) TranslateBulk(ctx context.Context, items []BulkTranslateItem) (
 		return nil, fmt.Errorf("помилка клієнта genai: %w", err)
 	}
 
-	inputJSON, _ := json.Marshal(items)
+	inputJSON, err := json.Marshal(items)
+	if err != nil {
+		return nil, fmt.Errorf("bulk translate marshal error: %w", err)
+	}
 
 	prompt := fmt.Sprintf(`Твоя задача — масово знайти офіційні українські назви та описи для списку медіафайлів.
 

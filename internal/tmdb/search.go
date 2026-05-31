@@ -158,6 +158,7 @@ func (c *Client) searchAndFetch(
 		mediaType: preferredType,
 	}
 	if val, ok := c.searchCache.Load(cacheKey); ok {
+		// safe to ignore: only *MovieInfo values are stored in searchCache.
 		info, _ := val.(*MovieInfo)
 		utils.LoggerWithTrace(ctx).Debug("search_cache_hit", slog.String("query", query))
 		return info, nil

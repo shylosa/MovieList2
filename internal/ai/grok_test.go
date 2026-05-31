@@ -60,6 +60,7 @@ func TestCallGrok_ReasoningEffortNone(t *testing.T) {
 	var capturedBody []byte
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// safe to ignore: test request body read errors produce an empty body and fail assertions.
 		body, _ := io.ReadAll(r.Body)
 		capturedBody = body
 

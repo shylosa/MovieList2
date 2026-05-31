@@ -45,6 +45,7 @@ func TestUpdateMovie_BypassesGeminiOnCyrillicTMDB(t *testing.T) {
 	srv := httptest.NewServer(handler)
 	defer srv.Close()
 
+	// safe to ignore: httptest.Server always provides a valid URL.
 	u, _ := url.Parse(srv.URL)
 
 	// 2. Set up App config, storage, and tmdb client

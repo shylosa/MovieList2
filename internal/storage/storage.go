@@ -43,6 +43,8 @@ type DB struct {
 	db *sql.DB
 }
 
+const filenameChunkSize = 500
+
 func New(dbPath string) (*DB, error) {
 	conn, err := sql.Open("sqlite", dbPath)
 	if err != nil {
@@ -97,6 +99,9 @@ func (db *DB) InitSchema(ctx context.Context) error {
 		return err
 	}
 	if _, err := db.db.ExecContext(ctx, "PRAGMA busy_timeout = 5000;"); err != nil {
+		return err
+	}
+	if _, err := db.db.ExecContext(ctx, "PRAGMA foreign_keys = ON;"); err != nil {
 		return err
 	}
 
@@ -261,11 +266,13 @@ func (db *DB) CleanOrphanPosters(ctx context.Context, postersDir string) (int, e
 		var dbPath, filename string
 		if err := rows.Scan(&dbPath, &filename); err == nil {
 			if dbPath != "" {
+				// safe to ignore: non-absolute paths still compare consistently as cleaned fallbacks.
 				abs, _ := filepath.Abs(dbPath)
 				allValid[abs] = true
 			}
 			ext := filepath.Ext(filename)
 			stem := filename[:len(filename)-len(ext)]
+			// safe to ignore: non-absolute paths still compare consistently as cleaned fallbacks.
 			manualPath, _ := filepath.Abs(filepath.Join(postersDir, stem+".jpg"))
 			allValid[manualPath] = true
 		}
@@ -283,6 +290,7 @@ func (db *DB) CleanOrphanPosters(ctx context.Context, postersDir string) (int, e
 			continue
 		}
 		fullPath := filepath.Join(postersDir, entry.Name())
+		// safe to ignore: non-absolute paths still compare consistently as cleaned fallbacks.
 		absPath, _ := filepath.Abs(fullPath)
 		if !allValid[absPath] {
 			if err := os.Remove(fullPath); err == nil {
@@ -361,15 +369,13 @@ func (db *DB) GetMoviesByFilenames(ctx context.Context, filenames []string) (map
 		return make(map[string]Movie), nil
 	}
 
-	const chunkSize = 500
-
-	if len(filenames) > chunkSize {
+	if len(filenames) > filenameChunkSize {
 		slog.Warn("large_filenames_batch", slog.Int("count", len(filenames)))
 	}
 
 	result := make(map[string]Movie)
-	for start := 0; start < len(filenames); start += chunkSize {
-		end := start + chunkSize
+	for start := 0; start < len(filenames); start += filenameChunkSize {
+		end := start + filenameChunkSize
 		if end > len(filenames) {
 			end = len(filenames)
 		}

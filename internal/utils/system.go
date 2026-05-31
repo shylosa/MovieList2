@@ -1,7 +1,7 @@
 package utils
 
 import (
-	"log"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,7 +16,7 @@ func OpenLogsFolder() {
 	if _, err := os.Stat(logsDir); os.IsNotExist(err) {
 		err := os.Mkdir(logsDir, 0755)
 		if err != nil {
-			log.Printf("⚠️ Не вдалося створити папку logs: %v", err)
+			slog.Error("logs_dir_create_failed", slog.Any("error", err))
 			return
 		}
 	}
@@ -33,6 +33,6 @@ func OpenLogsFolder() {
 	}
 
 	if err != nil {
-		log.Printf("⚠️ Не вдалося відкрити папку: %v", err)
+		slog.Error("open_logs_folder_failed", slog.Any("error", err))
 	}
 }

@@ -13,6 +13,8 @@
 
 ## Formatting & Encoding
 - All source files must use UTF-8 without BOM.
+All source files must use LF line endings (not CRLF).
+Verify: python -c "assert b'\r\n' not in open('file','rb').read()"
 - Never introduce mojibake or mixed encodings.
 - Go indentation must use tabs (`gofmt` style).
 - Preserve existing formatting style.

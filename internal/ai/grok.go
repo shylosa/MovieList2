@@ -6,7 +6,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
+
+	"movielist-app/internal/utils"
 )
 
 const grokModel = "grok-3-mini"
@@ -72,7 +75,11 @@ func (c *Client) callGrok(ctx context.Context, prompt string) (string, error) {
 				Code    string `json:"code"`
 			} `json:"error"`
 		}
-		body, _ := io.ReadAll(resp.Body)
+		body, readErr := io.ReadAll(resp.Body)
+		if readErr != nil {
+			utils.LoggerWithTrace(ctx).Warn("grok_error_body_read_failed", slog.Any("error", readErr))
+		}
+		// safe to ignore: malformed error bodies fall through to the generic status error.
 		_ = json.Unmarshal(body, &apiErr)
 		if apiErr.Error.Message != "" {
 			if resp.StatusCode == http.StatusTooManyRequests {

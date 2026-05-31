@@ -4,6 +4,7 @@ import (
 	"embed"
 	"log/slog"
 	"os"
+	"runtime/debug"
 
 	"movielist-app/internal/utils"
 
@@ -24,7 +25,10 @@ func main() {
 	defer func() {
 		if r := recover(); r != nil {
 			// Якщо програма жорстко падає, ми записуємо це у наш лог-файл
-			slog.Error("CRITICAL_PANIC", slog.Any("panic", r))
+			slog.Error("unhandled_panic",
+				slog.Any("panic", r),
+				slog.String("stack", string(debug.Stack())),
+			)
 			os.Exit(1)
 		}
 	}()

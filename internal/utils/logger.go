@@ -19,6 +19,7 @@ type safeWriter struct {
 }
 
 func (sw safeWriter) Write(p []byte) (n int, err error) {
+	// Write errors are intentionally ignored to prevent log recursion.
 	n, _ = sw.w.Write(p) // Ігноруємо помилку запису
 	return n, nil        // Завжди повертаємо nil, щоб MultiWriter не переривався
 }
@@ -27,7 +28,9 @@ var logFile *os.File
 
 // InitLogger ініціалізує структуроване логування (slog) з виводом у консоль та файл.
 func InitLogger() {
-	os.MkdirAll("logs", 0755)
+	if err := os.MkdirAll("logs", 0755); err != nil {
+		slog.Error("failed_to_create_logs_dir", slog.Any("error", err))
+	}
 
 	// Відкриваємо файл. Якщо не вдалося — просто не використовуємо його, але програма працює
 	var err error

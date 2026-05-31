@@ -3,7 +3,10 @@ package tmdb
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
+
+	"movielist-app/internal/utils"
 )
 
 const maxCastMembers = 5
@@ -97,7 +100,10 @@ func (c *Client) getMovieDetails(ctx context.Context, id int, originalFilename s
 	}
 
 	if finalInfo.PosterURL != "" && originalFilename != "" {
-		lp, _ := c.DownloadPoster(ctx, finalInfo.PosterURL, fmt.Sprintf("%d_%s", finalInfo.TMDBID, originalFilename))
+		lp, err := c.DownloadPoster(ctx, finalInfo.PosterURL, fmt.Sprintf("%d_%s", finalInfo.TMDBID, originalFilename))
+		if err != nil {
+			utils.LoggerWithTrace(ctx).Warn("poster_download_failed", slog.Int("tmdb_id", finalInfo.TMDBID), slog.Any("error", err))
+		}
 		finalInfo.LocalPosterPath = lp
 	}
 
@@ -155,7 +161,10 @@ func (c *Client) getTVDetails(ctx context.Context, id int, originalFilename stri
 	}
 
 	if finalInfo.PosterURL != "" && originalFilename != "" {
-		lp, _ := c.DownloadPoster(ctx, finalInfo.PosterURL, fmt.Sprintf("%d_%s", finalInfo.TMDBID, originalFilename))
+		lp, err := c.DownloadPoster(ctx, finalInfo.PosterURL, fmt.Sprintf("%d_%s", finalInfo.TMDBID, originalFilename))
+		if err != nil {
+			utils.LoggerWithTrace(ctx).Warn("poster_download_failed", slog.Int("tmdb_id", finalInfo.TMDBID), slog.Any("error", err))
+		}
 		finalInfo.LocalPosterPath = lp
 	}
 

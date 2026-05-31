@@ -19,6 +19,7 @@ type mockTransport struct {
 }
 
 func (m *mockTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	// safe to ignore: tests pass a valid httptest server URL.
 	clonedURL, _ := url.Parse(m.serverURL)
 	reqClone := req.Clone(req.Context())
 	reqClone.URL.Scheme = clonedURL.Scheme

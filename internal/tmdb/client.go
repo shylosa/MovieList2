@@ -63,6 +63,7 @@ func maskAPIKey(rawURL string) string {
 // Client — HTTP-клієнт для TMDB API
 type Client struct {
 	client      *http.Client
+	transport   *http.Transport
 	apiKey      string
 	postersDir  string
 	rateLimiter *rate.Limiter
@@ -81,9 +82,9 @@ func NewClient(cfg *config.Config) *Client {
 	}
 
 	transport := &http.Transport{
-		MaxIdleConns:        100,
-		MaxIdleConnsPerHost: 20, // Оптимально для TMDB
-		IdleConnTimeout:     90 * time.Second,
+		MaxIdleConns:       10,
+		IdleConnTimeout:    90 * time.Second,
+		DisableCompression: false,
 	}
 
 	return &Client{
@@ -91,6 +92,7 @@ func NewClient(cfg *config.Config) *Client {
 			Timeout:   15 * time.Second,
 			Transport: transport,
 		},
+		transport:  transport,
 		apiKey:     cfg.TMDBAPIKey,
 		postersDir: cfg.PostersDir,
 		// 🟡 ХІРУРГІЧНЕ ВТРУЧАННЯ: 20 req/s (1 запит кожні 50мс), burst 5.
@@ -100,7 +102,9 @@ func NewClient(cfg *config.Config) *Client {
 }
 
 func (c *Client) Close() {
-	// Новий rate.Limiter не потребує явного закриття
+	if c.transport != nil {
+		c.transport.CloseIdleConnections()
+	}
 }
 
 func (c *Client) SetTransport(tr http.RoundTripper) {
@@ -185,6 +189,7 @@ func (c *Client) FetchFromFilename(ctx context.Context, filename string) (*Movie
 		mediaType: parsed.MediaType,
 	}
 	if val, ok := c.searchCache.Load(cacheKey); ok {
+		// safe to ignore: only *MovieInfo values are stored in searchCache.
 		info, _ := val.(*MovieInfo)
 		utils.LoggerWithTrace(ctx).Info("tmdb_l1_cache_hit", slog.String("title", parsed.CleanTitle))
 		return info, nil
@@ -590,7 +595,10 @@ func (c *Client) doRequest(ctx context.Context, url string, target any) error {
 		if resp.StatusCode == http.StatusNotFound {
 			return ErrNotFound
 		}
-		body, _ := io.ReadAll(resp.Body)
+		body, readErr := io.ReadAll(resp.Body)
+		if readErr != nil {
+			utils.LoggerWithTrace(ctx).Warn("tmdb_error_body_read_failed", slog.Any("error", readErr))
+		}
 		return fmt.Errorf("TMDB HTTP %d: %s", resp.StatusCode, string(body))
 	}
 

@@ -335,6 +335,29 @@ POSTERS_DIR=posters
 
 ## Checklist Updates
 
+* **final validation** — `go build ./...`: Completed successfully.
+* **.cursorrules** — `Formatting & Encoding`: Added LF-only line ending rule and verification command after the UTF-8 requirement.
+* **app.go** — `RunScan()`: Verified after decomposition that no inline blocks over 20 lines remain; TMDB worker logic and scan-result handling are delegated to private methods.
+* **app.go** — `processScanResults()`: Extracted `resultsChan` handling from `RunScan` into `func (a *App) processScanResults(ctx context.Context, results <-chan scanResult) (toSave []storage.Movie, geminiQueue []string, translationQueue []string)`; verified `go build ./...`.
+* **app.go** — `runTMDBScan()`: Extracted the TMDB parallel worker block from `RunScan` into `func (a *App) runTMDBScan(ctx context.Context, paths []string) <-chan scanResult` and promoted `scanResult` to package scope; verified `go build ./...`.
+* **internal/ai/gemini.go** — `buildPrompt()`: Prompt size baseline measured after reductions: 3221 → 1942 chars (saved 1279 chars).
+* **internal/ai/gemini.go** — `buildPrompt()`: Reduced `TRANSLITERATION EXAMPLES` to 7 varied examples covering Latin transliteration, Cyrillic titles, numeric titles, and localized-title mismatches; verified `go build ./...`.
+* **internal/ai/gemini.go** — `buildPrompt()`: Removed duplicated localized-title, year-verification, uncertainty, and TMDB-merge rules across `MERGE STRATEGY`, `TRANSLITERATION EXAMPLES`, and `CRITICAL TRANSLATION RULES`; verified `go build ./...`.
+* **internal/ai/gemini.go** — `buildPrompt()`: Measured current prompt baseline size with empty context JSON (`[]`): 3221 chars.
+* **internal/storage/storage.go** — `GetMoviesByFilenames()`: Moved hardcoded chunk size `500` to package constant `filenameChunkSize`; verified `go build ./...`.
+* **internal/storage/storage.go** — `InitSchema()`: Added `PRAGMA foreign_keys = ON;` after existing SQLite PRAGMA setup; verified `go build ./...`.
+* **internal/utils/logger.go** — `safeWriter.Write()`: Added `// Write errors are intentionally ignored to prevent log recursion` comment for the deliberate ignored write error; verified `go build ./...`.
+* **internal/utils/logger.go** — `InitLogger()`: Replaced ignored `os.MkdirAll("logs", 0755)` error with `slog.Error("failed_to_create_logs_dir", ...)`; verified `go build ./...`.
+* **project ignored errors** — `app.go`, `internal/ai/gemini.go`, `internal/ai/grok.go`, `internal/tmdb/client.go`, `internal/tmdb/details.go`, `internal/tmdb/search.go`, `internal/storage/storage.go`, tests: `rg "\\w+, _ :=" .` reviewed all matches; critical DB/path/HTTP/body/poster errors now log or return errors, intentional ignores have `// safe to ignore` comments; verified `go build ./...`.
+* **project HTTP calls** — `app.go`, `internal/ai/grok.go`, `internal/tmdb/client.go`, `internal/sheets/sheets.go`: `rg "http\\.Get\\(|\\.Do\\(" .` found no `http.Get`; direct HTTP `client.Do` calls all defer `resp.Body.Close()` after success, while `sheets.go` uses Google API `.Do()` without a direct response body.
+* **internal/tmdb/client.go** — `Close()`: Added `c.transport.CloseIdleConnections()` guard to release idle TMDB HTTP connections; verified `go build ./...`.
+* **internal/tmdb/client.go** — `Client` / `NewClient()`: Added `transport *http.Transport`, initialized it in `NewClient`, and passed it into `http.Client{Transport: transport}`; verified `go build ./...`.
+* **app.go** — `RunScan()`: Added `runtime/debug` stacktrace logging to the TMDB worker goroutine `recover()` block; verified `go build ./...`.
+* **main.go** — `main()`: Added `runtime/debug` stacktrace logging to the global `recover()` block with `unhandled_panic`; verified `go build ./...`.
+* **app.go** — `fetchAIModels()`: Added an explanatory comment and `reqCtx` variable for `context.WithoutCancel(ctx)` inside the singleflight closure; verified `go build ./...`.
+* **go.mod** — file: Removed the commented local Wails `replace` directive for `github.com/wailsapp/wails/v2 v2.12.0`.
+* **internal/utils/system.go** — `OpenLogsFolder()`: Replaced folder creation/open failure `log.Printf` calls with structured `slog.Error` events and removed the unused `log` import; verified `go build ./...`.
+* **internal/ai/gemini.go** — `translateWithRetry()`, `TranslateTitle()`, `TranslatePlot()`: `rg "TranslateTitle|TranslatePlot|translateWithRetry" .` showed only definitions and internal calls among these dead functions; removed all three and verified `go build ./...`.
 * **.gitattributes** — file: Added LF normalization rules for JSON and env files.
 * **.editorconfig** — file: Added Markdown UTF-8, LF endings, trailing whitespace trimming, and final newline rules.
 * **internal/scanner/scanner.go** — `getLargestVideoInDir()`: Renamed `getFirstVideoInDir` and updated the `GetDiskFiles()` call site to reflect largest-file selection.
@@ -347,5 +370,4 @@ POSTERS_DIR=posters
 * **app.go** — `finalizeScan()`: Logged static showcase generation failures with `slog.Error`.
 * **app.go** — `processGeminiQueue()`: Logged `SaveAIResolution` failures with the related filename.
 * **app.go** — `UpdateMovie()`: Logged `SaveAIResolution` failures with the related filename.
-
-
+* **final validation** — `go vet ./...`: Passed with no warnings. `gofmt -l .`: Applied `gofmt -w` to `internal/tmdb/client.go`; list now empty. `go test ./... -count=1`: All tests green (movielist-app, ai, storage, tmdb). Prompt size: 3221 → 1942 chars (saved 1279 chars). Dead code removed: `translateWithRetry`, `TranslateTitle`, `TranslatePlot`. Checklist fully completed.

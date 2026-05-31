@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"regexp"
 	goRuntime "runtime"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -47,6 +48,13 @@ type App struct {
 	scanCancel         context.CancelFunc
 	isScanning         bool
 	scanMutex          sync.Mutex
+}
+
+type scanResult struct {
+	path        string
+	fname       string
+	info        *tmdb.MovieInfo
+	needsGemini bool
 }
 
 // aiConfidenceThreshold — єдиний поріг для Gemini, L2-кешу та merge.
@@ -190,8 +198,14 @@ func (a *App) OpenURL(url string) {
 }
 
 func (a *App) OpenLogs() {
-	path, _ := filepath.Abs("logs")
-	_ = os.MkdirAll(path, 0755)
+	path, err := filepath.Abs("logs")
+	if err != nil {
+		slog.Warn("logs_abs_path_failed", slog.Any("error", err))
+		path = "logs"
+	}
+	if err := os.MkdirAll(path, 0755); err != nil {
+		slog.Warn("logs_dir_create_failed", slog.Any("error", err))
+	}
 	a.openInExplorer(path)
 }
 func (a *App) SelectMediaFolder() (string, error) {
@@ -214,12 +228,21 @@ func (a *App) OpenSheet() {
 
 func (a *App) OpenShowcase() {
 	a.logFront("🎬 Підготовка вітрини...")
-	movies, _ := a.db.GetAllMovies(a.ctx)
+	movies, err := a.db.GetAllMovies(a.ctx)
+	if err != nil {
+		slog.Warn("get_movies_for_showcase_failed", slog.Any("error", err))
+		a.logFront("❌ Помилка читання БД: " + err.Error())
+		return
+	}
 	if err := web.Generate(a.cfg, movies); err != nil {
 		a.logFront(fmt.Sprintf("❌ Помилка генерації вітрини: %v", err))
 		return
 	}
-	path, _ := filepath.Abs(a.cfg.HTMLPath)
+	path, err := filepath.Abs(a.cfg.HTMLPath)
+	if err != nil {
+		slog.Warn("showcase_abs_path_failed", slog.Any("error", err))
+		path = a.cfg.HTMLPath
+	}
 	a.openInExplorer(path)
 	a.logFront("✅ Вітрину відкрито!")
 }
@@ -277,13 +300,17 @@ func (a *App) fetchAIModels(ctx context.Context) ([]string, error) {
 	}
 	a.modelsMutex.RUnlock()
 
+	// safe to ignore: singleflight shared flag is not needed by callers.
 	value, err, _ := a.modelsGroup.Do("ai_models", func() (interface{}, error) {
 		url := "https://generativelanguage.googleapis.com/v1beta/models"
 		client := a.aiModelsHTTPClient
 		if client == nil {
 			client = &http.Client{Timeout: 10 * time.Second}
 		}
-		req, err := http.NewRequestWithContext(context.WithoutCancel(ctx), "GET", url, nil)
+		// WithoutCancel: model list is a global cache — scan cancellation
+		// must not abort this request, as other callers may be waiting on the same flight.
+		reqCtx := context.WithoutCancel(ctx)
+		req, err := http.NewRequestWithContext(reqCtx, "GET", url, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -295,7 +322,10 @@ func (a *App) fetchAIModels(ctx context.Context) ([]string, error) {
 		defer resp.Body.Close()
 
 		if resp.StatusCode != http.StatusOK {
-			body, _ := io.ReadAll(resp.Body)
+			body, readErr := io.ReadAll(resp.Body)
+			if readErr != nil {
+				slog.Warn("ai_models_error_body_read_failed", slog.Any("error", readErr))
+			}
 			return nil, fmt.Errorf("API request failed with status %d: %s", resp.StatusCode, string(body))
 		}
 
@@ -413,20 +443,47 @@ func (a *App) RunScan() {
 	// Спроба 1: конкурентний прямий пошук через TMDB
 	var geminiQueue []string
 
-	type scanResult struct {
-		path        string
-		fname       string
-		info        *tmdb.MovieInfo
-		needsGemini bool
+	resultsChan := a.runTMDBScan(ctx, filesToProcess)
+
+	// 🛡️ Єдиний Writer для SQLite: збирає батч і пише транзакцією
+	moviesToSave, geminiQueue, translationQueue := a.processScanResults(ctx, resultsChan)
+
+	// Зберігаємо всіх знайдених одним запитом
+	if len(moviesToSave) > 0 {
+		if err := a.db.SaveMoviesBatch(ctx, moviesToSave); err != nil {
+			slog.Error("batch_save_failed", slog.Any("error", err))
+		}
 	}
 
-	totalFiles := len(filesToProcess)
+	// Спроба 2: Gemini для тих що TMDB не знайшов
+	if len(geminiQueue) > 0 {
+		a.logFront(fmt.Sprintf("🤖 Черга Gemini: %d файлів", len(geminiQueue)))
+
+		// 🟢 СТАЛО: processGeminiQueue тепер повертає успішні файли
+		recognizedByGemini := a.processGeminiQueue(ctx, geminiQueue, a.aiClient)
+		translationQueue = append(translationQueue, recognizedByGemini...)
+	}
+
+	// 🟢 НОВЕ: ФАЗА 3 - Асинхронний відкладений переклад
+	if len(translationQueue) > 0 {
+		a.processTranslationQueue(ctx, translationQueue, a.aiClient)
+	}
+}
+
+// StopScan зупиняє поточний процес сканування
+func (a *App) StopScan() {
+	a.logFront("🚨 [СТОП] Сигнал скасування отримано бекендом!")
+	a.cancelScan()
+}
+
+func (a *App) runTMDBScan(ctx context.Context, paths []string) <-chan scanResult {
+	totalFiles := len(paths)
 	resultsChan := make(chan scanResult, totalFiles)
 	sem := make(chan struct{}, 10) // Ліміт у 10 одночасних запитів до TMDB (rate-limit safe)
 	var wg sync.WaitGroup
 	var processedCount int32
 
-	for _, path := range filesToProcess {
+	for _, path := range paths {
 		if ctx.Err() != nil {
 			a.logFront("🛑 Процес сканування перервано.")
 			break
@@ -440,7 +497,10 @@ func (a *App) RunScan() {
 			defer func() { <-sem }() // Звільняємо слот
 			defer func() {
 				if r := recover(); r != nil {
-					slog.Error("panic_in_goroutine", slog.Any("panic", r))
+					slog.Error("panic_in_goroutine",
+						slog.Any("panic", r),
+						slog.String("stack", string(debug.Stack())),
+					)
 				}
 			}()
 
@@ -487,17 +547,23 @@ func (a *App) RunScan() {
 		close(resultsChan)
 	}()
 
-	// 🛡️ Єдиний Writer для SQLite: збирає батч і пише транзакцією
-	var moviesToSave []storage.Movie
-	for res := range resultsChan {
+	return resultsChan
+}
+
+func (a *App) processScanResults(ctx context.Context, results <-chan scanResult) (toSave []storage.Movie, geminiQueue []string, translationQueue []string) {
+	for res := range results {
 		if !res.needsGemini {
 			movie := movieFromTMDB(res.fname, res.info)
-			moviesToSave = append(moviesToSave, movie)
+			toSave = append(toSave, movie)
 			a.logFront(fmt.Sprintf("✅ TMDB: '%s' → '%s'", res.fname, res.info.TitleUA))
 			translationQueue = append(translationQueue, res.fname)
 		} else {
 			// 🟢 ПЕРЕВІРКА L2 КЕШУ: Чи не розпізнавали ми цей файл раніше через ШІ?
-			if cached, _ := a.db.GetAIResolution(ctx, res.fname); cached != nil && cached.Confidence >= aiConfidenceThreshold {
+			cached, err := a.db.GetAIResolution(ctx, res.fname)
+			if err != nil {
+				utils.LoggerWithTrace(ctx).Warn("get_ai_resolution_failed", slog.String("file", res.fname), slog.Any("error", err))
+			}
+			if cached != nil && cached.Confidence >= aiConfidenceThreshold {
 				utils.LoggerWithTrace(ctx).Info("gemini_l2_cache_hit", slog.String("file", res.fname), slog.String("resolved", cached.ResolvedTitle))
 
 				// Використовуємо кешовану назву для пошуку в TMDB
@@ -511,7 +577,7 @@ func (a *App) RunScan() {
 					}
 					if jw >= geminiTMDBVerifyMinJW {
 						movie := movieFromTMDB(res.fname, info)
-						moviesToSave = append(moviesToSave, movie)
+						toSave = append(toSave, movie)
 						a.logFront(fmt.Sprintf("⚡ L2-Кеш: '%s' → '%s'", res.fname, info.TitleUA))
 						translationQueue = append(translationQueue, res.fname)
 						continue
@@ -522,32 +588,7 @@ func (a *App) RunScan() {
 		}
 	}
 
-	// Зберігаємо всіх знайдених одним запитом
-	if len(moviesToSave) > 0 {
-		if err := a.db.SaveMoviesBatch(ctx, moviesToSave); err != nil {
-			slog.Error("batch_save_failed", slog.Any("error", err))
-		}
-	}
-
-	// Спроба 2: Gemini для тих що TMDB не знайшов
-	if len(geminiQueue) > 0 {
-		a.logFront(fmt.Sprintf("🤖 Черга Gemini: %d файлів", len(geminiQueue)))
-
-		// 🟢 СТАЛО: processGeminiQueue тепер повертає успішні файли
-		recognizedByGemini := a.processGeminiQueue(ctx, geminiQueue, a.aiClient)
-		translationQueue = append(translationQueue, recognizedByGemini...)
-	}
-
-	// 🟢 НОВЕ: ФАЗА 3 - Асинхронний відкладений переклад
-	if len(translationQueue) > 0 {
-		a.processTranslationQueue(ctx, translationQueue, a.aiClient)
-	}
-}
-
-// StopScan зупиняє поточний процес сканування
-func (a *App) StopScan() {
-	a.logFront("🚨 [СТОП] Сигнал скасування отримано бекендом!")
-	a.cancelScan()
+	return toSave, geminiQueue, translationQueue
 }
 
 // processGeminiQueue — Gemini розпізнає назви → TMDB верифікує → мерж → збереження.
@@ -784,7 +825,9 @@ func (a *App) FixSelected(selected []map[string]interface{}) {
 	var geminiQueue []string
 
 	for _, s := range selected {
+		// safe to ignore: missing or non-string UI fields naturally fall back to empty strings.
 		filename, _ := s["filename"].(string)
+		// safe to ignore: missing or non-string hints are treated as no hint.
 		hint, _ := s["hint"].(string)
 
 		if hint != "" && hint != "skip" {
@@ -848,7 +891,10 @@ func (a *App) FixSelected(selected []map[string]interface{}) {
 func (a *App) UpdateMovie(ctx context.Context, filename, hint string) error {
 	hint = strings.TrimSpace(hint)
 
-	existing, _ := a.db.GetMovieByFilename(ctx, filename)
+	existing, err := a.db.GetMovieByFilename(ctx, filename)
+	if err != nil {
+		slog.Warn("get_existing_movie_failed", slog.String("file", filename), slog.Any("error", err))
+	}
 	if existing == nil {
 		existing = &storage.Movie{Filename: filename}
 	}
@@ -979,7 +1025,10 @@ func (a *App) getFileIdentifier(p string) string {
 
 // filterUnprocessed повертає файли яких немає в БД або які нерозпізнані
 func (a *App) filterUnprocessed(ctx context.Context, diskPaths []string) []string {
-	movies, _ := a.db.GetAllMovies(ctx)
+	movies, err := a.db.GetAllMovies(ctx)
+	if err != nil {
+		slog.Warn("filter_unprocessed_get_movies_failed", slog.Any("error", err))
+	}
 	recognized := make(map[string]bool, len(movies))
 	for _, m := range movies {
 		// Файл вважається розпізнаним, ТІЛЬКИ якщо ми знайшли його в TMDB (є ID)
@@ -1042,7 +1091,11 @@ func applyTMDBToMovie(movie *storage.Movie, info *tmdb.MovieInfo) {
 func extractTMDBID(hint string) (int, tmdb.MediaType) {
 	// TMDB URL з типом
 	if m := reTMDBURL.FindStringSubmatch(hint); len(m) > 2 {
-		id, _ := strconv.Atoi(m[2])
+		id, err := strconv.Atoi(m[2])
+		if err != nil {
+			slog.Warn("tmdb_url_id_parse_failed", slog.String("hint", hint), slog.Any("error", err))
+			return 0, tmdb.MediaTypeMovie
+		}
 		mt := tmdb.MediaTypeMovie
 		if m[1] == "tv" {
 			mt = tmdb.MediaTypeTV
@@ -1052,7 +1105,11 @@ func extractTMDBID(hint string) (int, tmdb.MediaType) {
 
 	// Чистий числовий ID (більше 4 цифр щоб не сплутати з роком)
 	if reTMDBID.MatchString(hint) {
-		id, _ := strconv.Atoi(hint)
+		id, err := strconv.Atoi(hint)
+		if err != nil {
+			slog.Warn("tmdb_id_parse_failed", slog.String("hint", hint), slog.Any("error", err))
+			return 0, tmdb.MediaTypeMovie
+		}
 		return id, tmdb.MediaTypeMovie
 	}
 
@@ -1066,7 +1123,10 @@ func (a *App) emitProgress(current, total int, filename string) {
 }
 
 func (a *App) finalizeScan(ctx context.Context, msg string) {
-	movies, _ := a.db.GetAllMovies(ctx)
+	movies, err := a.db.GetAllMovies(ctx)
+	if err != nil {
+		slog.Warn("finalize_scan_get_movies_failed", slog.Any("error", err))
+	}
 	if err := web.Generate(a.cfg, movies); err != nil {
 		slog.Error("web_generate_failed", slog.Any("error", err))
 	}
