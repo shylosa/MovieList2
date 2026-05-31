@@ -319,7 +319,6 @@ func buildPrompt(contexts []FileRecognitionContext) string {
 	filesJSON, _ := json.Marshal(contexts)
 
 	return fmt.Sprintf(`You are a movie database expert. Your goal is to find the OFFICIAL ORIGINAL (English) title of the movie on IMDB/TMDB based on the provided transliterated or localized name and year.
-Your data will be MERGED with TMDB results.
 
 PRE-PARSED FILE CONTEXT (from our local parser — TRUST these fields, do not re-guess year/media_type):
 %s
@@ -337,12 +336,10 @@ TRANSLITERATION EXAMPLES (Russian-dubbed titles stored in Latin script):
 - "Убийца 2. Против всех" → en_title: "Sicario: Day of the Soldado"
 - "Иллюзия обмана 3" → en_title: "Now You See Me 3"
 - "Отпуск на двоих" (2026) → en_title: "People We Meet on Vacation"
-- "Список подозреваемых" (2024) → en_title: "Boneyard"
 
 CRITICAL TRANSLATION RULES:
 1. Do not translate localized titles literally; find the actual global movie release matching that title and year.
 2. For transliterated files, reverse-engineer the original Cyrillic title and find the exact TMDB movie.
-3. Always verify the movie release year matches the filename.
 
 FIELD RULES:
 1. en_title: exact TMDB title. For non-English originals use the most common TMDB search title. Empty string "" if uncertain.

@@ -249,8 +249,14 @@ func (db *DB) CleanMissingMovies(ctx context.Context, actualFiles []string) (int
 		return 0, err
 	}
 	for _, fname := range toDelete {
-		_, _ = db.db.ExecContext(ctx, "DELETE FROM movies WHERE filename = ?", fname)
-		_, _ = db.db.ExecContext(ctx, "DELETE FROM ai_resolutions WHERE original_filename = ?", fname)
+		if _, err := db.db.ExecContext(ctx, "DELETE FROM movies WHERE filename = ?", fname); err != nil {
+			slog.Warn("clean_missing_delete_failed",
+				slog.String("file", fname), slog.Any("error", err))
+		}
+		if _, err := db.db.ExecContext(ctx, "DELETE FROM ai_resolutions WHERE original_filename = ?", fname); err != nil {
+			slog.Warn("clean_ai_resolution_delete_failed",
+				slog.String("file", fname), slog.Any("error", err))
+		}
 	}
 	return len(toDelete), nil
 }

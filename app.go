@@ -108,7 +108,9 @@ func (a *App) shutdown(ctx context.Context) {
 func (a *App) logFront(msg string) {
 	if a.ctx != nil {
 		defer func() {
-			_ = recover()
+			if r := recover(); r != nil {
+				slog.Warn("log_front_emit_panic", slog.Any("panic", r))
+			}
 		}()
 		wailsRuntime.EventsEmit(a.ctx, "log-message", msg)
 	}
@@ -436,12 +438,6 @@ func (a *App) RunScan() {
 	}
 
 	a.logFront(fmt.Sprintf("📂 Файлів для обробки: %d", len(filesToProcess)))
-
-	// 🟢 ДОДАНО: Черга для відкладеного перекладу
-	var translationQueue []string
-
-	// Спроба 1: конкурентний прямий пошук через TMDB
-	var geminiQueue []string
 
 	resultsChan := a.runTMDBScan(ctx, filesToProcess)
 

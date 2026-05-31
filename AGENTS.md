@@ -371,3 +371,12 @@ POSTERS_DIR=posters
 * **app.go** — `processGeminiQueue()`: Logged `SaveAIResolution` failures with the related filename.
 * **app.go** — `UpdateMovie()`: Logged `SaveAIResolution` failures with the related filename.
 * **final validation** — `go vet ./...`: Passed with no warnings. `gofmt -l .`: Applied `gofmt -w` to `internal/tmdb/client.go`; list now empty. `go test ./... -count=1`: All tests green (movielist-app, ai, storage, tmdb). Prompt size: 3221 → 1942 chars (saved 1279 chars). Dead code removed: `translateWithRetry`, `TranslateTitle`, `TranslatePlot`. Checklist fully completed.
+* **app.go** — `RunScan()`: Removed redundant `var geminiQueue` / `var translationQueue` declarations shadowed by `:=` from `processScanResults`; verified `go build ./...`.
+* **app.go** — `logFront()`: Replaced silent `_ = recover()` with structured `slog.Warn("log_front_emit_panic", ...)` on Wails emit panic; verified `go build ./...`.
+* **internal/storage/storage.go** — `CleanMissingMovies()`: Log `DELETE` failures for `movies` and `ai_resolutions` via `slog.Warn` instead of silent ignore; verified `go build ./...`.
+* **internal/ai/gemini.go** — `buildPrompt()`: Prompt baseline: 2205 chars (measured 2025-05-31).
+* **internal/ai/gemini.go** — `buildPrompt()`: Removed duplicate `"Your data will be MERGED with TMDB results."` line (covered by MERGE STRATEGY); verified `go build ./...`.
+* **internal/ai/gemini.go** — `buildPrompt()`: Removed duplicate year-verification rule from `CRITICAL TRANSLATION RULES` (covered by FIELD RULES `year`); verified `go build ./...`.
+* **internal/ai/gemini.go** — `buildPrompt()`: Reduced `TRANSLITERATION EXAMPLES` from 7 to 6 (removed redundant Cyrillic+year pattern); verified `go build ./...`.
+* **internal/ai/gemini.go** — `buildPrompt()`: Prompt after optimization: 1841 chars (saved 364 chars, 16.5%).
+* **final validation (2025-05-31)** — `go build ./...`, `go vet ./...`, `gofmt -l .`, `go test ./... -count=1`: all green. Checklist: dead queue vars removed, logFront/CleanMissingMovies logging, prompt 2205→1841 chars (−364, 16.5%).
