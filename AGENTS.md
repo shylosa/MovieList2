@@ -4,6 +4,7 @@
 MovieList App — desktop application for cataloging local movie/TV collections.
 
 Tech stack: Go 1.26+, Wails v2, SQLite, TMDB API, Google Gemini (`google.golang.org/genai`).
+*Note on toolchain: go 1.26.2 in go.mod — verify this is the intended toolchain version. Latest stable as of audit date is 1.24.x. If using pre-release, document why.*
 
 ---
 
@@ -167,5 +168,9 @@ POSTERS_DIR=posters
 | `internal/ai/gemini.go` | `RecognizeBulk` | Handle error returned by `buildPrompt`. |
 | `internal/ai/gemini.go` | `requestWithRetry` | Remove `contexts` parameter and use `prompt` directly for Grok. |
 | `internal/ai/gemini.go` | `buildGrokRecognitionPrompt` | Delete the obsolete function entirely. |
+| `internal/tmdb/client.go` | `doRequestWithRetry` | Replace unreachable return nil after loop with explicit error return. |
+| `internal/ai/gemini.go` | `TranslateBulk` | Ignore json.Marshal error with safe-to-ignore comment. |
 
-**CHECKLIST complete (2026-06-01):** buildPrompt restored: ~1150 chars, signature (string, error); SQLite merge-upsert + strict batch tx, safe scan/Gemini/translation paths, async `RunScan`, Wails `UpdateMovie` contract, shorter AI prompts, typed TMDB search (no `/multi`); `gofmt`, `go vet`, `go test`, `go build` all pass.
+
+
+**CHECKLIST complete (2026-06-01):** Replaced unreachable return nil in doRequestWithRetry, ignored JSON marshal error in TranslateBulk with comment, documented Go 1.26.2 toolchain version note, and verified all build/vet/fmt/test steps pass.

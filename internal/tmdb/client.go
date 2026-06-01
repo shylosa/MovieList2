@@ -3,6 +3,7 @@ package tmdb
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -163,7 +164,9 @@ func (c *Client) doRequestWithRetry(ctx context.Context, url string, target any)
 		}
 		backoff *= 2 // експоненціальний backoff
 	}
-	return nil
+	// This line is unreachable: the last iteration always returns at the if-block above.
+	// Keeping an explicit error return to prevent silent success if logic changes.
+	return errors.New("doRequestWithRetry: exhausted all retries")
 }
 
 // FetchFromFilename — точка входу для сирого імені файлу.

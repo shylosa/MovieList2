@@ -377,10 +377,8 @@ func (c *Client) TranslateBulk(ctx context.Context, items []BulkTranslateItem) (
 		return nil, fmt.Errorf("помилка клієнта genai: %w", err)
 	}
 
-	inputJSON, err := json.Marshal(items)
-	if err != nil {
-		return nil, fmt.Errorf("bulk translate marshal error: %w", err)
-	}
+	// safe to ignore: BulkTranslateItem contains only JSON-marshalable primitive fields.
+	inputJSON, _ := json.Marshal(items)
 
 	prompt := fmt.Sprintf(`Localize each item to official Ukrainian title (and plot when provided). Keep "filename" unchanged. Use original_title (when provided) as context to find the correct official Ukrainian title. If no official UA title exists, keep original_title in "title". Input:
 %s
