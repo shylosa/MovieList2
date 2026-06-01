@@ -501,7 +501,12 @@ func (a *App) runTMDBScan(ctx context.Context, paths []string) <-chan scanResult
 		}
 
 		wg.Add(1)
-		sem <- struct{}{} // Захоплюємо слот
+		select {
+		case sem <- struct{}{}:
+		case <-ctx.Done():
+			wg.Done()
+			continue
+		}
 
 		go func() {
 			defer wg.Done()
@@ -563,6 +568,13 @@ func (a *App) runTMDBScan(ctx context.Context, paths []string) <-chan scanResult
 
 func (a *App) processScanResults(ctx context.Context, results <-chan scanResult) (toSave []storage.Movie, geminiQueue []string, translationQueue []string) {
 	for res := range results {
+		if ctx.Err() != nil {
+			go func() {
+				for range results {
+				}
+			}()
+			break
+		}
 		if !res.needsGemini {
 			movie := movieFromTMDB(res.fname, res.info)
 			toSave = append(toSave, movie)

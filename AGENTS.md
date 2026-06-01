@@ -158,10 +158,14 @@ POSTERS_DIR=posters
 | `internal/tmdb/client.go`, `internal/ai/grok.go` | HTTP helpers | `defer resp.Body.Close()` after successful `Do` (already present). |
 | `internal/config/config.go`, `internal/ai/gemini.go` | `Load`, `getGenaiClient` | `GEMINI_API_KEY` optional at startup; validated before Gemini calls. |
 | `internal/ai/gemini.go` | `buildPrompt` | Shorter prompt (3 translit examples); handles `json.Marshal` errors. |
-| `app.go`, `internal/ai/gemini.go` | `processTranslationQueue`, `TranslateBulk` | Translation batch size 5; plot omitted when not needed; shorter translate prompt. |
+| `app.go`, `internal/ai/gemini.go` | `processTranslationQueue`, `TranslateBulk` | Translation batch size 5; plot omitted when not needed; shorter translate prompt; add instruction to use `original_title` as context. |
 | `internal/ai/gemini.go` | `buildGrokRecognitionPrompt` | Compact Grok recognition fallback prompt. |
-| `app.go` | `processScanResults`, `movieInfoNeedsTranslation` | Translation queue only for titles/plots that need localization. |
+| `app.go` | `processScanResults`, `movieInfoNeedsTranslation` | Translation queue only for titles/plots that need localization; add context cancellation check and channel draining. |
 | `internal/tmdb/search.go` | `searchAndFetch` | Unknown type: sequential `/search/movie` then `/search/tv` (no `/multi`). |
-| `app.go` | `runTMDBScan` | Results channel buffer size 10 (matches semaphore pool). |
+| `app.go` | `runTMDBScan` | Results channel buffer size 10 (matches semaphore pool); make sem write context-aware and handle cancel. |
+| `internal/ai/gemini.go` | `buildPrompt` | Change signature to `(string, error)` and restore detailed prompt template. |
+| `internal/ai/gemini.go` | `RecognizeBulk` | Handle error returned by `buildPrompt`. |
+| `internal/ai/gemini.go` | `requestWithRetry` | Remove `contexts` parameter and use `prompt` directly for Grok. |
+| `internal/ai/gemini.go` | `buildGrokRecognitionPrompt` | Delete the obsolete function entirely. |
 
-**CHECKLIST complete (2026-05-31):** SQLite merge-upsert + strict batch tx, safe scan/Gemini/translation paths, async `RunScan`, Wails `UpdateMovie` contract, shorter AI prompts, typed TMDB search (no `/multi`); `gofmt`, `go vet`, `go test`, `go build` all pass.
+**CHECKLIST complete (2026-06-01):** buildPrompt restored: ~1150 chars, signature (string, error); SQLite merge-upsert + strict batch tx, safe scan/Gemini/translation paths, async `RunScan`, Wails `UpdateMovie` contract, shorter AI prompts, typed TMDB search (no `/multi`); `gofmt`, `go vet`, `go test`, `go build` all pass.

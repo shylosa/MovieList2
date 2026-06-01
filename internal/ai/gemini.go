@@ -177,13 +177,16 @@ func (c *Client) RecognizeBulk(ctx context.Context, contexts []FileRecognitionCo
 		return nil, nil
 	}
 
-	prompt := buildPrompt(contexts)
+	prompt, err := buildPrompt(contexts)
+	if err != nil {
+		return nil, fmt.Errorf("build_prompt: %w", err)
+	}
 	utils.LoggerWithTrace(ctx).Info("gemini_recognition_start", slog.Int("file_count", len(contexts)))
 
-	return c.requestWithRetry(ctx, prompt, contexts)
+	return c.requestWithRetry(ctx, prompt)
 }
 
-func (c *Client) requestWithRetry(ctx context.Context, prompt string, contexts []FileRecognitionContext) ([]RecognizedTitle, error) {
+func (c *Client) requestWithRetry(ctx context.Context, prompt string) ([]RecognizedTitle, error) {
 	var lastErr error
 	models := c.getModels() // 🟢 ВИПРАВЛЕННЯ: Беремо актуальний каскад
 
@@ -228,7 +231,7 @@ func (c *Client) requestWithRetry(ctx context.Context, prompt string, contexts [
 	// Grok fallback — last resort after all Gemini models failed
 	if c.cfg.GrokAPIKey != "" {
 		utils.LoggerWithTrace(ctx).Info("grok_recognize_fallback")
-		raw, grokErr := c.callGrok(ctx, buildGrokRecognitionPrompt(contexts))
+		raw, grokErr := c.callGrok(ctx, prompt)
 		if grokErr == nil {
 			parsed, parseErr := parseRecognizeResponse(raw)
 			if parseErr == nil {
@@ -317,39 +320,43 @@ func buildBulkTranslateSchema() *genai.Schema {
 }
 
 // buildPrompt — compact recognition prompt for Gemini (schema defines response fields).
-func buildPrompt(contexts []FileRecognitionContext) string {
+func buildPrompt(contexts []FileRecognitionContext) (string, error) {
 	filesJSON, err := json.Marshal(contexts)
 	if err != nil {
-		slog.Error("build_prompt_marshal_failed", slog.Any("error", err))
-		return `[]`
+		return "", fmt.Errorf("build_prompt_marshal: %w", err)
 	}
-	if len(filesJSON) == 0 {
-		return `[]`
+	if len(filesJSON) == 0 || string(filesJSON) == "null" {
+		return "", fmt.Errorf("build_prompt: empty contexts")
 	}
+	return fmt.Sprintf(`You are a movie database expert. Find the OFFICIAL ORIGINAL (English) title on TMDB for each file.
+CRITICAL: DO NOT translate localized titles literally — find the actual global release.
+Example: "Moj malenkij angel" ≠ "My Little Angel" → actual title is "Foster".
 
-	return fmt.Sprintf(`Find the official TMDB-searchable English "en_title" for each file. Trust parsed_year and parsed_media_type from input; echo original_file unchanged.
-
-Input JSON:
+Input JSON (TRUST parsed_year and parsed_media_type — do not re-guess them):
 %s
+"original_file" in your response MUST exactly match "original_file" from input.
 
-Transliteration examples (Latin script dub titles):
-- "Vrag" → "Enemy"
-- "Nochnoj Rejs" → "Red Eye"
+MERGE STRATEGY: "en_title" is used to search TMDB. TMDB data always wins.
+Return "" if uncertain — a miss is better than a hallucination.
+
+TRANSLITERATION EXAMPLES (Latin-script dub titles → original EN release):
+- "Vrag" → "Enemy" (2013)
 - "Banshi Inisherina" → "The Banshees of Inisherin"
+- "Nochnoj Rejs" → "Red Eye" (2005)
+- "Ubiystvennyiy podkast" → find actual EN title, do not guess
 
-If uncertain, use empty en_title. Return ONLY a raw JSON array (no markdown).`, string(filesJSON))
-}
+CYRILLIC / LOCALIZED EXAMPLES (completely different from literal meaning):
+- "Убийца 2. Против всех" → "Sicario: Day of the Soldado"
+- "Иллюзия обмана 3" → "Now You See Me 3"
+- "Отпуск на двоих" (2026) → "People We Meet on Vacation"
+- "Список подозреваемых" (2024) → "Boneyard"
 
-// buildGrokRecognitionPrompt — minimal fallback prompt for Grok (no large rule blocks).
-func buildGrokRecognitionPrompt(contexts []FileRecognitionContext) string {
-	filesJSON, err := json.Marshal(contexts)
-	if err != nil {
-		slog.Error("grok_prompt_marshal_failed", slog.Any("error", err))
-		return `[]`
-	}
-	return fmt.Sprintf(`For each file in the JSON array, return en_title (TMDB English title), year, media_type (movie|tv), confidence. Echo original_file unchanged. Empty en_title if unsure. JSON array only.
+RULES:
+1. en_title: exact TMDB-searchable title. "" if not 100%% certain — do NOT guess.
+2. year: use parsed_year from input; if absent extract from filename; null if uncertain.
+3. media_type: use parsed_media_type from input; "tv" only for S01/Season markers; default "movie".
 
-%s`, string(filesJSON))
+Return ONLY a raw JSON array. No markdown, no explanation.`, string(filesJSON)), nil
 }
 
 type BulkTranslateItem struct {
@@ -375,7 +382,7 @@ func (c *Client) TranslateBulk(ctx context.Context, items []BulkTranslateItem) (
 		return nil, fmt.Errorf("bulk translate marshal error: %w", err)
 	}
 
-	prompt := fmt.Sprintf(`Localize each item to official Ukrainian title (and plot when provided). Keep "filename" unchanged. If no official UA title exists, keep original_title in "title". Input:
+	prompt := fmt.Sprintf(`Localize each item to official Ukrainian title (and plot when provided). Keep "filename" unchanged. Use original_title (when provided) as context to find the correct official Ukrainian title. If no official UA title exists, keep original_title in "title". Input:
 %s
 Return ONLY a raw JSON array.`, string(inputJSON))
 
