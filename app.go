@@ -48,6 +48,8 @@ type App struct {
 	scanCancel         context.CancelFunc
 	isScanning         bool
 	scanMutex          sync.Mutex
+	isGitHubSyncing    bool
+	githubSyncMutex    sync.Mutex
 }
 
 type scanResult struct {
@@ -240,7 +242,7 @@ func (a *App) OpenShowcase() {
 		a.logFront("❌ Помилка читання БД: " + err.Error())
 		return
 	}
-	if err := web.Generate(a.cfg, movies); err != nil {
+	if err := web.Generate(a.cfg, movies, false); err != nil {
 		a.logFront(fmt.Sprintf("❌ Помилка генерації вітрини: %v", err))
 		return
 	}
@@ -275,6 +277,112 @@ func (a *App) SyncToCloud() {
 	} else {
 		a.logFront("✅ Хмарна таблиця оновлена!")
 	}
+}
+
+func (a *App) SyncToGitHub() {
+	a.githubSyncMutex.Lock()
+	if a.isGitHubSyncing {
+		a.githubSyncMutex.Unlock()
+		a.logFront("⚠️ Синхронізація GitHub вже йде. Ігнорую повторний виклик.")
+		return
+	}
+	a.isGitHubSyncing = true
+	a.githubSyncMutex.Unlock()
+
+	go func() {
+		defer func() {
+			a.githubSyncMutex.Lock()
+			a.isGitHubSyncing = false
+			a.githubSyncMutex.Unlock()
+		}()
+
+		emitFinished := func(success bool, msg string) {
+			if a.ctx != nil {
+				wailsRuntime.EventsEmit(a.ctx, "github-sync-finished", map[string]interface{}{
+					"success": success,
+					"message": msg,
+				})
+			}
+		}
+
+		if a.ctx != nil {
+			wailsRuntime.EventsEmit(a.ctx, "github-sync-started")
+		}
+		a.logFront("📱 Підготовка мобільної вітрини для GitHub Pages...")
+
+		movies, err := a.db.GetAllMovies(a.ctx)
+		if err != nil {
+			emitFinished(false, "❌ Помилка читання БД: "+err.Error())
+			return
+		}
+		if len(movies) == 0 {
+			emitFinished(false, "⚠️ База порожня, нічого публікувати.")
+			return
+		}
+
+		repoDir, err := a.gitRepoRoot()
+		if err != nil {
+			emitFinished(false, "❌ Git репозиторій не знайдено: "+err.Error())
+			return
+		}
+
+		mobileCfg := *a.cfg
+		mobileCfg.HTMLPath = filepath.Join(repoDir, "index.html")
+		if err := web.Generate(&mobileCfg, movies, true); err != nil {
+			emitFinished(false, fmt.Sprintf("❌ Помилка генерації index.html: %v", err))
+			return
+		}
+
+		if err := a.deployToGitHubPages(); err != nil {
+			emitFinished(false, "❌ GitHub Pages: "+err.Error())
+			return
+		}
+		emitFinished(true, "✅ GitHub Pages оновлено!")
+	}()
+}
+
+func (a *App) gitRepoRoot() (string, error) {
+	cmd := exec.CommandContext(a.ctx, "git", "rev-parse", "--show-toplevel")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("%s", strings.TrimSpace(string(out)))
+	}
+	root := strings.TrimSpace(string(out))
+	if root == "" {
+		return "", fmt.Errorf("empty git root")
+	}
+	return filepath.FromSlash(root), nil
+}
+
+func (a *App) deployToGitHubPages() error {
+	workDir, err := a.gitRepoRoot()
+	if err != nil {
+		return err
+	}
+
+	run := func(args ...string) error {
+		cmd := exec.CommandContext(a.ctx, args[0], args[1:]...)
+		cmd.Dir = workDir
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			a.logFront(fmt.Sprintf("❌ git %s: %s", args[1], strings.TrimSpace(string(out))))
+		}
+		return err
+	}
+
+	if err := run("git", "add", "-f", "index.html"); err != nil {
+		return err
+	}
+
+	// commit може повернути ненульовий код якщо "nothing to commit" — це не помилка
+	_ = run("git", "commit", "-m", fmt.Sprintf("Update mobile showcase %s",
+		time.Now().Format("2006-01-02 15:04")))
+
+	if err := run("git", "push", "origin", "main"); err != nil {
+		return fmt.Errorf("push failed: %w", err)
+	}
+
+	return nil
 }
 
 // GetAIModels is the exported Wails method (no context param).
@@ -1159,7 +1267,7 @@ func (a *App) finalizeScan(ctx context.Context, msg string) {
 	if err != nil {
 		slog.Warn("finalize_scan_get_movies_failed", slog.Any("error", err))
 	}
-	if err := web.Generate(a.cfg, movies); err != nil {
+	if err := web.Generate(a.cfg, movies, false); err != nil {
 		slog.Error("web_generate_failed", slog.Any("error", err))
 	}
 	wailsRuntime.EventsEmit(a.ctx, "scan-finished", msg)

@@ -30,4 +30,6 @@ export function StopScan():Promise<void>;
 
 export function SyncToCloud():Promise<void>;
 
+export function SyncToGitHub():Promise<void>;
+
 export function UpdateMovie(arg1:string,arg2:string):Promise<void>;

@@ -20,16 +20,21 @@ const (
 // Generate створює статичний HTML-файл каталогу
 // movielist-app\internal\web\generator.go
 
-func Generate(cfg *config.Config, movies []storage.Movie) error {
-	fmt.Printf("🎨 Генерація локального веб-каталогу %s...\n", cfg.AppVersion)
+func Generate(cfg *config.Config, movies []storage.Movie, isMobile bool) error {
+	fmt.Printf("🎨 Генерація веб-каталогу %s (mobile=%v)...\n", cfg.AppVersion, isMobile)
 
-	// 🔴 КРИТИЧНИЙ ФІКС ШЛЯХІВ: Браузер не розуміє Windows-слеші
 	displayMovies := make([]storage.Movie, len(movies))
 	for i, m := range movies {
-		if m.LocalPosterPath != "" {
-			// Перетворюємо \ у / (наприклад: posters\1.jpg -> posters/1.jpg)
-			m.LocalPosterPath = filepath.ToSlash(m.LocalPosterPath)
+		var posterSrc string
+		if isMobile && m.PosterURL != "" {
+			posterSrc = m.PosterURL
+		} else if m.LocalPosterPath != "" {
+			posterSrc = m.LocalPosterPath
+			if !isMobile {
+				posterSrc = filepath.ToSlash(posterSrc)
+			}
 		}
+		m.LocalPosterPath = posterSrc
 		displayMovies[i] = m
 	}
 

@@ -1,6 +1,6 @@
 import './style.css';
 
-import { GetAppVersion, GetMovies, GetStats, RunScan, StopScan, GetAIModels, OpenLogs, FixSelected, SyncToCloud, OpenShowcase, OpenSheet, OpenURL, DeleteMovie, SelectMediaFolder } from '../wailsjs/go/main/App.js';
+import { GetAppVersion, GetMovies, GetStats, RunScan, StopScan, GetAIModels, OpenLogs, FixSelected, SyncToCloud, SyncToGitHub, OpenShowcase, OpenSheet, OpenURL, DeleteMovie, SelectMediaFolder } from '../wailsjs/go/main/App.js';
 import { Quit, WindowMinimise, WindowToggleMaximise, EventsOn } from '../wailsjs/runtime/runtime.js';
 import logoUrl from './assets/images/appicon.png';
 
@@ -26,7 +26,8 @@ document.querySelector('#app').innerHTML = `
         <div style="padding-top: 10px; flex-grow: 1;">
             <div class="nav-btn active" id="btn-overview"><span class="nav-icon">📊</span> Огляд</div>
             <div class="nav-btn" id="btn-scan"><span class="nav-icon">🔍</span> Оновити базу</div>
-            <div class="nav-btn" id="btn-sync"><span class="nav-icon">☁️</span> Синхронізація</div>
+            <div class="nav-btn" id="btn-sync"><span class="nav-icon">☁️</span> Sync Sheets</div>
+            <div class="nav-btn" id="btn-sync-github"><span class="nav-icon">📱</span><span class="nav-label">Sync GitHub</span><span class="nav-spinner"></span></div>
             <div class="nav-btn" id="btn-open-sheet"><span class="nav-icon">📊</span> Відкрити таблицю</div>
             <div class="nav-btn" id="btn-showcase"><span class="nav-icon">🎬</span> Вітрина</div>
             <div style="margin: 20px 15px 5px; font-size: 0.75em; color: var(--text-dim); font-weight: bold;">Інструменти</div>
@@ -183,8 +184,28 @@ const switchTab = (tab, title) => {
 // Прив'язка кнопок
 document.getElementById('btn-overview').onclick = () => switchTab('overview', 'Огляд');
 document.getElementById('btn-sync').onclick = () => {
-    switchTab('overview', 'Синхронізація');
+    switchTab('overview', 'Sync Sheets');
     SyncToCloud();
+};
+
+const btnSyncGitHub = document.getElementById('btn-sync-github');
+let isGitHubSyncing = false;
+
+function setGitHubSyncBusy(busy) {
+    isGitHubSyncing = busy;
+    if (!btnSyncGitHub) return;
+    btnSyncGitHub.classList.toggle('disabled', busy);
+    btnSyncGitHub.classList.toggle('syncing', busy);
+    const label = btnSyncGitHub.querySelector('.nav-label');
+    if (label) {
+        label.textContent = busy ? 'Синхронізація...' : 'Sync GitHub';
+    }
+}
+
+btnSyncGitHub.onclick = () => {
+    if (isGitHubSyncing) return;
+    switchTab('overview', 'GitHub Pages');
+    SyncToGitHub();
 };
 document.getElementById('btn-open-sheet').onclick = () => {
     OpenSheet();
@@ -283,6 +304,21 @@ EventsOn('scan-progress', (data) => {
 
 EventsOn('log-message', (msg) => {
     logToConsole(msg);
+});
+
+EventsOn('github-sync-started', () => {
+    switchTab('overview', 'GitHub Pages');
+    setGitHubSyncBusy(true);
+    cStatus.innerText = 'GitHub Pages...';
+    logToConsole('📱 Синхронізація мобільної вітрини...');
+});
+
+EventsOn('github-sync-finished', (data) => {
+    setGitHubSyncBusy(false);
+    const success = data && data.success;
+    const message = (data && data.message) ? data.message : (success ? '✅ Готово' : '❌ Помилка синхронізації');
+    logToConsole(message, success ? 'log-success' : 'log-warn');
+    cStatus.innerText = success ? 'Готово' : 'Помилка';
 });
 
 EventsOn('scan-finished', (msg) => {

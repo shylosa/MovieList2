@@ -58,6 +58,10 @@ export function SyncToCloud() {
   return window['go']['main']['App']['SyncToCloud']();
 }
 
+export function SyncToGitHub() {
+  return window['go']['main']['App']['SyncToGitHub']();
+}
+
 export function UpdateMovie(arg1, arg2) {
   return window['go']['main']['App']['UpdateMovie'](arg1, arg2);
 }

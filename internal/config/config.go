@@ -77,7 +77,7 @@ func Load() *Config {
 		GeminiModels:       modelsList,
 		TMDBAPIKey:         getEnvOrDefault("TMDB_API_KEY", ""),
 		DBPath:             getEnvOrDefault("DB_PATH", "movies.db"),
-		HTMLPath:           getEnvOrDefault("HTML_PATH", "index.html"),
+		HTMLPath:           getEnvOrDefault("HTML_PATH", "local_index.html"),
 		PostersDir:         getEnvOrDefault("POSTERS_DIR", "posters"),
 		GoogleSheetURL:     getEnvOrDefault("GOOGLE_SHEET_URL", ""),
 		SheetWorksheetName: getEnvOrDefault("GOOGLE_SHEET_WORKSHEET_NAME", "base"),

@@ -1,6 +1,7 @@
 build/bin/
 movielist-app.exe
 
+local_index.html
 movies.db
 movies.db-journal
 posters/
@@ -12,7 +13,7 @@ frontend/dist/
 
 credentials.json
 .env
-index.html
+*.env
 movies.db-shm
 movies.db-wal
 .vscode/

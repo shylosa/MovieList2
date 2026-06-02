@@ -22,6 +22,17 @@ Tech stack: Go 1.26+, Wails v2, SQLite, TMDB API, Google Gemini (`google.golang.
 * `internal/utils/` — Logging/system utilities
 * `internal/web/` — Static showcase generator
 
+### Showcase & GitHub Pages
+
+| File | Role |
+|------|------|
+| `local_index.html` | Local PC showcase (`HTML_PATH` default); posters from `posters/` (`LocalPosterPath`). Gitignored. |
+| `index.html` | Mobile showcase for GitHub Pages; TMDB CDN posters (`PosterURL` when `web.Generate(..., isMobile: true)`). Committed via `SyncToGitHub` only. |
+
+* **Deploy trigger:** `SyncToGitHub()` from UI only — no background sync.
+* **Git:** System `git` via `os/exec`; no tokens in code. `git rev-parse --show-toplevel` sets `cmd.Dir` and `index.html` output path. `git push origin main` deploys site root on `main`.
+* **`git commit` exit code:** Non-zero when there is nothing to commit is **not** treated as failure (showcase unchanged); `git push` still runs.
+
 ### Recognition Pipeline
 **Strict execution order:**
 1. Filename parsing
@@ -110,9 +121,9 @@ Runs only after failed direct search. Digraphs must be processed before single-c
 ## Stable Interfaces & Public API
 
 **Do not rename without explicit migration/update:**
-* Wails events: `scan-started`, `scan-progress`, `scan-finished`, `log-message`.
+* Wails events: `scan-started`, `scan-progress`, `scan-finished`, `log-message`, `github-sync-started`, `github-sync-finished`.
 * HTML element IDs: `id="noResults"`, `id="filteredCount"`, `id="filteredNum"`.
-* Public methods: `RunScan()`, `StopScan()`, `FixSelected()`, `GetMovies()`, `UpdateMovie()`, `SyncToCloud()`, etc.
+* Public methods: `RunScan()`, `StopScan()`, `FixSelected()`, `GetMovies()`, `UpdateMovie()`, `SyncToCloud()`, `SyncToGitHub()`, etc.
 
 ---
 
@@ -132,7 +143,7 @@ TMDB_API_KEY=
 MEDIA_FOLDER_PATH=
 EXCLUDE_FOLDERS=
 DB_PATH=movies.db
-HTML_PATH=index.html
+HTML_PATH=local_index.html
 POSTERS_DIR=posters
 ```
 
@@ -170,6 +181,15 @@ POSTERS_DIR=posters
 | `internal/ai/gemini.go` | `buildGrokRecognitionPrompt` | Delete the obsolete function entirely. |
 | `internal/tmdb/client.go` | `doRequestWithRetry` | Replace unreachable return nil after loop with explicit error return. |
 | `internal/ai/gemini.go` | `TranslateBulk` | Ignore json.Marshal error with safe-to-ignore comment. |
+| `internal/config/config.go` | `Load` | Default `HTML_PATH` changed to `local_index.html` (local PC showcase); `index.html` reserved for mobile GitHub Pages sync. |
+| `.gitignore` | — | Ignore `local_index.html`; remove `index.html` from ignore so mobile showcase can be committed; add `*.env`. |
+| `internal/web/generator.go` | `Generate` | Added `isMobile bool`: TMDB `PosterURL` for mobile, `filepath.ToSlash` only for local posters. |
+| `app.go` | `finalizeScan`, `OpenShowcase` | `web.Generate(..., false)` for local PC showcase. |
+| `app.go` | `SyncToGitHub` | On-demand mobile showcase: `index.html` + `web.Generate(..., true)`; events `github-sync-started` / `github-sync-finished`; `isGitHubSyncing` double-click guard. |
+| `app.go` | `deployToGitHubPages` | `git add -f index.html`, commit (ignore empty), `git push origin main` via `os/exec` with explicit `cmd.Dir`. |
+| `frontend/src/main.js` | `btn-sync-github` | Button «Sync GitHub»; `github-sync-started` / `github-sync-finished` disable + spinner; result in console. |
+| `AGENTS.md` | Showcase & GitHub Pages | Documented `local_index.html` vs `index.html` and ignored `git commit` exit on empty tree. |
+| `app.go` | `gitRepoRoot` | Resolve repo root via `git rev-parse --show-toplevel` for `index.html` generation and deploy `cmd.Dir`. |
 
 
 
