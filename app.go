@@ -514,7 +514,7 @@ func (a *App) RunScan() {
 				if stoppedByUser {
 					msg = "Сканування перервано користувачем"
 				}
-				a.finalizeScan(ctx, msg)
+				a.finalizeScan(a.ctx, msg)
 			}
 		}()
 
@@ -597,7 +597,7 @@ func (a *App) StopScan() {
 
 func (a *App) runTMDBScan(ctx context.Context, paths []string) <-chan scanResult {
 	totalFiles := len(paths)
-	resultsChan := make(chan scanResult, 10)
+	resultsChan := make(chan scanResult, len(paths))
 	sem := make(chan struct{}, 10) // Ліміт у 10 одночасних запитів до TMDB (rate-limit safe)
 	var wg sync.WaitGroup
 	var processedCount int32
@@ -657,10 +657,14 @@ func (a *App) runTMDBScan(ctx context.Context, paths []string) <-chan scanResult
 				a.logFront(fmt.Sprintf("⚠️ TMDB помилка для '%s': %v", fname, err))
 			}
 
+			result := scanResult{path: path, fname: fname, info: info, needsGemini: true}
 			if info != nil && info.TMDBID > 0 {
-				resultsChan <- scanResult{path: path, fname: fname, info: info, needsGemini: false}
-			} else {
-				resultsChan <- scanResult{path: path, fname: fname, info: nil, needsGemini: true}
+				result.needsGemini = false
+			}
+
+			select {
+			case resultsChan <- result:
+			case <-ctx.Done():
 			}
 		}()
 	}
@@ -1412,6 +1416,23 @@ func (a *App) processTranslationQueue(ctx context.Context, filenames []string, a
 			itemsToTranslate = append(itemsToTranslate, item)
 			movieMap[fname] = movie
 		}
+	}
+
+	// Diagnostic: count how many movies in the DB appear to need translation
+	// but were not added to the translation payload (for later inspection).
+	needCount := 0
+	for _, m := range movies {
+		if m.TitleUA == "" || needsTranslation(m.TitleUA) || m.Plot == "" || needsTranslation(m.Plot) {
+			needCount++
+		}
+	}
+	skipped := needCount - len(itemsToTranslate)
+	if skipped > 0 {
+		slog.Warn("translation_candidates_skipped",
+			slog.Int("need_count", needCount),
+			slog.Int("queued", len(itemsToTranslate)),
+			slog.Int("skipped", skipped))
+		a.logFront(fmt.Sprintf("⚠️ Пропущено %d файлів, які, можливо, потребують перекладу (див. logs).", skipped))
 	}
 
 	if len(itemsToTranslate) == 0 {

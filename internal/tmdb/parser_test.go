@@ -67,6 +67,29 @@ func TestParseFilename(t *testing.T) {
 				ParentDir:    "tt1375666",
 			},
 		},
+		// Cases for naked language counters (BUG-03)
+		{
+			name:  "3xRus without brackets should be removed",
+			input: "D:/Movies/Fracture.2007.1080p.BluRay.3xRus.Eng.HDCLUB.720.mp4",
+			expected: ParsedFile{
+				OriginalName: "Fracture.2007.1080p.BluRay.3xRus.Eng.HDCLUB.720",
+				CleanTitle:   "Fracture",
+				Year:         2007,
+				MediaType:    MediaTypeMovie,
+				TitleLang:    TitleLangLatin,
+			},
+		},
+		{
+			name:  "2xUkr without brackets should be removed",
+			input: "D:/Movies/Film.Title.2xUkr.Eng.2021.mkv",
+			expected: ParsedFile{
+				OriginalName: "Film.Title.2xUkr.Eng.2021",
+				CleanTitle:   "Film Title",
+				Year:         2021,
+				MediaType:    MediaTypeMovie,
+				TitleLang:    TitleLangLatin,
+			},
+		},
 	}
 
 	for _, tt := range tests {

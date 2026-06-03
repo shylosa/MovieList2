@@ -65,6 +65,35 @@ func TestScoreResult_DiamondMatch(t *testing.T) {
 	}
 }
 
+func TestBuildAttemptsSkipsParentFolderAtScanRoot(t *testing.T) {
+	root := t.TempDir()
+	file := filepath.Join(root, "Gluck.1925.mkv")
+	parsed := ParseFilename(file)
+
+	attempts := buildAttempts(parsed, file, root)
+
+	for _, attempt := range attempts {
+		if attempt.label == "Папка" {
+			t.Fatalf("root folder fallback should be skipped, got query %q", attempt.query)
+		}
+	}
+}
+
+func TestBuildAttemptsKeepsParentFolderForNestedRelease(t *testing.T) {
+	root := t.TempDir()
+	file := filepath.Join(root, "The Matrix 1999", "sample.mkv")
+	parsed := ParseFilename(file)
+
+	attempts := buildAttempts(parsed, file, root)
+
+	for _, attempt := range attempts {
+		if attempt.label == "Папка" {
+			return
+		}
+	}
+	t.Fatal("nested release folder fallback should be present")
+}
+
 func TestDownloadPosterPreservesFlattenedPathPrefix(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte("poster"))

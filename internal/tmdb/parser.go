@@ -20,6 +20,9 @@ var (
 	// reLangTag — знімає мовні теги виду [2xUkr,Eng] або [UKR_ENG] перед go-ptn.
 	// Без цього go-ptn плутає "2x" з лічильником сезону/епізоду і ставить IsMovie=false.
 	reLangTag = regexp.MustCompile(`(?i)\[\d*x?(?:Ukr|Eng|Rus|UA|EN|RU|UKR|ENG|RUS|DUB|VO|MVO|LF|MULTI)[^\]]*\]`)
+	// reNakedLang — знімає мовні лічильники без дужок (напр. 3xRus, 2xUkr) перед go-ptn.
+	// Без цього go-ptn бачить "3x" як ознаку серіалу і ставить IsMovie=false.
+	reNakedLang = regexp.MustCompile(`(?i)\b\d+x(?:Rus|Ukr|Eng|UA|EN|RU)\b`)
 )
 
 // reFrontEpisode — детектор SххEхх на ПОЧАТКУ рядка (до назви фільму), що ламає go-ptn.
@@ -73,8 +76,9 @@ func ParseFilename(fullPath string) ParsedFile {
 	isSeasonOnly := reSeason.MatchString(name)
 
 	// 🛡️ ПЕРЕДОБРОБКА: Знімаємо мовні теги типу [2xUkr,Eng] або [UKR_ENG] ДО go-ptn.
-	// Без цього go-ptn бачить "2x" як ознаку серіалу і ставить IsMovie=false.
+	// Також знімаємо "голі" лічильники мов виду 3xRus, 2xUkr, бо go-ptn бачить "3x" як маркер серіалу.
 	nameForPTN := reLangTag.ReplaceAllString(name, "")
+	nameForPTN = reNakedLang.ReplaceAllString(nameForPTN, "")
 	nameForPTN = strings.TrimSpace(nameForPTN)
 
 	info, err := ptn.Parse(nameForPTN + ext)

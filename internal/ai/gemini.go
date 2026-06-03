@@ -67,8 +67,9 @@ type RecognizedTitle struct {
 }
 
 type Client struct {
-	cfg     *config.Config
-	limiter *rate.Limiter
+	cfg         *config.Config
+	limiter     *rate.Limiter
+	grokLimiter *rate.Limiter
 	// 🟢 ДОДАНО: Динамічний каскад та м'ютекс для його захисту
 	activeModels   []string
 	modelsMu       sync.RWMutex
@@ -82,7 +83,9 @@ func NewClient(cfg *config.Config) *Client {
 	return &Client{
 		cfg: cfg,
 		// rate.Every(4 * time.Second) = 15 RPM. Burst = 1.
-		limiter:        rate.NewLimiter(rate.Every(4*time.Second), 1),
+		limiter: rate.NewLimiter(rate.Every(4*time.Second), 1),
+		// Grok: rate.Every(2 * time.Second) = 30s per minute, burst=1 (conservative)
+		grokLimiter:    rate.NewLimiter(rate.Every(2*time.Second), 1),
 		grokHTTPClient: &http.Client{Timeout: 60 * time.Second},
 	}
 }
@@ -115,9 +118,10 @@ func (c *Client) getModels() []string {
 	var filtered []string
 	for _, m := range candidates {
 		mLower := strings.ToLower(m)
-		// Exclude embedding, audio, robotics, computer-use
+		// Exclude embedding, audio, tts, robotics, computer-use
 		if strings.Contains(mLower, "embedding") ||
 			strings.Contains(mLower, "audio") ||
+			strings.Contains(mLower, "tts") ||
 			strings.Contains(mLower, "robotics") ||
 			strings.Contains(mLower, "computer-use") {
 			continue

@@ -134,7 +134,7 @@ func (db *DB) InitSchema(ctx context.Context) error {
 }
 
 func (db *DB) GetAllMovies(ctx context.Context) ([]Movie, error) {
-	query := `SELECT filename, COALESCE(tmdb_id, 0), title_ua, title_en, year, genres, "cast", plot, poster_url, local_poster_path, COALESCE(media_type, '') FROM movies ORDER BY rowid ASC`
+	query := `SELECT rowid, filename, COALESCE(tmdb_id, 0), title_ua, title_en, year, genres, "cast", plot, poster_url, local_poster_path, COALESCE(media_type, '') FROM movies ORDER BY rowid ASC`
 	rows, err := db.db.QueryContext(ctx, query)
 	if err != nil {
 		return nil, fmt.Errorf("GetAllMovies query failed: %w", err)
@@ -145,7 +145,7 @@ func (db *DB) GetAllMovies(ctx context.Context) ([]Movie, error) {
 	for rows.Next() {
 		var m Movie
 		err := rows.Scan(
-			&m.Filename, &m.TmdbID, &m.TitleUA, &m.TitleEN, &m.Year,
+			&m.ID, &m.Filename, &m.TmdbID, &m.TitleUA, &m.TitleEN, &m.Year,
 			&m.Genres, &m.Cast, &m.Plot, &m.PosterURL, &m.LocalPosterPath, &m.MediaType,
 		)
 		if err != nil {
@@ -264,12 +264,12 @@ func (db *DB) SaveMoviesBatch(ctx context.Context, movies []Movie) error {
 }
 
 func (db *DB) GetMovieByFilename(ctx context.Context, filename string) (*Movie, error) {
-	query := `SELECT filename, COALESCE(tmdb_id, 0), title_ua, title_en, year, genres, "cast", plot, poster_url, local_poster_path, COALESCE(media_type, '')
+	query := `SELECT rowid, filename, COALESCE(tmdb_id, 0), title_ua, title_en, year, genres, "cast", plot, poster_url, local_poster_path, COALESCE(media_type, '')
 			  FROM movies WHERE filename = ?`
 	row := db.db.QueryRowContext(ctx, query, filename)
 	var m Movie
 	err := row.Scan(
-		&m.Filename, &m.TmdbID, &m.TitleUA, &m.TitleEN, &m.Year,
+		&m.ID, &m.Filename, &m.TmdbID, &m.TitleUA, &m.TitleEN, &m.Year,
 		&m.Genres, &m.Cast, &m.Plot, &m.PosterURL, &m.LocalPosterPath, &m.MediaType,
 	)
 	if err != nil {
@@ -451,7 +451,7 @@ func (db *DB) GetMoviesByFilenames(ctx context.Context, filenames []string) (map
 		}
 
 		query := fmt.Sprintf(
-			`SELECT filename, COALESCE(tmdb_id, 0), title_ua, title_en, year, genres, "cast", plot, poster_url, local_poster_path, COALESCE(media_type, '')
+			`SELECT rowid, filename, COALESCE(tmdb_id, 0), title_ua, title_en, year, genres, "cast", plot, poster_url, local_poster_path, COALESCE(media_type, '')
 			 FROM movies WHERE filename IN (%s)`,
 			strings.Join(placeholders, ","))
 
@@ -465,7 +465,7 @@ func (db *DB) GetMoviesByFilenames(ctx context.Context, filenames []string) (map
 			for rows.Next() {
 				var m Movie
 				err := rows.Scan(
-					&m.Filename, &m.TmdbID, &m.TitleUA, &m.TitleEN, &m.Year,
+					&m.ID, &m.Filename, &m.TmdbID, &m.TitleUA, &m.TitleEN, &m.Year,
 					&m.Genres, &m.Cast, &m.Plot, &m.PosterURL, &m.LocalPosterPath, &m.MediaType,
 				)
 				if err != nil {

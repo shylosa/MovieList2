@@ -41,6 +41,11 @@ type grokResponse struct {
 // callGrok sends a prompt to the Grok API and returns raw content string.
 // The prompt must already instruct the model to respond in JSON.
 func (c *Client) callGrok(ctx context.Context, prompt string) (string, error) {
+	if c.grokLimiter != nil {
+		if err := c.grokLimiter.Wait(ctx); err != nil {
+			return "", err
+		}
+	}
 	if c.cfg.GrokAPIKey == "" {
 		return "", fmt.Errorf("grok: API key not configured")
 	}

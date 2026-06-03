@@ -67,6 +67,7 @@ type Client struct {
 	transport   *http.Transport
 	apiKey      string
 	postersDir  string
+	mediaRoot   string
 	rateLimiter *rate.Limiter
 
 	// altTitlesCache — кеш для аліасів, щоб не смикати API для однакових ID
@@ -96,6 +97,7 @@ func NewClient(cfg *config.Config) *Client {
 		transport:  transport,
 		apiKey:     cfg.TMDBAPIKey,
 		postersDir: cfg.PostersDir,
+		mediaRoot:  cfg.MediaFolderPath,
 		// 🟡 ХІРУРГІЧНЕ ВТРУЧАННЯ: 20 req/s (1 запит кожні 50мс), burst 5.
 		// Ідеальний баланс між швидкістю і безпекою від 429 помилок.
 		rateLimiter: rate.NewLimiter(rate.Every(50*time.Millisecond), 5),
@@ -339,10 +341,7 @@ func (c *Client) pipelineCyrillic(ctx context.Context, parsed ParsedFile, origin
 	return nil, nil
 }
 
-// searchDirectly — пошук без транслітерації (для чистих EN назв після Gemini)
-func (c *Client) searchDirectly(ctx context.Context, parsed ParsedFile, originalFilename string) (*MovieInfo, error) {
-	return c.trySearch(ctx, parsed, originalFilename), nil
-}
+// searchDirectly was removed — runPipeline is used to ensure transliteration paths are exercised.
 
 // trySearch — виконує пошук і жорстко контролює результат
 func (c *Client) trySearch(ctx context.Context, parsed ParsedFile, originalFilename string) *MovieInfo {

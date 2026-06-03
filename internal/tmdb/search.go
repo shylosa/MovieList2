@@ -51,7 +51,7 @@ func (c *Client) SearchWithFallbacks(
 	parsed ParsedFile,
 	originalFilename string,
 ) (*MovieInfo, error) {
-	attempts := buildAttempts(parsed, originalFilename)
+	attempts := buildAttempts(parsed, originalFilename, c.mediaRoot)
 
 	for _, a := range attempts {
 		logger := utils.LoggerWithTrace(ctx).With(slog.String("component", "tmdb_search"))
@@ -84,7 +84,7 @@ type searchAttempt struct {
 }
 
 // buildAttempts формує розумний список спроб пошуку, використовуючи кандидатів
-func buildAttempts(parsed ParsedFile, originalFilename string) []searchAttempt {
+func buildAttempts(parsed ParsedFile, originalFilename, mediaRoot string) []searchAttempt {
 	year := parsed.Year
 	mt := parsed.MediaType
 
@@ -119,9 +119,8 @@ func buildAttempts(parsed ParsedFile, originalFilename string) []searchAttempt {
 
 	// 🟢 Додаємо фоллбек на батьківську папку з низьким пріоритетом.
 	// Пропускаємо якщо ParentDir є коренем медіатеки або не несе інформації.
-	parentBase := filepath.Base(parsed.ParentDir)
 	if parsed.ParentDir != "" && parsed.ParentDir != "." && parsed.ParentDir != "/" &&
-		!isGenericFolderName(parentBase) {
+		!isScanRootParent(originalFilename, mediaRoot) {
 		// Парсимо ім'я папки, щоб дістати рік і чисту назву
 		dirParsed := ParseFilename(parsed.ParentDir)
 		if dirParsed.CleanTitle != parsed.CleanTitle && len(dirParsed.CleanTitle) > 2 {
@@ -135,6 +134,25 @@ func buildAttempts(parsed ParsedFile, originalFilename string) []searchAttempt {
 	}
 
 	return attempts
+}
+
+func isScanRootParent(filename, mediaRoot string) bool {
+	if strings.TrimSpace(filename) == "" || strings.TrimSpace(mediaRoot) == "" {
+		return false
+	}
+
+	filePath := filepath.Clean(filename)
+	rootPath := filepath.Clean(mediaRoot)
+	if !filepath.IsAbs(filePath) {
+		filePath = filepath.Join(rootPath, filePath)
+	}
+
+	parentPath := filepath.Clean(filepath.Dir(filePath))
+	rel, err := filepath.Rel(rootPath, parentPath)
+	if err != nil {
+		return false
+	}
+	return rel == "."
 }
 
 // searchAndFetch виконує один запит до TMDB, ранжує результати,
@@ -657,24 +675,6 @@ func isGoodUkrainian(s string) bool {
 		case 'і', 'І', 'ї', 'Ї', 'є', 'Є', 'ґ', 'Ґ':
 			return true
 		}
-	}
-	return false
-}
-
-// isGenericFolderName повертає true якщо назва папки є "сміттєвою" і не містить
-// назви фільму (наприклад корінь медіатеки "Фильмы", "Movies", "Video" тощо).
-// Використовується для пропуску спроби "Папка" коли файл лежить у корені.
-func isGenericFolderName(name string) bool {
-	lower := strings.ToLower(name)
-	// Точні збіги кореневих директорій медіатек
-	switch lower {
-	case "movies", "movie", "фильмы", "фільми", "video", "videos",
-		"media", "downloads", "torrents", "content":
-		return true
-	}
-	// Якщо папка — диск (C:, D:, etc.)
-	if len(name) <= 3 && strings.ContainsAny(name, ":/\\") {
-		return true
 	}
 	return false
 }

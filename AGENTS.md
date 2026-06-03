@@ -1,6 +1,7 @@
 # AGENTS.md — MovieList App
 
 ## Project Overview
+
 MovieList App — desktop application for cataloging local movie/TV collections.
 
 Tech stack: Go 1.26+, Wails v2, SQLite, TMDB API, Google Gemini (`google.golang.org/genai`).
@@ -11,6 +12,7 @@ Tech stack: Go 1.26+, Wails v2, SQLite, TMDB API, Google Gemini (`google.golang.
 ## Architecture
 
 ### Core Files
+
 * `main.go` — Wails bootstrap, global panic handler
 * `app.go` — Main orchestration layer and Wails API
 * `internal/ai/` — Gemini & Grok integration
@@ -34,7 +36,9 @@ Tech stack: Go 1.26+, Wails v2, SQLite, TMDB API, Google Gemini (`google.golang.
 * **`git commit` exit code:** Non-zero when there is nothing to commit is **not** treated as failure (showcase unchanged); `git push` still runs.
 
 ### Recognition Pipeline
+
 **Strict execution order:**
+
 1. Filename parsing
 2. IMDB ID lookup
 3. Typed TMDB search (movie / tv)
@@ -48,6 +52,7 @@ Tech stack: Go 1.26+, Wails v2, SQLite, TMDB API, Google Gemini (`google.golang.
 11. Translation queue
 
 ### AI Agent Priorities
+
 1. Correct recognition
 2. Deterministic behavior
 3. Cancellation responsiveness
@@ -90,12 +95,15 @@ Tech stack: Go 1.26+, Wails v2, SQLite, TMDB API, Google Gemini (`google.golang.
 ---
 
 ## Transliteration
+
 Runs only after failed direct search. Digraphs must be processed before single-character replacements.
+
 * `Vrag` → `Враг`, `Nochnoj Rejs` → `Ночной Рейс`.
 
 ---
 
 ## SQLite & Storage
+
 * **Primary key:** `filename` (Uses relative media path as identifier).
 * **AI Cache (`ai_resolutions`):** Stores L2 Gemini recognition cache.
 * **Pragmas required:** `journal_mode=WAL`, `synchronous=NORMAL`, `busy_timeout=5000`, `foreign_keys=ON`.
@@ -106,12 +114,14 @@ Runs only after failed direct search. Digraphs must be processed before single-c
 ## Performance & Concurrency Rules
 
 **Always:**
+
 * Use `strings.Builder` for large string generation.
 * Use package-level regexp variables and `strings.NewReplacer`.
 * Use chunking for large SQL `IN` queries (e.g., `filenameChunkSize = 500`).
 * Use structured logging (`slog`).
 
 **Never:**
+
 * Compile regexp inside loops.
 * Mutate shared maps (`movieMap`) from goroutines after initialization.
 * Spam Wails IPC progress events.
@@ -121,6 +131,7 @@ Runs only after failed direct search. Digraphs must be processed before single-c
 ## Stable Interfaces & Public API
 
 **Do not rename without explicit migration/update:**
+
 * Wails events: `scan-started`, `scan-progress`, `scan-finished`, `log-message`, `github-sync-started`, `github-sync-finished`.
 * HTML element IDs: `id="noResults"`, `id="filteredCount"`, `id="filteredNum"`.
 * Public methods: `RunScan()`, `StopScan()`, `FixSelected()`, `GetMovies()`, `UpdateMovie()`, `SyncToCloud()`, `SyncToGitHub()`, etc.
@@ -128,12 +139,14 @@ Runs only after failed direct search. Digraphs must be processed before single-c
 ---
 
 ## Encoding & Formatting
+
 * **Required:** UTF-8 without BOM, LF (Unix) line endings, `gofmt` formatting, tabs for Go indentation.
 * **Never commit:** Mixed encodings, malformed UTF-8, CRLF endings.
 
 ---
 
 ## Environment Configuration
+
 ```env
 APP_VERSION=2.0
 GEMINI_API_KEY=
@@ -153,6 +166,14 @@ POSTERS_DIR=posters
 
 | File | Method | Change |
 |------|--------|--------|
+| `internal/tmdb/parser.go` | `ParseFilename` | Added `reNakedLang` regex to strip naked language counters (e.g., 3xRus, 2xUkr) before `go-ptn`; updated `parser_test.go` with new cases. |
+| `internal/ai/gemini.go` | `Client` | Added `grokLimiter *rate.Limiter` and initialized it in `NewClient()` to throttle Grok fallback calls. |
+| `internal/ai/grok.go` | `callGrok` | Wait on `c.grokLimiter` before making the HTTP request to Grok, preventing bursty fallback calls. |
+| `app.go` | `processTranslationQueue` | Added diagnostic logging for translation candidates that appear to need translation but were not queued, to aid debugging of 429/skip cases. |
+| `internal/tmdb/client.go` | `searchDirectly` | Removed unused `searchDirectly` helper — `runPipeline` is the canonical path. |
+| `internal/storage/storage.go` | `GetAllMovies, GetMoviesByFilenames, GetMovieByFilename` | Populate `Movie.ID` from SQLite `rowid` to provide stable numeric IDs for APIs that require them. |
+| `go.mod` | `module` | Downgraded `go` directive from `1.26.2` to `1.23` to match available Go toolchains and avoid non-existent version. |
+| `go.mod` | `module` | Restored `go` directive to `1.26.2` per user request. |
 | `internal/storage/storage.go` | `PatchMovie`, `SaveMovie`, `SaveMoviesBatch` | Replaced `INSERT OR REPLACE` with merge upsert (`movieUpsertQuery`); `PatchMovie` updates only non-empty fields. |
 | `app.go` | `processGeminiQueue` | On batch error or empty recognition: log only; no `SaveMoviesBatch` with filename-only structs. |
 | `internal/storage/storage.go` | `SaveMoviesBatch` | Any failed `Exec` aborts the batch; `defer tx.Rollback()` on error paths. |
@@ -161,6 +182,7 @@ POSTERS_DIR=posters
 | `app.go` | `OpenShowcase`, `SyncToCloud` | Already abort on `GetAllMovies` failure (log + `return`). |
 | `app.go` | `RunScan` | Scan body runs in a goroutine; `isScanning` and lifecycle events stay inside it. |
 | `app.go` | `RunScan`, `finalizeScan` | Single `scan-finished` emit via `finalizeScan` (`scanFinished` flag prevents double emit). |
+| `app.go` | `RunScan` | Deferred scan finalization now calls `finalizeScan(a.ctx, msg)` so post-scan showcase generation does not use the canceled scan context. |
 | `app.go` | `UpdateMovie`, `updateMovie` | Public `UpdateMovie(filename, hint)` for Wails; `updateMovie(ctx, ...)` for internal callers. |
 | `frontend/wailsjs` | `UpdateMovie` | Regenerated via `wails generate module` (no `context.Context` arg). |
 | `app.go` | `logFront` | `log_front_fallback` only when `a.ctx == nil` or `EventsEmit` panics. |
@@ -169,12 +191,14 @@ POSTERS_DIR=posters
 | `main.go` | `main` | Panic recover logs `debug.Stack()` (already present). |
 | `internal/tmdb/client.go`, `internal/ai/grok.go` | HTTP helpers | `defer resp.Body.Close()` after successful `Do` (already present). |
 | `internal/config/config.go`, `internal/ai/gemini.go` | `Load`, `getGenaiClient` | `GEMINI_API_KEY` optional at startup; validated before Gemini calls. |
+| `internal/ai/gemini.go`, `internal/ai/gemini_test.go` | `getModels`, `TestGetModelsFiltersTTS` | Gemini model filtering now excludes TTS models before text recognition and verifies only supported text models remain. |
 | `internal/ai/gemini.go` | `buildPrompt` | Shorter prompt (3 translit examples); handles `json.Marshal` errors. |
 | `app.go`, `internal/ai/gemini.go` | `processTranslationQueue`, `TranslateBulk` | Translation batch size 5; plot omitted when not needed; shorter translate prompt; add instruction to use `original_title` as context. |
 | `internal/ai/gemini.go` | `buildGrokRecognitionPrompt` | Compact Grok recognition fallback prompt. |
 | `app.go` | `processScanResults`, `movieInfoNeedsTranslation` | Translation queue only for titles/plots that need localization; add context cancellation check and channel draining. |
 | `internal/tmdb/search.go` | `searchAndFetch` | Unknown type: sequential `/search/movie` then `/search/tv` (no `/multi`). |
 | `app.go` | `runTMDBScan` | Results channel buffer size 10 (matches semaphore pool); make sem write context-aware and handle cancel. |
+| `app.go` | `runTMDBScan` | Wrap `wg.Wait()` and `close(resultsChan)` in a background goroutine so result consumption can start immediately and workers cannot deadlock on the small channel buffer. |
 | `internal/ai/gemini.go` | `buildPrompt` | Change signature to `(string, error)` and restore detailed prompt template. |
 | `internal/ai/gemini.go` | `RecognizeBulk` | Handle error returned by `buildPrompt`. |
 | `internal/ai/gemini.go` | `requestWithRetry` | Remove `contexts` parameter and use `prompt` directly for Grok. |
@@ -190,7 +214,26 @@ POSTERS_DIR=posters
 | `frontend/src/main.js` | `btn-sync-github` | Button «Sync GitHub»; `github-sync-started` / `github-sync-finished` disable + spinner; result in console. |
 | `AGENTS.md` | Showcase & GitHub Pages | Documented `local_index.html` vs `index.html` and ignored `git commit` exit on empty tree. |
 | `app.go` | `gitRepoRoot` | Resolve repo root via `git rev-parse --show-toplevel` for `index.html` generation and deploy `cmd.Dir`. |
+| `internal/web/generator.go` | `htmlLayout` | Mobile showcase step 1: `@media (max-width: 600px)` global padding `12px 16px` + `box-sizing: border-box` on `body` and `.container`. |
+| `internal/web/generator.go` | `htmlLayout` | Mobile showcase step 2: `.filters-row` wrapper; `@media (max-width: 600px)` horizontal flex row for search/sort/reset (desktop `display: contents`). |
+| `internal/web/generator.go` | `htmlLayout` | Mobile step 3: filter widths 60/25/15, compact `btn-reset` icon, placeholders/`title` on controls. |
+| `internal/web/generator.go` | `htmlLayout` | Mobile step 4: `normalizeSearchValue`/`initSearchInput`; fix literal `null` from localStorage; `card.style.display` restores CSS grid. |
+| `internal/web/generator.go` | `htmlLayout` | Mobile steps 5–7: `@media (max-width: 600px)` two-column `.card` grid, poster max 120px, `.info` padding, plot typography. |
+| `internal/web/generator.go` | `htmlLayout` | Mobile filters step 1: `#viewToggle` inside `.filters-row`; one row (50/25/12.5/12.5), `height: 38px`, icon-only toggle on mobile (`.btn-view-label` hidden). |
+| `internal/web/generator.go` | `htmlLayout` | Mobile grid/list: `@media (max-width: 600px)` `.grid-mode` 2-column container; vertical cards (poster + title + year); `.list-mode` row layout with plot `line-clamp: 3`. |
+| `internal/web/generator.go` | `htmlLayout` | Mobile list-mode step 1: refactored CSS layout under `@media (max-width: 600px)` using grid + `display: contents` to place details/actors next to poster and wrap plot under poster (100% width, 12px margin, line-height 1.45, 4 lines clamp). |
+| `internal/web/generator.go` | `htmlLayout` | Step 2: Added autonomous SVG data-URI favicon inside head tag. |
+| `internal/web/generator.go` | `htmlLayout` | Step 3: Limited movie titles in mobile grid-mode to exactly 2 lines (`-webkit-line-clamp: 2` with height `2.5em`). |
+| `internal/web/generator.go` | `htmlLayout`, `appIconBase64` | Final mobile optimization step 1: restored original PNG app favicon as autonomous Base64 `data:image/png` from `build/appicon.png`. |
+| `internal/web/generator.go` | `htmlLayout` | Final mobile optimization step 2: compact mobile sort select to a 38px `⇅` icon button and let search fill the remaining filter row width. |
+| `internal/web/generator.go` | `htmlLayout` | Final mobile optimization step 3: mobile list cards expand freely (`height:auto`, `max-height:none`), plot spacing reduced to 6px, plot clamp raised to 5 lines. |
+| `internal/web/generator.go` | `htmlLayout` | Final mobile optimization step 4: mobile header title scrolls normally with `padding-top:16px`; only `.filters-row` is sticky at `top:0` with translucent blur background. |
+| `internal/web/generator.go` | `htmlLayout` | Mobile sort select checklist step 1: dark mobile `.sort-select` with reset appearance and dark `option` colors. |
+| `internal/web/generator.go` | `htmlLayout` | Desktop list width checklist step 2: `.movie-list.list-mode` capped at `max-width: 1200px` with centered `margin: 0 auto`. |
+| `CHECKLIST.md` | — | Marked mobile select styling, dark options, desktop list width, and final build validation complete. |
 
+| `internal/tmdb/search.go`, `internal/tmdb/client.go` | `SearchWithFallbacks`, `buildAttempts` | Folder fallback `label: "Папка"` now skips the media scan root by comparing the full parent path to `MEDIA_FOLDER_PATH`; removed generic folder-name dictionary. |
 
+**CHECKLIST complete (2026-06-02):** Restructured mobile list-mode layout, added SVG data-URI favicon, limited mobile grid-mode title to 2 lines, and verified all compilation steps pass.
 
-**CHECKLIST complete (2026-06-01):** Replaced unreachable return nil in doRequestWithRetry, ignored JSON marshal error in TranslateBulk with comment, documented Go 1.26.2 toolchain version note, and verified all build/vet/fmt/test steps pass.
+**Final verification (2026-06-03):** `go build ./...`, `go vet ./...`, `gofmt -l .` (no diffs after formatting), and `go test ./... -count=1` all passed.

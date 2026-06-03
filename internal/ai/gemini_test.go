@@ -18,6 +18,21 @@ type mockTransport struct {
 	serverURL string
 }
 
+func TestGetModelsFiltersTTS(t *testing.T) {
+	client := NewClient(&config.Config{})
+	client.SetModels([]string{
+		"gemini-2.5-flash-preview-tts",
+		"gemini-2.5-pro-preview-tts",
+		"gemini-2.5-flash",
+		"gemini-embedding-exp",
+	})
+
+	models := client.getModels()
+	if len(models) != 1 || models[0] != "gemini-2.5-flash" {
+		t.Fatalf("expected only gemini-2.5-flash, got %#v", models)
+	}
+}
+
 func (m *mockTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	// safe to ignore: tests pass a valid httptest server URL.
 	clonedURL, _ := url.Parse(m.serverURL)
