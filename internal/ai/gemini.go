@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"movielist-app/internal/config"
@@ -18,6 +19,19 @@ import (
 	"golang.org/x/time/rate"
 	"google.golang.org/genai"
 )
+
+var geminiQuotaLocked atomic.Bool
+
+func isQuotaExhaustedError(err error) bool {
+	if err == nil {
+		return false
+	}
+	errStr := strings.ToLower(err.Error())
+	return strings.Contains(errStr, "429") ||
+		strings.Contains(errStr, "resource_exhausted") ||
+		strings.Contains(errStr, "quota exceeded") ||
+		strings.Contains(errStr, "generate_content_free_tier")
+}
 
 // FileRecognitionContext — структурований контекст файлу для промпту Gemini.
 type FileRecognitionContext struct {
@@ -191,8 +205,12 @@ func (c *Client) RecognizeBulk(ctx context.Context, contexts []FileRecognitionCo
 }
 
 func (c *Client) requestWithRetry(ctx context.Context, prompt string) ([]RecognizedTitle, error) {
+	if geminiQuotaLocked.Load() {
+		utils.LoggerWithTrace(ctx).Warn("gemini_quota_lock_skip")
+		return nil, fmt.Errorf("gemini quota lock is active")
+	}
 	var lastErr error
-	models := c.getModels() // 🟢 ВИПРАВЛЕННЯ: Беремо актуальний каскад
+	models := c.getModels() // 🟢: Беремо актуальний каскад
 
 	// Йдемо по списку моделей (каскад)
 	for i, modelName := range models {
@@ -270,6 +288,11 @@ func (c *Client) makeRequest(ctx context.Context, prompt, modelName string) ([]R
 
 	resp, err := client.Models.GenerateContent(ctx, modelName, genai.Text(prompt), config)
 	if err != nil {
+		if isQuotaExhaustedError(err) {
+			if geminiQuotaLocked.CompareAndSwap(false, true) {
+				utils.LoggerWithTrace(ctx).Warn("gemini_quota_lock_enabled", slog.Any("error", err))
+			}
+		}
 		return nil, fmt.Errorf("помилка API Gemini: %w", err)
 	}
 
@@ -376,9 +399,12 @@ func (c *Client) TranslateBulk(ctx context.Context, items []BulkTranslateItem) (
 		return nil, nil
 	}
 
-	client, err := c.getGenaiClient(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("помилка клієнта genai: %w", err)
+	// If Gemini quota is locked but Grok is configured, fall back to Grok.
+	if geminiQuotaLocked.Load() {
+		utils.LoggerWithTrace(ctx).Warn("gemini_quota_lock_skip")
+		if c.cfg.GrokAPIKey == "" {
+			return nil, fmt.Errorf("gemini quota lock is active")
+		}
 	}
 
 	// safe to ignore: BulkTranslateItem contains only JSON-marshalable primitive fields.
@@ -389,34 +415,49 @@ func (c *Client) TranslateBulk(ctx context.Context, items []BulkTranslateItem) (
 Return ONLY a raw JSON array.`, string(inputJSON))
 
 	var lastErr error
-	for _, modelName := range c.getModels() {
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
+	if !geminiQuotaLocked.Load() {
+		client, err := c.getGenaiClient(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("помилка клієнта genai: %w", err)
 		}
 
-		if err := c.waitForRateLimit(ctx); err != nil {
-			return nil, err
-		}
-
-		config := &genai.GenerateContentConfig{
-			Temperature:      genai.Ptr[float32](0.1),
-			ResponseMIMEType: "application/json",
-			ResponseSchema:   buildBulkTranslateSchema(),
-		}
-
-		resp, err := client.Models.GenerateContent(ctx, modelName, genai.Text(prompt), config)
-		if err == nil && len(resp.Candidates) > 0 {
-			var results []BulkTranslateItem
-			unmarshalErr := json.Unmarshal([]byte(resp.Text()), &results)
-			if unmarshalErr == nil {
-				return results, nil
+		for _, modelName := range c.getModels() {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
 			}
-			lastErr = fmt.Errorf("parse error on %s: %w", modelName, unmarshalErr)
-			continue
-		}
 
-		lastErr = err
-		utils.LoggerWithTrace(ctx).Warn("bulk_translate_failed", slog.String("model", modelName), slog.Any("error", err))
+			if err := c.waitForRateLimit(ctx); err != nil {
+				return nil, err
+			}
+
+			config := &genai.GenerateContentConfig{
+				Temperature:      genai.Ptr[float32](0.1),
+				ResponseMIMEType: "application/json",
+				ResponseSchema:   buildBulkTranslateSchema(),
+			}
+
+			resp, err := client.Models.GenerateContent(ctx, modelName, genai.Text(prompt), config)
+			if err != nil {
+				if isQuotaExhaustedError(err) {
+					if geminiQuotaLocked.CompareAndSwap(false, true) {
+						utils.LoggerWithTrace(ctx).Warn("gemini_quota_lock_enabled", slog.Any("error", err))
+					}
+				}
+				lastErr = err
+				utils.LoggerWithTrace(ctx).Warn("bulk_translate_failed", slog.String("model", modelName), slog.Any("error", err))
+				continue
+			}
+
+			if len(resp.Candidates) > 0 {
+				var results []BulkTranslateItem
+				unmarshalErr := json.Unmarshal([]byte(resp.Text()), &results)
+				if unmarshalErr == nil {
+					return results, nil
+				}
+				lastErr = fmt.Errorf("parse error on %s: %w", modelName, unmarshalErr)
+				continue
+			}
+		}
 	}
 
 	if ctx.Err() != nil {
@@ -441,5 +482,10 @@ Return ONLY a raw JSON array.`, string(inputJSON))
 			lastErr = grokErr
 		}
 	}
+
+	if geminiQuotaLocked.Load() && c.cfg.GrokAPIKey == "" {
+		return nil, fmt.Errorf("gemini quota lock is active")
+	}
+
 	return nil, fmt.Errorf("all AI models unavailable for translation (incl. Grok): %w", lastErr)
 }

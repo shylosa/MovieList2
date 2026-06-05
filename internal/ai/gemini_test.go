@@ -70,6 +70,10 @@ func TestGeminiCascadeFallback(t *testing.T) {
 	}))
 	defer server.Close()
 
+	oldLock := geminiQuotaLocked.Load()
+	geminiQuotaLocked.Store(false)
+	defer geminiQuotaLocked.Store(oldLock)
+
 	// 2. Налаштовуємо клієнта
 	cfg := &config.Config{
 		GeminiAPIKey: "fake-key",
@@ -99,5 +103,93 @@ func TestGeminiCascadeFallback(t *testing.T) {
 
 	if reqCount != 2 {
 		t.Errorf("Очікувалось 2 HTTP запити (1 фейл, 1 успіх), але було %d", reqCount)
+	}
+}
+
+func TestTranslateBulk_GeminiQuotaLockedFallsBackToGrok(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{
+			"choices": [{
+				"message": {
+					"content": "[{\"filename\":\"test.mkv\",\"title\":\"Офіційна назва\",\"plot\":\"Опис\"}]"
+				}
+			}]
+		}`))
+	}))
+	defer server.Close()
+
+	oldLock := geminiQuotaLocked.Load()
+	geminiQuotaLocked.Store(true)
+	defer geminiQuotaLocked.Store(oldLock)
+
+	client := &Client{
+		cfg: &config.Config{GrokAPIKey: "test-key"},
+		grokHTTPClient: &http.Client{Timeout: 5 * time.Second, Transport: &grokTestTransport{serverURL: server.URL}},
+	}
+
+	results, err := client.TranslateBulk(context.Background(), []BulkTranslateItem{{Filename: "test.mkv", Title: "", OriginalTitle: "Original", Plot: "Plot"}})
+	if err != nil {
+		t.Fatalf("expected TranslateBulk to fall back to Grok, got: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	if results[0].Filename != "test.mkv" || results[0].Title != "Офіційна назва" {
+		t.Errorf("unexpected translated result: %#v", results[0])
+	}
+}
+
+func TestTranslateBulk_Gemini429FallsBackToGrok(t *testing.T) {
+	reqCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		reqCount++
+		if reqCount <= 2 {
+			w.WriteHeader(http.StatusTooManyRequests)
+			w.Write([]byte(`{"error":{"message":"Quota exceeded"}}`))
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{
+			"choices": [{
+				"message": {
+					"content": "[{\"filename\":\"test.mkv\",\"title\":\"Офіційна назва\",\"plot\":\"Опис\"}]"
+				}
+			}]
+		}`))
+	}))
+	defer server.Close()
+
+	oldLock := geminiQuotaLocked.Load()
+	geminiQuotaLocked.Store(false)
+	defer geminiQuotaLocked.Store(oldLock)
+
+	client := &Client{
+		cfg: &config.Config{
+			GeminiAPIKey: "fake-key",
+			GrokAPIKey:   "test-key",
+		},
+		limiter:      rate.NewLimiter(rate.Every(1*time.Millisecond), 1),
+		activeModels: []string{"gemini-2.5-flash", "gemini-2.5-pro"},
+		httpClient:   &http.Client{Transport: &mockTransport{serverURL: server.URL}},
+		grokHTTPClient: &http.Client{Timeout: 5 * time.Second,
+			Transport: &grokTestTransport{serverURL: server.URL}},
+	}
+
+	results, err := client.TranslateBulk(context.Background(), []BulkTranslateItem{{Filename: "test.mkv", Title: "", OriginalTitle: "Original", Plot: "Plot"}})
+	if err != nil {
+		t.Fatalf("expected TranslateBulk to fall back to Grok after 429, got: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	if results[0].Filename != "test.mkv" || results[0].Title != "Офіційна назва" {
+		t.Errorf("unexpected translated result: %#v", results[0])
+	}
+	if reqCount < 3 {
+		t.Errorf("expected at least 3 HTTP requests (2 Gemini + 1 Grok), got %d", reqCount)
 	}
 }

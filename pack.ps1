@@ -20,7 +20,11 @@ foreach ($f in $include) {
         Write-Warning "Not found: $f"
     }
 }
-$files += (Get-ChildItem -Path "internal" -Recurse -File).FullName
+
+# Collect from internal, strict bypass for build folders and exe binaries
+$files += (Get-ChildItem -Path "internal" -Recurse -File | Where-Object {
+        $_.FullName -notmatch "internal\\build" -and $_.Extension -ne ".exe"
+    }).FullName
 
 # Pack
 if (Test-Path $output) { Remove-Item $output }

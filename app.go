@@ -499,6 +499,12 @@ func (a *App) RunScan() {
 		// 1. Створюємо контекст, який можна скасувати
 		ctx, cancel := context.WithCancel(a.ctx)
 		a.setScanCancel(cancel)
+
+		// 2. Trace ID для всієї сесії сканування
+		scanTraceID := uuid.New().String()[:8]
+		scanCtx := utils.ContextWithTrace(ctx, scanTraceID)
+		utils.LoggerWithTrace(scanCtx).Info("scan_session_start")
+
 		scanFinished := false
 
 		defer func() {
@@ -522,8 +528,8 @@ func (a *App) RunScan() {
 
 		// 🟢 ДОДАНО: Асинхронно прогріваємо кеш моделей, щоб aiClient отримав актуальний список
 		go func() {
-			if _, err := a.fetchAIModels(ctx); err != nil {
-				slog.Debug("ai_models_warmup_failed", slog.Any("error", err))
+			if _, err := a.fetchAIModels(scanCtx); err != nil {
+				utils.LoggerWithTrace(scanCtx).Debug("ai_models_warmup_failed", slog.Any("error", err))
 			}
 		}()
 
@@ -536,7 +542,7 @@ func (a *App) RunScan() {
 
 		diskPaths, err := scn.GetDiskFiles()
 		if err != nil {
-			a.finalizeScan(ctx, fmt.Sprintf("❌ Помилка сканування диску: %v", err))
+			a.finalizeScan(scanCtx, fmt.Sprintf("❌ Помилка сканування диску: %v", err))
 			scanFinished = true
 			return
 		}
@@ -546,32 +552,32 @@ func (a *App) RunScan() {
 		for _, p := range diskPaths {
 			diskIDs = append(diskIDs, a.getFileIdentifier(p))
 		}
-		if _, err := a.db.CleanMissingMovies(ctx, diskIDs); err != nil {
-			slog.Warn("clean_missing_movies_failed", slog.Any("error", err))
+		if _, err := a.db.CleanMissingMovies(scanCtx, diskIDs); err != nil {
+			utils.LoggerWithTrace(scanCtx).Warn("clean_missing_movies_failed", slog.Any("error", err))
 		}
-		if _, err := a.db.CleanOrphanPosters(ctx, a.cfg.PostersDir); err != nil {
-			slog.Warn("clean_orphan_posters_failed", slog.Any("error", err))
+		if _, err := a.db.CleanOrphanPosters(scanCtx, a.cfg.PostersDir); err != nil {
+			utils.LoggerWithTrace(scanCtx).Warn("clean_orphan_posters_failed", slog.Any("error", err))
 		}
 
 		// Визначаємо що треба обробити (нові + нерозпізнані)
-		filesToProcess := a.filterUnprocessed(ctx, diskPaths)
+		filesToProcess := a.filterUnprocessed(scanCtx, diskPaths)
 		if len(filesToProcess) == 0 {
-			a.finalizeScan(ctx, "Змін не знайдено.")
+			a.finalizeScan(scanCtx, "Змін не знайдено.")
 			scanFinished = true
 			return
 		}
 
 		a.logFront(fmt.Sprintf("📂 Файлів для обробки: %d", len(filesToProcess)))
 
-		resultsChan := a.runTMDBScan(ctx, filesToProcess)
+		resultsChan := a.runTMDBScan(scanCtx, filesToProcess)
 
 		// 🛡️ Єдиний Writer для SQLite: збирає батч і пише транзакцією
-		moviesToSave, geminiQueue, translationQueue := a.processScanResults(ctx, resultsChan)
+		moviesToSave, geminiQueue, translationQueue := a.processScanResults(scanCtx, resultsChan)
 
 		// Зберігаємо всіх знайдених одним запитом
 		if len(moviesToSave) > 0 {
-			if err := a.db.SaveMoviesBatch(ctx, moviesToSave); err != nil {
-				slog.Error("batch_save_failed", slog.Any("error", err))
+			if err := a.db.SaveMoviesBatch(scanCtx, moviesToSave); err != nil {
+				utils.LoggerWithTrace(scanCtx).Error("batch_save_failed", slog.Any("error", err))
 			}
 		}
 
@@ -579,12 +585,12 @@ func (a *App) RunScan() {
 		if len(geminiQueue) > 0 {
 			a.logFront(fmt.Sprintf("🤖 Черга Gemini: %d файлів", len(geminiQueue)))
 
-			recognizedByGemini := a.processGeminiQueue(ctx, geminiQueue, a.aiClient)
+			recognizedByGemini := a.processGeminiQueue(scanCtx, geminiQueue, a.aiClient)
 			translationQueue = append(translationQueue, recognizedByGemini...)
 		}
 
 		if len(translationQueue) > 0 {
-			a.processTranslationQueue(ctx, translationQueue, a.aiClient)
+			a.processTranslationQueue(scanCtx, translationQueue, a.aiClient)
 		}
 	}()
 }
@@ -1373,6 +1379,21 @@ func (a *App) processTranslationQueue(ctx context.Context, filenames []string, a
 
 	var itemsToTranslate []ai.BulkTranslateItem
 	movieMap := make(map[string]storage.Movie)
+	isGoodUkrainian := func(s string) bool {
+		if s == "" {
+			return false
+		}
+		hasUA := false
+		for _, r := range s {
+			switch r {
+			case 'ы', 'Ы', 'э', 'Э', 'ъ', 'Ъ', 'ё', 'Ё':
+				return false
+			case 'і', 'І', 'ї', 'Ї', 'є', 'Є', 'ґ', 'Ґ':
+				hasUA = true
+			}
+		}
+		return hasUA
+	}
 
 	// 1. Фільтруємо чергу: збираємо ТІЛЬКИ те, що дійсно треба перекладати
 	// 🟢 ОПТИМІЗАЦІЯ: Один масований запит замість N окремих
@@ -1477,9 +1498,14 @@ func (a *App) processTranslationQueue(ctx context.Context, filenames []string, a
 
 			changed := false
 			if res.Title != "" && res.Title != movie.TitleUA && !strings.HasPrefix(strings.TrimSpace(res.Title), "<think>") {
-				// 🔴 ХІРУРГІЧНЕ ВТРУЧАННЯ: Закон пріоритету кирилиці.
-				// Не дозволяємо Gemini перезаписувати назву на англійську, якщо в базі вже є кирилиця.
-				if hasCyrillic(movie.TitleUA) && !hasCyrillic(res.Title) {
+				// 🔴 ХІРУРГІЧНЕ ВТРУЧАННЯ: Якщо TMDB вже дав надійну українську назву,
+				// Gemini не може її перезаписати навіть кириличним калькою.
+				if isGoodUkrainian(movie.TitleUA) {
+					slog.Debug("localization_skip_ai_override_trusted_tmdb",
+						slog.String("file", movie.Filename),
+						slog.String("kept", movie.TitleUA),
+						slog.String("rejected", res.Title))
+				} else if hasCyrillic(movie.TitleUA) && !hasCyrillic(res.Title) {
 					slog.Debug("localization_skip_downgrade",
 						slog.String("file", movie.Filename),
 						slog.String("kept", movie.TitleUA),

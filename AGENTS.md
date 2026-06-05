@@ -80,6 +80,7 @@ Tech stack: Go 1.26+, Wails v2, SQLite, TMDB API, Google Gemini (`google.golang.
 * **Model Loading:** Uses `singleflight.Group`. Do not duplicate concurrent requests.
 * **Grok Fallback:** `grok-3-mini` is used strictly as a last-resort fallback. It has no rate limiter. Reasoning tokens must remain disabled (`ReasoningEffort: "none"`). Never wrap JSON in markdown.
 * **Translation Safety:** If official Ukrainian title is unknown, preserve original title (do not hallucinate localization).
+* **TMDB Title Trust:** If `movie.TitleUA` is already validated as good Ukrainian, Gemini must not override it, even with Cyrillic calques or alternative transliterations.
 
 ---
 
@@ -205,6 +206,7 @@ POSTERS_DIR=posters
 | `internal/ai/gemini.go` | `buildGrokRecognitionPrompt` | Delete the obsolete function entirely. |
 | `internal/tmdb/client.go` | `doRequestWithRetry` | Replace unreachable return nil after loop with explicit error return. |
 | `internal/ai/gemini.go` | `TranslateBulk` | Ignore json.Marshal error with safe-to-ignore comment. |
+| `internal/ai/gemini.go` | `TranslateBulk` | After Gemini 429 or quota lock, fall back to Grok using a text prompt and `grokLimiter`. |
 | `internal/config/config.go` | `Load` | Default `HTML_PATH` changed to `local_index.html` (local PC showcase); `index.html` reserved for mobile GitHub Pages sync. |
 | `.gitignore` | — | Ignore `local_index.html`; remove `index.html` from ignore so mobile showcase can be committed; add `*.env`. |
 | `internal/web/generator.go` | `Generate` | Added `isMobile bool`: TMDB `PosterURL` for mobile, `filepath.ToSlash` only for local posters. |
@@ -233,7 +235,15 @@ POSTERS_DIR=posters
 | `CHECKLIST.md` | — | Marked mobile select styling, dark options, desktop list width, and final build validation complete. |
 
 | `internal/tmdb/search.go`, `internal/tmdb/client.go` | `SearchWithFallbacks`, `buildAttempts` | Folder fallback `label: "Папка"` now skips the media scan root by comparing the full parent path to `MEDIA_FOLDER_PATH`; removed generic folder-name dictionary. |
+| `internal/ai/gemini.go` | `requestWithRetry`, `makeRequest`, `TranslateBulk` | Implemented centralized Gemini quota exhaustion checks (`isQuotaExhaustedError`), global atomic quota lock, and skips further API calls once locked. |
+| `internal/ai/gemini.go` | `TranslateBulk` | If `gemini_quota_lock_skip` occurs and `GROK_API_KEY` is configured, do not abort immediately; continue to Grok fallback. |
+| `internal/ai/gemini.go` | `requestWithRetry` | Preserve the current Gemini cascade within the same request after a quota-exhausted model error; lock still skips future requests. |
+| `internal/tmdb/search.go` | `isGoodUkrainian` | Refactored Ukrainian title/plot validation to check for non-empty Cyrillic strings excluding Russian-only characters (ы, э, ъ, ё). |
+| `internal/tmdb/details.go` | `getMovieDetails`, `getTVDetails` | Optimized language cascade to break early and log `localization_selected` when a valid Ukrainian title is obtained. |
+| `app.go` | `RunScan` | Phase 4 verified: `scanTraceID` + `scanCtx` propagated to all workers (`processGeminiQueue`, `processTranslationQueue`, `fetchAIModels`, `runTMDBScan`, `processScanResults`); `context.Background()` only in `fetchAIModels` nil guard (correct). No `trace_id=unknown` in Gemini pipeline. |
+| `internal/tmdb/search.go` | `scoreResult` | Phase 5: added `candidate_score_breakdown` debug log (titleScore, yearScore, langScore, popBonus, finalScore) and `candidate_hard_rejected` debug log when titleScore==0. Tracked yearScore/langScore as separate variables for breakdown. Scoring algorithm unchanged. |
+| `internal/tmdb/search.go` | `searchAndFetch` | Enforced early-exit of the UA→RU cascade: if `uk-UA` produces a candidate with `score >= 140`, the cascade stops and `ru-RU` is not queried (2026-06-04). |
 
 **CHECKLIST complete (2026-06-02):** Restructured mobile list-mode layout, added SVG data-URI favicon, limited mobile grid-mode title to 2 lines, and verified all compilation steps pass.
 
-**Final verification (2026-06-03):** `go build ./...`, `go vet ./...`, `gofmt -l .` (no diffs after formatting), and `go test ./... -count=1` all passed.
+**Final verification (2026-06-04):** `go build ./...`, `go vet ./...`, `gofmt -l .` all passed. Phases 4-5 completed.

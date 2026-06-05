@@ -192,6 +192,7 @@ func (c *Client) searchAndFetch(
 	var bestGlobal *scoredResult
 	logger := utils.LoggerWithTrace(ctx).With(slog.String("component", "tmdb_search_cascade"))
 
+	LANG_LOOP:
 	for _, langParam := range langs {
 		type searchEndpoint struct {
 			name             string
@@ -270,6 +271,14 @@ func (c *Client) searchAndFetch(
 
 				if bestGlobal == nil || bestForLang.score > bestGlobal.score {
 					bestGlobal = bestForLang
+				}
+				// Якщо український індекс дав достатній результат — зупиняємо каскад (руський індекс не запитувати)
+				if langParam == "uk-UA" && bestForLang.score >= 140 {
+					logger.Info("uk_win_threshold_reached",
+						slog.String("lang", langParam),
+						slog.Int("score", bestForLang.score),
+					)
+					break LANG_LOOP
 				}
 			}
 		}
@@ -382,6 +391,8 @@ func (c *Client) scoreResult(
 	preferredType MediaType,
 ) scoredResult {
 	score := 0
+	yearScore := 0
+	langScore := 0
 
 	// --- Рік результату ---
 	dateStr := coalesce(res.ReleaseDate, res.FirstAirDate)
@@ -433,6 +444,13 @@ func (c *Client) scoreResult(
 
 	// 🔴 ХІРУРГІЧНЕ ВТРУЧАННЯ: Якщо назва (або її аліаси) взагалі ніяк не метчиться із запитом — це сміття. Жорстко відхиляємо.
 	if titleScore == 0 {
+		utils.LoggerWithTrace(ctx).Debug("candidate_hard_rejected",
+			slog.String("query", normQuery),
+			slog.String("title", coalesce(res.Title, res.Name)),
+			slog.String("orig_title", coalesce(res.OriginalTitle, res.OriginalName)),
+			slog.Int("year", resYear),
+			slog.String("reason", "titleScore==0"),
+		)
 		return scoredResult{result: res, score: -1000, year: resYear}
 	}
 
@@ -442,20 +460,21 @@ func (c *Client) scoreResult(
 	if targetYear > 0 && resYear > 0 {
 		switch diff := abs(targetYear - resYear); {
 		case diff == 0:
-			score += ScoreYearExact
+			yearScore = ScoreYearExact
 		case diff == 1:
-			score += ScoreYearDiffOne
+			yearScore = ScoreYearDiffOne
 		default:
-			score += ScoreYearDiffTooFar // від'ємне
+			yearScore = ScoreYearDiffTooFar // від'ємне
 		}
 	} else if targetYear == 0 && resYear > 0 {
 		// ⚖️ БАЛАНСУВАННЯ: Якщо рік файлу невідомий, віддаємо перевагу сучасним релізам.
 		if resYear >= 2000 {
-			score += 15 // Бонус за сучасність
+			yearScore = 15 // Бонус за сучасність
 		} else if resYear < 1980 {
-			score -= 30 // Штраф для дуже старих
+			yearScore = -30 // Штраф для дуже старих
 		}
 	}
+	score += yearScore
 
 	// --- Відповідність типу медіа ---
 	if (preferredType == MediaTypeMovie && res.MediaType == "movie") ||
@@ -467,20 +486,21 @@ func (c *Client) scoreResult(
 	queryIsCyrillic := hasCyrillicChars(normQuery)
 	switch res.OriginalLanguage {
 	case "uk":
-		score += ScoreLangUA
+		langScore = ScoreLangUA
 	case "en":
-		score += ScoreLangEN
+		langScore = ScoreLangEN
 	case "ru":
 		if queryIsCyrillic {
-			score += 10
+			langScore = 10
 		} else {
 			if resYear > 0 && resYear < 2010 {
-				score += ScoreLangRUOld // -300
+				langScore = ScoreLangRUOld // -300
 			} else {
-				score += ScoreLangRURecent // -50
+				langScore = ScoreLangRURecent // -50
 			}
 		}
 	}
+	score += langScore
 
 	// --- Popularity ---
 	popBonus := int(res.Popularity / 5)
@@ -488,6 +508,16 @@ func (c *Client) scoreResult(
 		popBonus = ScorePopularityLimit
 	}
 	score += popBonus
+
+	utils.LoggerWithTrace(ctx).Debug("candidate_score_breakdown",
+		slog.String("query", normQuery),
+		slog.String("title", coalesce(res.Title, res.Name)),
+		slog.Int("titleScore", titleScore),
+		slog.Int("yearScore", yearScore),
+		slog.Int("langScore", langScore),
+		slog.Int("popBonus", popBonus),
+		slog.Int("finalScore", score),
+	)
 
 	return scoredResult{result: res, score: score, year: resYear, matchedAlias: matchedAlias}
 }
@@ -663,18 +693,47 @@ func hasCyrillicChars(s string) bool {
 	return false
 }
 
-// isGoodUkrainian перевіряє, чи містить рядок суто українські літери (і, ї, є, ґ)
-// Це гарантує, що текст справді український, а не російський
+// isGoodUkrainian checks if a string is a valid Ukrainian localization.
+//
+// Previous logic (documented before change):
+// It checked if the string contained at least one uniquely Ukrainian letter:
+// 'і', 'І', 'ї', 'Ї', 'є', 'Є', 'ґ', 'Ґ'. This resulted in false negatives
+// for titles like "Аватар", "Матриця" (if spelled without unique letters, wait, "Матриця" has 'я' and 'и', but no 'і', 'ї', 'є', 'ґ'),
+// "Термінатор" (has 'і'), but "Гладіатор" (has 'і'), "Початок" (no unique letters), "Кримінальне чтиво" (has 'і').
+//
+// Test cases matrix:
+// | Title              | Expected | Contains Cyrillic | Contains Russian-only letters (ы, э, ъ, ё) | Empty | Result |
+// |--------------------|----------|-------------------|--------------------------------------------|-------|--------|
+// | Аватар             | true     | Yes               | No                                         | No    | true   |
+// | Матриця            | true     | Yes               | No                                         | No    | true   |
+// | Термінатор         | true     | Yes               | No                                         | No    | true   |
+// | Месники            | true     | Yes               | No                                         | No    | true   |
+// | Гладіатор          | true     | Yes               | No                                         | No    | true   |
+// | Втеча з Шоушенка   | true     | Yes               | No                                         | No    | true   |
+// | Початок            | true     | Yes               | No                                         | No    | true   |
+// | Кримінальне чтиво  | true     | Yes               | No                                         | No    | true   |
+// | Мышь               | false    | Yes               | Yes (ы)                                    | No    | false  |
+// | Объект             | false    | Yes               | Yes (ъ)                                    | No    | false  |
+// | Всё                | false    | Yes               | Yes (ё)                                    | No    | false  |
 func isGoodUkrainian(s string) bool {
 	if s == "" {
 		return false
 	}
+
+	hasUA := false
 	for _, r := range s {
-		// Якщо є хоч одна суто українська літера — вважаємо, що це UA
+		// 1. Якщо є хоч одна суто російська літера — це точно НЕ чистий UA тайтл
+		switch r {
+		case 'ы', 'Ы', 'э', 'Э', 'ъ', 'Ъ', 'ё', 'Ё':
+			return false
+		}
+
+		// 2. Фіксуємо наявність суто українських літер
 		switch r {
 		case 'і', 'І', 'ї', 'Ї', 'є', 'Є', 'ґ', 'Ґ':
-			return true
+			hasUA = true
 		}
 	}
-	return false
+
+	return hasUA
 }

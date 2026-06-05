@@ -90,7 +90,12 @@ func (c *Client) getMovieDetails(ctx context.Context, id int, originalFilename s
 		}
 
 		// Якщо зібрали якісні українські дані - можемо переривати цикл
-		if isGoodUkrainian(finalInfo.TitleUA) && isGoodUkrainian(finalInfo.Plot) {
+		if isGoodUkrainian(finalInfo.TitleUA) {
+			utils.LoggerWithTrace(ctx).Debug("localization_selected",
+				slog.String("language", lang),
+				slog.String("title", finalInfo.TitleUA),
+				slog.Int("movie_id", finalInfo.TMDBID),
+			)
 			break
 		}
 	}
@@ -151,7 +156,12 @@ func (c *Client) getTVDetails(ctx context.Context, id int, originalFilename stri
 			}
 		}
 
-		if isGoodUkrainian(finalInfo.TitleUA) && isGoodUkrainian(finalInfo.Plot) {
+		if isGoodUkrainian(finalInfo.TitleUA) {
+			utils.LoggerWithTrace(ctx).Debug("localization_selected",
+				slog.String("language", lang),
+				slog.String("title", finalInfo.TitleUA),
+				slog.Int("movie_id", finalInfo.TMDBID),
+			)
 			break
 		}
 	}
