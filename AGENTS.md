@@ -169,6 +169,7 @@ POSTERS_DIR=posters
 |------|--------|--------|
 | `internal/tmdb/parser.go` | `ParseFilename` | Added `reNakedLang` regex to strip naked language counters (e.g., 3xRus, 2xUkr) before `go-ptn`; updated `parser_test.go` with new cases. |
 | `internal/ai/gemini.go` | `Client` | Added `grokLimiter *rate.Limiter` and initialized it in `NewClient()` to throttle Grok fallback calls. |
+| `internal/storage/storage.go` | `New` | Add `_busy_timeout=5000&_journal_mode=WAL` to SQLite DSN in `New()` to reduce "database is locked" errors and enable WAL by default. |
 | `internal/ai/grok.go` | `callGrok` | Wait on `c.grokLimiter` before making the HTTP request to Grok, preventing bursty fallback calls. |
 | `app.go` | `processTranslationQueue` | Added diagnostic logging for translation candidates that appear to need translation but were not queued, to aid debugging of 429/skip cases. |
 | `internal/tmdb/client.go` | `searchDirectly` | Removed unused `searchDirectly` helper — `runPipeline` is the canonical path. |

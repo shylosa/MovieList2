@@ -1434,7 +1434,7 @@ func (a *App) processTranslationQueue(ctx context.Context, filenames []string, a
 
 	a.logFront(fmt.Sprintf("🚀 Відправка в Gemini: %d файлів...", len(itemsToTranslate)))
 
-	const batchSize = 5
+	const batchSize = 20
 	totalItems := len(itemsToTranslate)
 	totalBatches := (totalItems + batchSize - 1) / batchSize
 	var updatedCount int32

@@ -65,7 +65,32 @@ const movieUpsertQuery = `
 `
 
 func New(dbPath string) (*DB, error) {
-	conn, err := sql.Open("sqlite", dbPath)
+	// Ensure the SQLite DSN contains busy timeout and WAL journal mode to
+	// reduce "database is locked" errors under concurrency. Use the
+	// "file:" URI form when a plain path is provided.
+	connStr := dbPath
+	if !strings.HasPrefix(connStr, "file:") {
+		// Normalize path separators for URI form
+		connStr = "file:" + filepath.ToSlash(connStr) + "?_busy_timeout=5000&_journal_mode=WAL"
+	} else {
+		// If already a file: URI, append params if missing
+		if !strings.Contains(connStr, "_busy_timeout=") {
+			if strings.Contains(connStr, "?") {
+				connStr = connStr + "&_busy_timeout=5000"
+			} else {
+				connStr = connStr + "?_busy_timeout=5000"
+			}
+		}
+		if !strings.Contains(connStr, "_journal_mode=") {
+			if strings.Contains(connStr, "?") {
+				connStr = connStr + "&_journal_mode=WAL"
+			} else {
+				connStr = connStr + "?_journal_mode=WAL"
+			}
+		}
+	}
+
+	conn, err := sql.Open("sqlite", connStr)
 	if err != nil {
 		return nil, err
 	}

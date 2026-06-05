@@ -304,11 +304,64 @@ func (c *Client) makeRequest(ctx context.Context, prompt, modelName string) ([]R
 }
 
 func parseRecognizeResponse(raw string) ([]RecognizedTitle, error) {
+	cleaned := cleanJSON(raw)
 	var results []RecognizedTitle
-	if err := json.Unmarshal([]byte(raw), &results); err != nil {
+	if err := json.Unmarshal([]byte(cleaned), &results); err != nil {
 		return nil, fmt.Errorf("неможливо розпарсити JSON від моделі: %w", err)
 	}
 	return results, nil
+}
+
+// cleanJSON attempts to extract the JSON payload from model responses that may
+// include surrounding text, markdown fences, or other noise. It is intentionally
+// simple and uses string searches (not regex) to avoid allocating compiled
+// patterns per-call. Returns the original string if no obvious JSON boundaries
+// are found.
+func cleanJSON(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return s
+	}
+
+	// Fast path: already looks like JSON array or object
+	if s[0] == '[' || s[0] == '{' {
+		return s
+	}
+
+	// Find first occurrences of array/object starts
+	idxArr := strings.IndexByte(s, '[')
+	idxObj := strings.IndexByte(s, '{')
+
+	// Choose the earliest positive index (or the one that exists)
+	start := -1
+	isArray := false
+	if idxArr >= 0 && (idxObj == -1 || idxArr < idxObj) {
+		start = idxArr
+		isArray = true
+	} else if idxObj >= 0 {
+		start = idxObj
+		isArray = false
+	}
+
+	if start == -1 {
+		return s
+	}
+
+	// Find last matching closing bracket for the chosen type
+	if isArray {
+		end := strings.LastIndexByte(s, ']')
+		if end > start {
+			return strings.TrimSpace(s[start : end+1])
+		}
+	} else {
+		end := strings.LastIndexByte(s, '}')
+		if end > start {
+			return strings.TrimSpace(s[start : end+1])
+		}
+	}
+
+	// Fallback: return original to allow the caller to surface a parse error
+	return s
 }
 
 // buildGenAISchema — типізована схема для structured output у genai SDK.
@@ -450,7 +503,8 @@ Return ONLY a raw JSON array.`, string(inputJSON))
 
 			if len(resp.Candidates) > 0 {
 				var results []BulkTranslateItem
-				unmarshalErr := json.Unmarshal([]byte(resp.Text()), &results)
+				cleaned := cleanJSON(resp.Text())
+				unmarshalErr := json.Unmarshal([]byte(cleaned), &results)
 				if unmarshalErr == nil {
 					return results, nil
 				}
@@ -470,7 +524,8 @@ Return ONLY a raw JSON array.`, string(inputJSON))
 		raw, grokErr := c.callGrok(ctx, prompt)
 		if grokErr == nil {
 			var results []BulkTranslateItem
-			if parseErr := json.Unmarshal([]byte(raw), &results); parseErr == nil {
+			cleaned := cleanJSON(raw)
+			if parseErr := json.Unmarshal([]byte(cleaned), &results); parseErr == nil {
 				utils.LoggerWithTrace(ctx).Info("grok_translate_success",
 					slog.Int("results_count", len(results)),
 				)
