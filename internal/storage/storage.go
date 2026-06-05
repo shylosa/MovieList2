@@ -304,15 +304,25 @@ func (db *DB) CleanMissingMovies(ctx context.Context, actualFiles []string) (int
 	if err := rows.Err(); err != nil {
 		return 0, err
 	}
+	tx, err := db.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
 	for _, fname := range toDelete {
-		if _, err := db.db.ExecContext(ctx, "DELETE FROM movies WHERE filename = ?", fname); err != nil {
+		if _, err := tx.ExecContext(ctx, "DELETE FROM movies WHERE filename = ?", fname); err != nil {
 			slog.Warn("clean_missing_delete_failed",
 				slog.String("file", fname), slog.Any("error", err))
+			return 0, err
 		}
-		if _, err := db.db.ExecContext(ctx, "DELETE FROM ai_resolutions WHERE original_filename = ?", fname); err != nil {
+		if _, err := tx.ExecContext(ctx, "DELETE FROM ai_resolutions WHERE original_filename = ?", fname); err != nil {
 			slog.Warn("clean_ai_resolution_delete_failed",
 				slog.String("file", fname), slog.Any("error", err))
+			return 0, err
 		}
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
 	}
 	return len(toDelete), nil
 }

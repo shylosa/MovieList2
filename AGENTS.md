@@ -178,6 +178,10 @@ POSTERS_DIR=posters
 | `internal/storage/storage.go` | `PatchMovie`, `SaveMovie`, `SaveMoviesBatch` | Replaced `INSERT OR REPLACE` with merge upsert (`movieUpsertQuery`); `PatchMovie` updates only non-empty fields. |
 | `app.go` | `processGeminiQueue` | On batch error or empty recognition: log only; no `SaveMoviesBatch` with filename-only structs. |
 | `internal/storage/storage.go` | `SaveMoviesBatch` | Any failed `Exec` aborts the batch; `defer tx.Rollback()` on error paths. |
+| `internal/storage/storage.go` | `CleanMissingMovies` | Wraps missing-movie cleanup deletes in a single transaction with `defer tx.Rollback()` and commits on success. |
+| `internal/utils/lang.go` | `IsCyrillic, HasCyrillic, IsGoodUkrainian` | Added shared Cyrillic/Ukrainian language helpers for app and TMDB parsing. |
+| `app.go` | various | Replaced local Cyrillic detection with shared `utils` helpers; removed duplicate local helper. |
+| `internal/tmdb/parser.go` | `detectLanguage` | Uses shared `utils.HasCyrillic`; preserves package wrapper `isCyrillic` for internal tmdb compatibility. |
 | `internal/storage/storage.go` | `GetAllMovies` | `rows.Scan` errors propagate via `fmt.Errorf` instead of silent `continue`. |
 | `app.go` | `filterUnprocessed` | On `GetAllMovies` error: log and return `nil` to avoid mass rescan. |
 | `app.go` | `OpenShowcase`, `SyncToCloud` | Already abort on `GetAllMovies` failure (log + `return`). |

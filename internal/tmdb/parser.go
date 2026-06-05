@@ -5,7 +5,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
-	"unicode"
+
+	"movielist-app/internal/utils"
 
 	ptn "github.com/razsteinmetz/go-ptn"
 )
@@ -162,15 +163,13 @@ func cleanFallback(name string) string {
 
 // detectLanguage визначає мову назви (кирилиця або латиниця)
 func detectLanguage(s string) TitleLanguage {
-	for _, r := range s {
-		if isCyrillic(r) {
-			return TitleLangCyrillic
-		}
+	if utils.HasCyrillic(s) {
+		return TitleLangCyrillic
 	}
 	return TitleLangLatin
 }
 
 // isCyrillic перевіряє чи є руна кириличною.
 func isCyrillic(r rune) bool {
-	return unicode.Is(unicode.Cyrillic, r)
+	return utils.IsCyrillic(r)
 }

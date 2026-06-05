@@ -65,11 +65,12 @@ const aiConfidenceThreshold = 0.55
 // geminiTMDBVerifyMinJW — мінімальна схожість EN-назви Gemini і TMDB після верифікації.
 const geminiTMDBVerifyMinJW = 0.85
 
-var russianMarkers = []string{"из", "как", "что", "он", "это", "бы", "вот", "для"}
+var russianMarkers = []string{"из", "как", "что", "это", "бы", "вот"}
+var russianMarkersRE = regexp.MustCompile(`(?i)\b(?:из|как|что|это|бы|вот)\b`)
 
 var (
 	reTMDBURL = regexp.MustCompile(`themoviedb\.org/(movie|tv)/(\d+)`)
-	reTMDBID  = regexp.MustCompile(`^\d{5,}$`)
+	reTMDBID  = regexp.MustCompile(`^\d+$`)
 )
 
 func NewApp() *App {
@@ -1003,7 +1004,7 @@ func (a *App) FixSelected(selected []map[string]interface{}) {
 		// Передаємо локальний ctx
 		if err := a.updateMovie(ctx, filename, hint); err == nil {
 			if m, err := a.db.GetMovieByFilename(ctx, filename); err == nil && m != nil {
-				if m.TitleUA != "" && m.Plot != "" && hasCyrillic(m.TitleUA) {
+				if m.TitleUA != "" && m.Plot != "" && utils.HasCyrillic(m.TitleUA) {
 					a.logFront(fmt.Sprintf("🎯 [TMDB Істина] Пропуск черги локалізації для '%s' (офіційний переклад та опис вже є)", m.TitleUA))
 					continue
 				}
@@ -1057,7 +1058,7 @@ func (a *App) updateMovie(ctx context.Context, filename, hint string) error {
 			return err
 		}
 		if info != nil {
-			if info.TitleUA != "" && hasCyrillic(info.TitleUA) {
+			if info.TitleUA != "" && utils.HasCyrillic(info.TitleUA) {
 				applyTMDBToMovie(existing, info)
 				a.logFront(fmt.Sprintf("🎯 [TMDB Істина] Знайдено офіційний переклад '%s', пропуск Gemini", info.TitleUA))
 				return a.db.SaveMovie(ctx, *existing)
@@ -1097,7 +1098,7 @@ func (a *App) updateMovie(ctx context.Context, filename, hint string) error {
 		info, err := a.tmdbClient.SearchWithFallbacks(ctx, targetToSearch, filename)
 
 		if err == nil && info != nil {
-			if info.TitleUA != "" && hasCyrillic(info.TitleUA) {
+			if info.TitleUA != "" && utils.HasCyrillic(info.TitleUA) {
 				applyTMDBToMovie(existing, info)
 				a.logFront(fmt.Sprintf("🎯 [TMDB Істина] Знайдено офіційний переклад за підказкою '%s', пропуск Gemini", info.TitleUA))
 				return a.db.SaveMovie(ctx, *existing)
@@ -1299,16 +1300,6 @@ func (a *App) openInExplorer(path string) {
 	}
 }
 
-// hasCyrillic повертає true, якщо рядок містить хоча б один кирилічний символ
-func hasCyrillic(s string) bool {
-	for _, r := range s {
-		if unicode.Is(unicode.Cyrillic, r) {
-			return true
-		}
-	}
-	return false
-}
-
 func (a *App) movieInfoNeedsTranslation(info *tmdb.MovieInfo) bool {
 	if info == nil {
 		return false
@@ -1327,14 +1318,9 @@ func needsTranslation(s string) bool {
 	sLower := strings.ToLower(s)
 
 	// 1. ПЕРЕВІРКА НА СЛОВА-МАРКЕРИ (Російські слова, що пишуться спільними літерами)
-	// Це значно дешевше за бібліотеки і відловить твій "Враг у ворот" (слово "у")
-	words := strings.Fields(sLower)
-	for _, w := range words {
-		for _, marker := range russianMarkers {
-			if w == marker {
-				return true // 100% російський маркер
-			}
-		}
+	// Використовуємо регулярний вираз з межами слова, щоб уникнути хибних спрацьовувань на підрядках.
+	if russianMarkersRE.MatchString(sLower) {
+		return true
 	}
 
 	foundCyrillic := false
@@ -1379,21 +1365,6 @@ func (a *App) processTranslationQueue(ctx context.Context, filenames []string, a
 
 	var itemsToTranslate []ai.BulkTranslateItem
 	movieMap := make(map[string]storage.Movie)
-	isGoodUkrainian := func(s string) bool {
-		if s == "" {
-			return false
-		}
-		hasUA := false
-		for _, r := range s {
-			switch r {
-			case 'ы', 'Ы', 'э', 'Э', 'ъ', 'Ъ', 'ё', 'Ё':
-				return false
-			case 'і', 'І', 'ї', 'Ї', 'є', 'Є', 'ґ', 'Ґ':
-				hasUA = true
-			}
-		}
-		return hasUA
-	}
 
 	// 1. Фільтруємо чергу: збираємо ТІЛЬКИ те, що дійсно треба перекладати
 	// 🟢 ОПТИМІЗАЦІЯ: Один масований запит замість N окремих
@@ -1500,12 +1471,12 @@ func (a *App) processTranslationQueue(ctx context.Context, filenames []string, a
 			if res.Title != "" && res.Title != movie.TitleUA && !strings.HasPrefix(strings.TrimSpace(res.Title), "<think>") {
 				// 🔴 ХІРУРГІЧНЕ ВТРУЧАННЯ: Якщо TMDB вже дав надійну українську назву,
 				// Gemini не може її перезаписати навіть кириличним калькою.
-				if isGoodUkrainian(movie.TitleUA) {
+				if utils.IsGoodUkrainian(movie.TitleUA) {
 					slog.Debug("localization_skip_ai_override_trusted_tmdb",
 						slog.String("file", movie.Filename),
 						slog.String("kept", movie.TitleUA),
 						slog.String("rejected", res.Title))
-				} else if hasCyrillic(movie.TitleUA) && !hasCyrillic(res.Title) {
+				} else if utils.HasCyrillic(movie.TitleUA) && !utils.HasCyrillic(res.Title) {
 					slog.Debug("localization_skip_downgrade",
 						slog.String("file", movie.Filename),
 						slog.String("kept", movie.TitleUA),

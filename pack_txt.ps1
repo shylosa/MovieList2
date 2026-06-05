@@ -12,7 +12,7 @@ $expectedFiles = @(
     "main.go", "models.go", "parser.go", "parser_test.go",
     "scanner.go", "search.go", "search_test.go", "sheets.go",
     "storage.go", "storage_test.go", "system.go", "translit_test.go",
-    "wails.json", "AGENTS.md", "CHECKLIST.md", "go.mod"
+    "wails.json", "AGENTS.md", "CHECKLIST.md", "go.mod", "lang.go"
 )
 
 # Словарь для трекинга найденных файлов
