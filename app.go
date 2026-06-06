@@ -570,16 +570,25 @@ func (a *App) RunScan() {
 			return
 		}
 
-		// Очищуємо записи про видалені файли
+		// Clean up database records for missing disk files
 		diskIDs := make([]string, 0, len(diskPaths))
 		for _, p := range diskPaths {
 			diskIDs = append(diskIDs, a.getFileIdentifier(p))
 		}
-		if _, err := a.db.CleanMissingMovies(scanCtx, diskIDs); err != nil {
+		deletedCount, err := a.db.CleanMissingMovies(scanCtx, diskIDs)
+		if err != nil {
 			utils.LoggerWithTrace(scanCtx).Warn("clean_missing_movies_failed", slog.Any("error", err))
+		} else if deletedCount > 0 {
+			utils.LoggerWithTrace(scanCtx).Info("missing_movies_cleaned", slog.Int("count", deletedCount))
+			a.logFront(fmt.Sprintf("🗑 Вичищено з бази відсутніх файлів: %d", deletedCount))
 		}
-		if _, err := a.db.CleanOrphanPosters(scanCtx, a.cfg.PostersDir); err != nil {
+
+		orphanCount, err := a.db.CleanOrphanPosters(scanCtx, a.cfg.PostersDir)
+		if err != nil {
 			utils.LoggerWithTrace(scanCtx).Warn("clean_orphan_posters_failed", slog.Any("error", err))
+		} else if orphanCount > 0 {
+			utils.LoggerWithTrace(scanCtx).Info("orphan_posters_cleaned", slog.Int("count", orphanCount))
+			a.logFront(fmt.Sprintf("🖼 Видалено застарілих файлів постерів: %d", orphanCount))
 		}
 
 		// Визначаємо що треба обробити (нові + нерозпізнані)
@@ -601,6 +610,8 @@ func (a *App) RunScan() {
 		if len(moviesToSave) > 0 {
 			if err := a.db.SaveMoviesBatch(scanCtx, moviesToSave); err != nil {
 				utils.LoggerWithTrace(scanCtx).Error("batch_save_failed", slog.Any("error", err))
+			} else {
+				utils.LoggerWithTrace(scanCtx).Info("batch_save_success", slog.Int("count", len(moviesToSave)), slog.String("stage", "tmdb_scan"))
 			}
 		}
 
@@ -795,7 +806,7 @@ func (a *App) processGeminiQueue(ctx context.Context, paths []string, aiClient *
 		results, err := aiClient.RecognizeBulk(ctx, contexts)
 		if err != nil {
 			a.logFront(fmt.Sprintf("⚠️ Gemini помилка пачки %d: %v", currentBatchIdx, err))
-			slog.Warn("gemini_batch_failed", slog.Int("batch", currentBatchIdx), slog.Any("error", err))
+			utils.LoggerWithTrace(ctx).Warn("gemini_batch_failed", slog.Int("batch", currentBatchIdx), slog.Any("error", err))
 			continue
 		}
 
@@ -832,7 +843,7 @@ func (a *App) processGeminiQueue(ctx context.Context, paths []string, aiClient *
 					MediaType:        rec.MediaType,
 					Confidence:       rec.Confidence,
 				}); err != nil {
-					slog.Warn("save_ai_resolution_failed",
+					utils.LoggerWithTrace(ctx).Warn("save_ai_resolution_failed",
 						slog.String("file", fname), slog.Any("error", err))
 				}
 				recognizedFiles = append(recognizedFiles, fname)
@@ -841,7 +852,9 @@ func (a *App) processGeminiQueue(ctx context.Context, paths []string, aiClient *
 
 		if len(moviesToSave) > 0 {
 			if err := a.db.SaveMoviesBatch(ctx, moviesToSave); err != nil {
-				slog.Error("batch_save_failed", slog.Any("error", err))
+				utils.LoggerWithTrace(ctx).Error("batch_save_failed", slog.Any("error", err))
+			} else {
+				utils.LoggerWithTrace(ctx).Info("batch_save_success", slog.Int("count", len(moviesToSave)), slog.String("stage", "gemini_queue"))
 			}
 		}
 	}
@@ -988,7 +1001,7 @@ func (a *App) FixSelected(selected []map[string]interface{}) {
 	for _, s := range selected {
 		filename, ok := s["filename"].(string)
 		if !ok || filename == "" {
-			slog.Warn("fix_selected_invalid_filename", slog.Any("entry", s))
+			utils.LoggerWithTrace(ctx).Warn("fix_selected_invalid_filename", slog.Any("entry", s))
 			continue
 		}
 		hint, _ := s["hint"].(string)
@@ -1017,7 +1030,7 @@ func (a *App) FixSelected(selected []map[string]interface{}) {
 		current++
 		filename, ok := fix["filename"].(string)
 		if !ok || filename == "" {
-			slog.Warn("fix_selected_invalid_filename", slog.Any("entry", fix))
+			utils.LoggerWithTrace(ctx).Warn("fix_selected_invalid_filename", slog.Any("entry", fix))
 			continue
 		}
 		hint, _ := fix["hint"].(string)

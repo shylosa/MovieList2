@@ -253,6 +253,7 @@ POSTERS_DIR=posters
 | `internal/tmdb/search.go` | `searchAndFetch` | Enforced early-exit of the UA→RU cascade: if `uk-UA` produces a candidate with `score >= 140`, the cascade stops and `ru-RU` is not queried (2026-06-04). |
 
 | `internal/web/generator.go` | `htmlLayout` | (2026-06-05) Mobile CSS tweaks: hide selected `sort` control text on small screens (icon-only closed state), preserve full `<option>` labels in dropdown; expand `plot` visibility in grid and list mobile cards (increased `-webkit-line-clamp`), and reduce visual weight of `genre`/`details` to free vertical space. |
+| `app.go` | `RunScan`, `processGeminiQueue`, `FixSelected` | Fixed silent cleanup of missing media/poster records; restored trace-aware logging for AI batches and added `batch_save_success` events for transactional saves. |
 
 **CHECKLIST complete (2026-06-02):** Restructured mobile list-mode layout, added SVG data-URI favicon, limited mobile grid-mode title to 2 lines, and verified all compilation steps pass.
 
