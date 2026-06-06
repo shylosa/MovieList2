@@ -217,7 +217,10 @@ POSTERS_DIR=posters
 | `internal/web/generator.go` | `Generate` | Added `isMobile bool`: TMDB `PosterURL` for mobile, `filepath.ToSlash` only for local posters. |
 | `app.go` | `finalizeScan`, `OpenShowcase` | `web.Generate(..., false)` for local PC showcase. |
 | `app.go` | `SyncToGitHub` | On-demand mobile showcase: `index.html` + `web.Generate(..., true)`; events `github-sync-started` / `github-sync-finished`; `isGitHubSyncing` double-click guard. |
-| `app.go` | `deployToGitHubPages` | `git add -f index.html`, commit (ignore empty), `git push origin main` via `os/exec` with explicit `cmd.Dir`. |
+| `app.go` | `deployToGitHubPages` | `git add -f index.html`, commit (ignore empty), `git push origin gh-pages` via `os/exec` with explicit `cmd.Dir`. |
+| `app.go` | `FixSelected` | Use stable app context `a.ctx` for `finalizeScan`, avoiding canceled local scan context propagation. |
+| `internal/tmdb/search.go` | `buildAttempts` | Filter generic parent folder names such as `series`, `movies`, `кіно` before creating a parent-directory search attempt. |
+| `go.mod` | `go` directive | Change Go toolchain declaration from invalid `1.26.2` to supported `1.25.0` given current indirect dependency requirements. |
 | `app.go` | `OpenGoogleSheet, OpenGitHubRepo, OpenGitHubPage` | Added config-driven backend browser-open methods for Google Sheet, GitHub repo, and GitHub Pages. |
 | `frontend/src/main.js` | toolbar buttons | Replaced hardcoded repository URL with Wails methods and added a GitHub Pages open button. |
 | `frontend/src/main.js`, `frontend/src/style.css` | toolbar layout and project link | Grouped Google Sheets controls into a horizontal toolbar row and updated the project URL to <https://github.com/shylosa/MovieList2>. |

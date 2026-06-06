@@ -1,17 +1,21 @@
 # MovieList — Cursor Rules
 
 ## Workflow
+
 - Read `AGENTS.md` before starting work.
 - Update `AGENTS.md` only for meaningful architectural or behavioral changes.
 - Work incrementally: one function / one subsystem at a time.
 - After compile/test failure: STOP and wait for user instructions.
 - Do not perform uncontrolled self-repair loops.
+- Do not downgrade the Go version in `go.mod` without explicit approval from the project author.
 
 ## Communication
+
 - Chat responses: Ukrainian only.
 - Code comments: English only.
 
 ## Formatting & Encoding
+
 - All source files must use UTF-8 without BOM.
 All source files must use LF line endings (not CRLF).
 Verify: python -c "assert b'\r\n' not in open('file','rb').read()"
@@ -20,6 +24,7 @@ Verify: python -c "assert b'\r\n' not in open('file','rb').read()"
 - Preserve existing formatting style.
 
 After editing any `.go` file verify UTF-8:
+
 ```bash
 python -c "open('path/to/file','rb').read().decode('utf-8')"
 
@@ -27,97 +32,94 @@ python -c "open('path/to/file','rb').read().decode('utf-8')"
 
 If decoding fails:
 
-* restore file from git
-* do not continue editing corrupted file
+- restore file from git
+- do not continue editing corrupted file
 
 ## Go Rules
 
-* Use modern Go 1.26+ patterns where appropriate.
-* Always check errors.
-* Use `context.Context` correctly.
-* Check `ctx.Err()`:
-* before network requests
-* inside long loops
-* before expensive operations
-
-
+- Use modern Go 1.26+ patterns where appropriate.
+- Always check errors.
+- Use `context.Context` correctly.
+- Check `ctx.Err()`:
+- before network requests
+- inside long loops
+- before expensive operations
 
 Never:
 
-* compile regexp inside loops
-* use `time.After()` inside loops
-* mutate shared maps from goroutines
-* introduce uncontrolled goroutine fan-out
+- compile regexp inside loops
+- use `time.After()` inside loops
+- mutate shared maps from goroutines
+- introduce uncontrolled goroutine fan-out
 
 Use:
 
-* package-level regexps
-* `strings.Builder`
-* reusable `strings.NewReplacer`
+- package-level regexps
+- `strings.Builder`
+- reusable `strings.NewReplacer`
 
 ## SQLite Rules
 
-* Use `modernc.org/sqlite`.
-* Use transactional batch writes.
-* Always keep `defer tx.Rollback()`.
-* Preserve WAL settings:
-* `PRAGMA journal_mode=WAL;`
-* `PRAGMA synchronous=NORMAL;`
-* `PRAGMA busy_timeout=5000;`
+- Use `modernc.org/sqlite`.
+- Use transactional batch writes.
+- Always keep `defer tx.Rollback()`.
+- Preserve WAL settings:
+- `PRAGMA journal_mode=WAL;`
+- `PRAGMA synchronous=NORMAL;`
+- `PRAGMA busy_timeout=5000;`
 
-
-* Keep `SetMaxOpenConns(1)`.
-* Do not replace batch operations with per-row writes.
+- Keep `SetMaxOpenConns(1)`.
+- Do not replace batch operations with per-row writes.
 
 ## Gemini Rules
 
-* Use only `google.golang.org/genai`.
-* Never use raw HTTP Gemini integrations.
-* Gemini processing must remain mostly sequential.
-* Respect shared `rate.Limiter`.
-* Use `singleflight.Group` for shared model loading.
-* Never trust Gemini-generated IDs directly.
-* Keep confidence validation centralized.
+- Use only `google.golang.org/genai`.
+- Never use raw HTTP Gemini integrations.
+- Gemini processing must remain mostly sequential.
+- Respect shared `rate.Limiter`.
+- Use `singleflight.Group` for shared model loading.
+- Never trust Gemini-generated IDs directly.
+- Keep confidence validation centralized.
 
 ## TMDB Rules
 
-* Never use `/search/multi` when media type is known.
-* Preserve recognition order:
+- Never use `/search/multi` when media type is known.
+- Preserve recognition order:
+
 1. IMDB
 2. typed search
 3. transliteration
 4. parent folder
 5. Gemini fallback
 
-
-* Preserve metadata cascade: `uk-UA` → `ru-RU` → `en-US`
-* Keep TMDB verification mandatory before translation.
+- Preserve metadata cascade: `uk-UA` → `ru-RU` → `en-US`
+- Keep TMDB verification mandatory before translation.
 
 ## Frontend / Wails Rules
 
 Do not rename without explicit migration:
 
-* Wails events
-* HTML IDs
-* DB columns
-* JSON fields
-* exported Wails methods
+- Wails events
+- HTML IDs
+- DB columns
+- JSON fields
+- exported Wails methods
 
 Required HTML IDs:
 
-* `filteredCount`
-* `filteredNum`
-* `noResults`
+- `filteredCount`
+- `filteredNum`
+- `noResults`
 
 ## Safety Rules
 
 Never:
 
-* silently remove cancellation handling
-* remove rate limiting
-* bypass TMDB verification
-* replace batch persistence with per-row saves
-* introduce hidden background goroutines
-* rewrite architecture without request
+- silently remove cancellation handling
+- remove rate limiting
+- bypass TMDB verification
+- replace batch persistence with per-row saves
+- introduce hidden background goroutines
+- rewrite architecture without request
 
 Prefer minimal targeted changes over broad refactors.

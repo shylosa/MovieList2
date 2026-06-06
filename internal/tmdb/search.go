@@ -43,6 +43,23 @@ type scoredResult struct {
 	matchedAlias string
 }
 
+var genericDirs = map[string]bool{
+	"movies":    true,
+	"movie":     true,
+	"series":    true,
+	"serials":   true,
+	"films":     true,
+	"film":      true,
+	"video":     true,
+	"videos":    true,
+	"downloads": true,
+	"download":  true,
+	"kino":      true,
+	"кіно":      true,
+	"фільми":    true,
+	"серіали":   true,
+}
+
 // SearchWithFallbacks — каскадний пошук з fallback-стратегіями.
 // Послідовність спроб залежить від ParsedFile (мова, рік, тип).
 // Gemini-fallback сюди НЕ входить — він на рівні вище (client.go).
@@ -120,7 +137,8 @@ func buildAttempts(parsed ParsedFile, originalFilename, mediaRoot string) []sear
 	// 🟢 Додаємо фоллбек на батьківську папку з низьким пріоритетом.
 	// Пропускаємо якщо ParentDir є коренем медіатеки або не несе інформації.
 	if parsed.ParentDir != "" && parsed.ParentDir != "." && parsed.ParentDir != "/" &&
-		!isScanRootParent(originalFilename, mediaRoot) {
+		!isScanRootParent(originalFilename, mediaRoot) &&
+		!genericDirs[strings.ToLower(parsed.ParentDir)] {
 		// Парсимо ім'я папки, щоб дістати рік і чисту назву
 		dirParsed := ParseFilename(parsed.ParentDir)
 		if dirParsed.CleanTitle != parsed.CleanTitle && len(dirParsed.CleanTitle) > 2 {
@@ -192,7 +210,7 @@ func (c *Client) searchAndFetch(
 	var bestGlobal *scoredResult
 	logger := utils.LoggerWithTrace(ctx).With(slog.String("component", "tmdb_search_cascade"))
 
-	LANG_LOOP:
+LANG_LOOP:
 	for _, langParam := range langs {
 		type searchEndpoint struct {
 			name             string
