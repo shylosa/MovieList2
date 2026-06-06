@@ -164,6 +164,31 @@ html {
     gap: 10px;
 }
 
+.nav-btn.icon-btn {
+    width: 40px;
+    min-width: 40px;
+    height: 40px;
+    padding: 0;
+    justify-content: center;
+    border-radius: 10px;
+    margin: 0;
+}
+
+.toolbar-row {
+    display: flex;
+    align-items: center;
+    flex-wrap: nowrap;
+    justify-content: space-between;
+}
+
+.nav-btn.icon-btn .nav-icon {
+    font-size: 18px;
+}
+
+.nav-btn.icon-btn:hover {
+    background-color: rgba(255, 255, 255, 0.08);
+}
+
 .nav-btn:hover {
     background-color: var(--nav-hover);
     color: var(--text-primary);

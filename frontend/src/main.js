@@ -1,6 +1,6 @@
 import './style.css';
 
-import { GetAppVersion, GetMovies, GetStats, RunScan, StopScan, GetAIModels, OpenLogs, FixSelected, SyncToCloud, SyncToGitHub, OpenShowcase, OpenSheet, OpenURL, DeleteMovie, SelectMediaFolder } from '../wailsjs/go/main/App.js';
+import { GetAppVersion, GetMovies, GetStats, RunScan, StopScan, GetAIModels, OpenLogs, FixSelected, SyncToCloud, SyncToGitHub, OpenShowcase, OpenSheet, OpenGoogleSheet, OpenGitHubRepo, OpenGitHubPage, OpenURL, DeleteMovie, SelectMediaFolder } from '../wailsjs/go/main/App.js';
 import { Quit, WindowMinimise, WindowToggleMaximise, EventsOn } from '../wailsjs/runtime/runtime.js';
 import logoUrl from './assets/images/appicon.png';
 
@@ -26,9 +26,24 @@ document.querySelector('#app').innerHTML = `
         <div style="padding-top: 10px; flex-grow: 1;">
             <div class="nav-btn active" id="btn-overview"><span class="nav-icon">📊</span> Огляд</div>
             <div class="nav-btn" id="btn-scan"><span class="nav-icon">🔍</span> Оновити базу</div>
-            <div class="nav-btn" id="btn-sync"><span class="nav-icon">☁️</span> Sync Sheets</div>
-            <div class="nav-btn" id="btn-sync-github"><span class="nav-icon">📱</span><span class="nav-label">Sync GitHub</span><span class="nav-spinner"></span></div>
-            <div class="nav-btn" id="btn-open-sheet"><span class="nav-icon">📊</span> Відкрити таблицю</div>
+            <div class="toolbar-row">
+                <div class="nav-btn" id="btn-sync"><span class="nav-icon">☁️</span> Sync Sheets</div>
+                <div class="nav-btn icon-btn" id="btn-open-sheet" title="Відкрити таблицю">
+                    <span class="nav-icon">📊</span>
+                </div>
+            </div>
+            <div class="toolbar-row">
+                <div class="nav-btn" id="btn-sync-github">
+                    <span class="nav-icon">📱</span><span class="nav-label">Sync GitHub</span>
+                    <span class="nav-spinner"></span>
+                </div>
+                <div class="nav-btn icon-btn" id="btn-open-project" title="Відкрити репозиторій">
+                    <span class="nav-icon">💻</span>
+                </div>
+                <div class="nav-btn icon-btn" id="btn-open-page" title="Відкрити GitHub Pages">
+                    <span class="nav-icon">🌐</span>
+                </div>
+            </div>
             <div class="nav-btn" id="btn-showcase"><span class="nav-icon">🎬</span> Вітрина</div>
             <div style="margin: 20px 15px 5px; font-size: 0.75em; color: var(--text-dim); font-weight: bold;">Інструменти</div>
 
@@ -39,7 +54,7 @@ document.querySelector('#app').innerHTML = `
         </div>
 
         <div class="sidebar-footer">
-            © 2026 <a href="https://github.com/shylosa/MovieList" target="_blank">shylosa</a>
+            © 2026 <a href="#" onclick="window.go.main.App.OpenGitHubRepo(); return false;">shylosa</a>
         </div>
     </div>
     <div class="main-area">
@@ -208,8 +223,23 @@ btnSyncGitHub.onclick = () => {
     SyncToGitHub();
 };
 document.getElementById('btn-open-sheet').onclick = () => {
-    OpenSheet();
+    OpenGoogleSheet();
 };
+
+const btnOpenProject = document.getElementById('btn-open-project');
+if (btnOpenProject) {
+    btnOpenProject.onclick = () => {
+        OpenGitHubRepo();
+    };
+}
+
+const btnOpenPage = document.getElementById('btn-open-page');
+if (btnOpenPage) {
+    btnOpenPage.onclick = () => {
+        OpenGitHubPage();
+    };
+}
+
 document.getElementById('btn-showcase').onclick = () => {
     switchTab('overview', 'Вітрина');
     OpenShowcase();

@@ -227,12 +227,34 @@ func (a *App) SelectMediaFolder() (string, error) {
 	return path, nil
 }
 func (a *App) OpenSheet() {
+	a.OpenGoogleSheet()
+}
+
+func (a *App) OpenGoogleSheet() {
 	if a.cfg.GoogleSheetURL == "" {
 		a.logFront("❌ URL таблиці не вказано у конфігурації")
 		return
 	}
 	a.logFront("🌐 Відкриваю Google Таблицю...")
 	wailsRuntime.BrowserOpenURL(a.ctx, a.cfg.GoogleSheetURL)
+}
+
+func (a *App) OpenGitHubRepo() {
+	if a.cfg.GithubURL == "" {
+		a.logFront("❌ URL репозиторію не вказано у конфігурації")
+		return
+	}
+	a.logFront("🌐 Відкриваю GitHub Repository...")
+	wailsRuntime.BrowserOpenURL(a.ctx, a.cfg.GithubURL)
+}
+
+func (a *App) OpenGitHubPage() {
+	if a.cfg.GithubPageURL == "" {
+		a.logFront("❌ URL сторінки проєкту не вказано у конфігурації")
+		return
+	}
+	a.logFront("🌐 Відкриваю GitHub Pages...")
+	wailsRuntime.BrowserOpenURL(a.ctx, a.cfg.GithubPageURL)
 }
 
 func (a *App) OpenShowcase() {

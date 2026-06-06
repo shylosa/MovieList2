@@ -218,6 +218,9 @@ POSTERS_DIR=posters
 | `app.go` | `finalizeScan`, `OpenShowcase` | `web.Generate(..., false)` for local PC showcase. |
 | `app.go` | `SyncToGitHub` | On-demand mobile showcase: `index.html` + `web.Generate(..., true)`; events `github-sync-started` / `github-sync-finished`; `isGitHubSyncing` double-click guard. |
 | `app.go` | `deployToGitHubPages` | `git add -f index.html`, commit (ignore empty), `git push origin main` via `os/exec` with explicit `cmd.Dir`. |
+| `app.go` | `OpenGoogleSheet, OpenGitHubRepo, OpenGitHubPage` | Added config-driven backend browser-open methods for Google Sheet, GitHub repo, and GitHub Pages. |
+| `frontend/src/main.js` | toolbar buttons | Replaced hardcoded repository URL with Wails methods and added a GitHub Pages open button. |
+| `frontend/src/main.js`, `frontend/src/style.css` | toolbar layout and project link | Grouped Google Sheets controls into a horizontal toolbar row and updated the project URL to <https://github.com/shylosa/MovieList2>. |
 | `frontend/src/main.js` | `btn-sync-github` | Button «Sync GitHub»; `github-sync-started` / `github-sync-finished` disable + spinner; result in console. |
 | `AGENTS.md` | Showcase & GitHub Pages | Documented `local_index.html` vs `index.html` and ignored `git commit` exit on empty tree. |
 | `app.go` | `gitRepoRoot` | Resolve repo root via `git rev-parse --show-toplevel` for `index.html` generation and deploy `cmd.Dir`. |
@@ -248,6 +251,8 @@ POSTERS_DIR=posters
 | `app.go` | `RunScan` | Phase 4 verified: `scanTraceID` + `scanCtx` propagated to all workers (`processGeminiQueue`, `processTranslationQueue`, `fetchAIModels`, `runTMDBScan`, `processScanResults`); `context.Background()` only in `fetchAIModels` nil guard (correct). No `trace_id=unknown` in Gemini pipeline. |
 | `internal/tmdb/search.go` | `scoreResult` | Phase 5: added `candidate_score_breakdown` debug log (titleScore, yearScore, langScore, popBonus, finalScore) and `candidate_hard_rejected` debug log when titleScore==0. Tracked yearScore/langScore as separate variables for breakdown. Scoring algorithm unchanged. |
 | `internal/tmdb/search.go` | `searchAndFetch` | Enforced early-exit of the UA→RU cascade: if `uk-UA` produces a candidate with `score >= 140`, the cascade stops and `ru-RU` is not queried (2026-06-04). |
+
+| `internal/web/generator.go` | `htmlLayout` | (2026-06-05) Mobile CSS tweaks: hide selected `sort` control text on small screens (icon-only closed state), preserve full `<option>` labels in dropdown; expand `plot` visibility in grid and list mobile cards (increased `-webkit-line-clamp`), and reduce visual weight of `genre`/`details` to free vertical space. |
 
 **CHECKLIST complete (2026-06-02):** Restructured mobile list-mode layout, added SVG data-URI favicon, limited mobile grid-mode title to 2 lines, and verified all compilation steps pass.
 

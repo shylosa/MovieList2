@@ -26,6 +26,18 @@ export function GetStats() {
   return window['go']['main']['App']['GetStats']();
 }
 
+export function OpenGitHubPage() {
+  return window['go']['main']['App']['OpenGitHubPage']();
+}
+
+export function OpenGitHubRepo() {
+  return window['go']['main']['App']['OpenGitHubRepo']();
+}
+
+export function OpenGoogleSheet() {
+  return window['go']['main']['App']['OpenGoogleSheet']();
+}
+
 export function OpenLogs() {
   return window['go']['main']['App']['OpenLogs']();
 }

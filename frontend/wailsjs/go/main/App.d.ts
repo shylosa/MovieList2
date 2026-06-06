@@ -14,6 +14,12 @@ export function GetMovies():Promise<Array<storage.Movie>>;
 
 export function GetStats():Promise<Record<string, any>>;
 
+export function OpenGitHubPage():Promise<void>;
+
+export function OpenGitHubRepo():Promise<void>;
+
+export function OpenGoogleSheet():Promise<void>;
+
 export function OpenLogs():Promise<void>;
 
 export function OpenSheet():Promise<void>;

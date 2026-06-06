@@ -229,6 +229,9 @@ const htmlLayout = `<!DOCTYPE html>
                 background-repeat: no-repeat;
                 background-position: center;
                 background-size: 20px 20px;
+                /* Hide the selected option text on small screens, keep options text in dropdown */
+                color: transparent; /* hide selected text */
+                text-indent: -9999px; /* push text out of view for closed select */
             }
             .filters-row .sort-select option {
                 background-color: #1a1a1a;
@@ -316,9 +319,19 @@ const htmlLayout = `<!DOCTYPE html>
             .movie-list.grid-mode .genre,
             .movie-list.grid-mode .title-en,
             .movie-list.grid-mode .details,
-            .movie-list.grid-mode .plot,
             .movie-list.grid-mode .filename {
                 display: none !important;
+            }
+            /* Keep plot visible in compact grid cards and allow more lines */
+            .movie-list.grid-mode .plot {
+                display: -webkit-box !important;
+                -webkit-line-clamp: 4;
+                -webkit-box-orient: vertical;
+                overflow: hidden;
+                margin-top: 6px;
+                font-size: 0.92em;
+                color: #ccc;
+                line-height: 1.35;
             }
 
             /* Список: постер зліва, сюжет до 4 рядків під постером */
@@ -374,12 +387,14 @@ const htmlLayout = `<!DOCTYPE html>
             .movie-list.list-mode .details {
                 grid-column: 2;
                 grid-row: 3;
-                font-size: 0.85em;
+                font-size: 0.78em; /* slightly smaller to save vertical space */
                 margin: 0;
                 display: -webkit-box;
                 -webkit-line-clamp: 2;
                 -webkit-box-orient: vertical;
                 overflow: hidden;
+                color: #bdbdbd;
+                line-height: 1.25;
             }
             .movie-list.list-mode .filename {
                 display: none !important;
@@ -388,10 +403,10 @@ const htmlLayout = `<!DOCTYPE html>
                 grid-column: 1 / span 2;
                 grid-row: 4;
                 margin-top: 6px;
-                font-size: 0.85em;
+                font-size: 0.95em;
                 line-height: 1.45;
                 display: -webkit-box;
-                -webkit-line-clamp: 5;
+                -webkit-line-clamp: 7; /* allow more visible lines on mobile */
                 -webkit-box-orient: vertical;
                 overflow: hidden;
             }

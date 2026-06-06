@@ -14,6 +14,7 @@ type Config struct {
 	AppVersion         string
 	GithubName         string
 	GithubURL          string
+	GithubPageURL      string
 	MediaFolderPath    string
 	ExcludeFolders     []string
 	GeminiAPIKey       string
@@ -70,7 +71,8 @@ func Load() *Config {
 	return &Config{
 		AppVersion:         getEnvOrDefault("APP_VERSION", "2.0"),
 		GithubName:         getEnvOrDefault("GITHUB_NAME", "shylosa"),
-		GithubURL:          getEnvOrDefault("GITHUB_URL", "https://github.com/shylosa/MovieList"),
+		GithubURL:          getEnvOrDefault("GITHUB_URL", "https://github.com/shylosa/MovieList2"),
+		GithubPageURL:      getEnvOrDefault("GITHUB_PAGE_URL", "https://shylosa.github.io/MovieList2"),
 		MediaFolderPath:    getEnvOrDefault("MEDIA_FOLDER_PATH", ""),
 		ExcludeFolders:     excludeList,
 		GeminiAPIKey:       os.Getenv("GEMINI_API_KEY"),
