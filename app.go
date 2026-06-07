@@ -401,7 +401,7 @@ func (a *App) deployToGitHubPages() error {
 	_ = run("git", "commit", "-m", fmt.Sprintf("Update mobile showcase %s",
 		time.Now().Format("2006-01-02 15:04")))
 
-	if err := run("git", "push", "origin", "gh-pages"); err != nil {
+	if err := run("git", "push", "origin", a.cfg.GitHubPagesBranch); err != nil {
 		return fmt.Errorf("push failed: %w", err)
 	}
 

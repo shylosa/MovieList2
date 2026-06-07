@@ -43,21 +43,12 @@ type scoredResult struct {
 	matchedAlias string
 }
 
-var genericDirs = map[string]bool{
-	"movies":    true,
-	"movie":     true,
-	"series":    true,
-	"serials":   true,
-	"films":     true,
-	"film":      true,
-	"video":     true,
-	"videos":    true,
-	"downloads": true,
-	"download":  true,
-	"kino":      true,
-	"кіно":      true,
-	"фільми":    true,
-	"серіали":   true,
+var genericParentDirs = map[string]bool{
+	"movies": true, "movie": true, "series": true, "films": true, "film": true,
+	"video": true, "videos": true, "media": true,
+	"downloads": true, "download": true, "temp": true, "tmp": true,
+	"кино": true, "кіно": true, "фільми": true, "фільм": true,
+	"серіали": true, "серіал": true, "відео": true,
 }
 
 // SearchWithFallbacks — каскадний пошук з fallback-стратегіями.
@@ -138,7 +129,7 @@ func buildAttempts(parsed ParsedFile, originalFilename, mediaRoot string) []sear
 	// Пропускаємо якщо ParentDir є коренем медіатеки або не несе інформації.
 	if parsed.ParentDir != "" && parsed.ParentDir != "." && parsed.ParentDir != "/" &&
 		!isScanRootParent(originalFilename, mediaRoot) &&
-		!genericDirs[strings.ToLower(parsed.ParentDir)] {
+		!genericParentDirs[strings.ToLower(parsed.ParentDir)] {
 		// Парсимо ім'я папки, щоб дістати рік і чисту назву
 		dirParsed := ParseFilename(parsed.ParentDir)
 		if dirParsed.CleanTitle != parsed.CleanTitle && len(dirParsed.CleanTitle) > 2 {

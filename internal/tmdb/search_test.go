@@ -94,6 +94,21 @@ func TestBuildAttemptsKeepsParentFolderForNestedRelease(t *testing.T) {
 	t.Fatal("nested release folder fallback should be present")
 }
 
+func TestBuildAttemptsSkipsGenericParentFolders(t *testing.T) {
+	root := t.TempDir()
+	genericNames := []string{"series", "films", "downloads", "кино", "movies", "video"}
+	for _, generic := range genericNames {
+		file := filepath.Join(root, generic, "Dune.mkv")
+		parsed := ParseFilename(file)
+		attempts := buildAttempts(parsed, file, root)
+		for _, attempt := range attempts {
+			if attempt.label == "Папка" {
+				t.Errorf("generic folder %q should be skipped, got attempt with query %q", generic, attempt.query)
+			}
+		}
+	}
+}
+
 func TestDownloadPosterPreservesFlattenedPathPrefix(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte("poster"))

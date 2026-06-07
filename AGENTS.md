@@ -5,7 +5,6 @@
 MovieList App — desktop application for cataloging local movie/TV collections.
 
 Tech stack: Go 1.26+, Wails v2, SQLite, TMDB API, Google Gemini (`google.golang.org/genai`).
-*Note on toolchain: go 1.26.2 in go.mod — verify this is the intended toolchain version. Latest stable as of audit date is 1.24.x. If using pre-release, document why.*
 
 ---
 
@@ -32,7 +31,7 @@ Tech stack: Go 1.26+, Wails v2, SQLite, TMDB API, Google Gemini (`google.golang.
 | `index.html` | Mobile showcase for GitHub Pages; TMDB CDN posters (`PosterURL` when `web.Generate(..., isMobile: true)`). Committed via `SyncToGitHub` only. |
 
 * **Deploy trigger:** `SyncToGitHub()` from UI only — no background sync.
-* **Git:** System `git` via `os/exec`; no tokens in code. `git rev-parse --show-toplevel` sets `cmd.Dir` and `index.html` output path. `git push origin main` deploys site root on `main`.
+* **Git:** System `git` via `os/exec`; no tokens in code. `git rev-parse --show-toplevel` sets `cmd.Dir` and `index.html` output path. `git push origin <cfg.GitHubPagesBranch>` (default: "main", env: `GITHUB_PAGES_BRANCH`) deploys site root on the configured branch.
 * **`git commit` exit code:** Non-zero when there is nothing to commit is **not** treated as failure (showcase unchanged); `git push` still runs.
 
 ### Recognition Pipeline
@@ -174,8 +173,6 @@ POSTERS_DIR=posters
 | `app.go` | `processTranslationQueue` | Added diagnostic logging for translation candidates that appear to need translation but were not queued, to aid debugging of 429/skip cases. |
 | `internal/tmdb/client.go` | `searchDirectly` | Removed unused `searchDirectly` helper — `runPipeline` is the canonical path. |
 | `internal/storage/storage.go` | `GetAllMovies, GetMoviesByFilenames, GetMovieByFilename` | Populate `Movie.ID` from SQLite `rowid` to provide stable numeric IDs for APIs that require them. |
-| `go.mod` | `module` | Downgraded `go` directive from `1.26.2` to `1.23` to match available Go toolchains and avoid non-existent version. |
-| `go.mod` | `module` | Restored `go` directive to `1.26.2` per user request. |
 | `internal/storage/storage.go` | `PatchMovie`, `SaveMovie`, `SaveMoviesBatch` | Replaced `INSERT OR REPLACE` with merge upsert (`movieUpsertQuery`); `PatchMovie` updates only non-empty fields. |
 | `app.go` | `processGeminiQueue` | On batch error or empty recognition: log only; no `SaveMoviesBatch` with filename-only structs. |
 | `internal/storage/storage.go` | `SaveMoviesBatch` | Any failed `Exec` aborts the batch; `defer tx.Rollback()` on error paths. |
@@ -217,10 +214,9 @@ POSTERS_DIR=posters
 | `internal/web/generator.go` | `Generate` | Added `isMobile bool`: TMDB `PosterURL` for mobile, `filepath.ToSlash` only for local posters. |
 | `app.go` | `finalizeScan`, `OpenShowcase` | `web.Generate(..., false)` for local PC showcase. |
 | `app.go` | `SyncToGitHub` | On-demand mobile showcase: `index.html` + `web.Generate(..., true)`; events `github-sync-started` / `github-sync-finished`; `isGitHubSyncing` double-click guard. |
-| `app.go` | `deployToGitHubPages` | `git add -f index.html`, commit (ignore empty), `git push origin gh-pages` via `os/exec` with explicit `cmd.Dir`. |
+| `app.go` | `deployToGitHubPages` | `git add -f index.html`, commit (ignore empty), `git push origin <cfg.GitHubPagesBranch>` (env: `GITHUB_PAGES_BRANCH`, default: `main`) via `os/exec` with explicit `cmd.Dir`. |
 | `app.go` | `FixSelected` | Use stable app context `a.ctx` for `finalizeScan`, avoiding canceled local scan context propagation. |
 | `internal/tmdb/search.go` | `buildAttempts` | Filter generic parent folder names such as `series`, `movies`, `кіно` before creating a parent-directory search attempt. |
-| `go.mod` | `go` directive | Change Go toolchain declaration from invalid `1.26.2` to supported `1.25.0` given current indirect dependency requirements. |
 | `app.go` | `OpenGoogleSheet, OpenGitHubRepo, OpenGitHubPage` | Added config-driven backend browser-open methods for Google Sheet, GitHub repo, and GitHub Pages. |
 | `frontend/src/main.js` | toolbar buttons | Replaced hardcoded repository URL with Wails methods and added a GitHub Pages open button. |
 | `frontend/src/main.js`, `frontend/src/style.css` | toolbar layout and project link | Grouped Google Sheets controls into a horizontal toolbar row and updated the project URL to <https://github.com/shylosa/MovieList2>. |
@@ -257,6 +253,14 @@ POSTERS_DIR=posters
 
 | `internal/web/generator.go` | `htmlLayout` | (2026-06-05) Mobile CSS tweaks: hide selected `sort` control text on small screens (icon-only closed state), preserve full `<option>` labels in dropdown; expand `plot` visibility in grid and list mobile cards (increased `-webkit-line-clamp`), and reduce visual weight of `genre`/`details` to free vertical space. |
 | `app.go` | `RunScan`, `processGeminiQueue`, `FixSelected` | Fixed silent cleanup of missing media/poster records; restored trace-aware logging for AI batches and added `batch_save_success` events for transactional saves. |
+
+### Patch — Червень 2026 (аудит #2)
+
+* `app.go` / `FixSelected`: `finalizeScan` тепер отримує `a.ctx` замість локального скасованого `ctx` (аналог BUG-01 з RunScan)
+
+* `go.mod`: відновлено версію `go 1.26.2` (навмисна версія проєкту, підтверджена власником)
+* `config.go` + `app.go`: `deployToGitHubPages` тепер використовує `cfg.GitHubPagesBranch` (env: `GITHUB_PAGES_BRANCH`, default: "main") замість захардкодженого "main"
+* `search.go`: `buildAttempts` більше не надсилає generic-імена папок (`series`, `films`, `downloads` тощо) як пошукові запити до TMDB
 
 **CHECKLIST complete (2026-06-02):** Restructured mobile list-mode layout, added SVG data-URI favicon, limited mobile grid-mode title to 2 lines, and verified all compilation steps pass.
 
