@@ -265,3 +265,13 @@ POSTERS_DIR=posters
 **CHECKLIST complete (2026-06-02):** Restructured mobile list-mode layout, added SVG data-URI favicon, limited mobile grid-mode title to 2 lines, and verified all compilation steps pass.
 
 **Final verification (2026-06-04):** `go build ./...`, `go vet ./...`, `gofmt -l .` all passed. Phases 4-5 completed.
+
+### Grok Integration Patch — Червень 2026
+
+* `internal/ai/gemini.go`: `requestWithRetry` та `TranslateBulk` тепер при активному `geminiQuotaLocked` одразу викликають відповідні Grok-fallback методи (`grokRecognizeFallback`/`grokTranslateFallback`), оминаючи каскад Gemini.
+* `internal/ai/gemini.go`: Виділено методи `grokRecognizeFallback` та `grokTranslateFallback` для усунення дублювання логіки та inline-викликів Grok. Додано метод `ResetQuotaLock` для скидання блокування квоти Gemini.
+* `app.go`: Додано скидання блокування квоти через `a.aiClient.ResetQuotaLock()` на початку сканування у `RunScan`.
+* `app.go`: Оновлено `fetchAIModels` для коректної підтримки Grok-only режиму при відсутності `GEMINI_API_KEY`, а також додано індикацію fallback-моделі Grok у списку.
+* `internal/config/config.go` та `internal/ai/grok.go`: Додано параметр `GROK_MODEL` (дефолт: `grok-3-mini`) в структуру конфігурації замість захардкодженної константи моделі Grok.
+* `internal/ai/gemini_test.go` та `app_getaimodels_test.go`: Додано нові тести для перевірки Grok fallback при quota lock, скидання блокування квоти та роботи в Grok-only режимі.
+

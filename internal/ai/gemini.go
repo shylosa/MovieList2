@@ -188,6 +188,14 @@ func (c *Client) getGenaiClient(ctx context.Context) (*genai.Client, error) {
 // У поточній версії google.golang.org/genai Client не має методу Close().
 func (c *Client) Close() {}
 
+// ResetQuotaLock clears the Gemini quota lock flag so that recovered quotas
+// are retried in the next scan session rather than skipped permanently.
+func (c *Client) ResetQuotaLock() {
+	if geminiQuotaLocked.CompareAndSwap(true, false) {
+		slog.Info("gemini_quota_lock_reset")
+	}
+}
+
 // RecognizeBulk — пакетне розпізнавання імен файлів через Gemini.
 // Повертає дані для пошуку в TMDB + fallback-поля для мержу.
 func (c *Client) RecognizeBulk(ctx context.Context, contexts []FileRecognitionContext) ([]RecognizedTitle, error) {
@@ -205,9 +213,10 @@ func (c *Client) RecognizeBulk(ctx context.Context, contexts []FileRecognitionCo
 }
 
 func (c *Client) requestWithRetry(ctx context.Context, prompt string) ([]RecognizedTitle, error) {
+	// Quota locked: skip Gemini cascade entirely and go straight to Grok.
 	if geminiQuotaLocked.Load() {
-		utils.LoggerWithTrace(ctx).Warn("gemini_quota_lock_skip")
-		return nil, fmt.Errorf("gemini quota lock is active")
+		utils.LoggerWithTrace(ctx).Warn("gemini_quota_lock_skip_to_grok")
+		return c.grokRecognizeFallback(ctx, prompt)
 	}
 	var lastErr error
 	models := c.getModels() // 🟢: Беремо актуальний каскад
@@ -250,22 +259,9 @@ func (c *Client) requestWithRetry(ctx context.Context, prompt string) ([]Recogni
 		return nil, ctx.Err()
 	}
 
-	// Grok fallback — last resort after all Gemini models failed
-	if c.cfg.GrokAPIKey != "" {
-		utils.LoggerWithTrace(ctx).Info("grok_recognize_fallback")
-		raw, grokErr := c.callGrok(ctx, prompt)
-		if grokErr == nil {
-			parsed, parseErr := parseRecognizeResponse(raw)
-			if parseErr == nil {
-				utils.LoggerWithTrace(ctx).Info("grok_recognize_success",
-					slog.Int("results_count", len(parsed)),
-				)
-				return parsed, nil
-			}
-			lastErr = fmt.Errorf("grok parse error: %w", parseErr)
-		} else {
-			lastErr = grokErr
-		}
+	// Grok fallback after all Gemini models failed.
+	if result, err := c.grokRecognizeFallback(ctx, prompt); err == nil {
+		return result, nil
 	}
 	return nil, fmt.Errorf("all AI models unavailable (incl. Grok): %w", lastErr)
 }
@@ -452,14 +448,6 @@ func (c *Client) TranslateBulk(ctx context.Context, items []BulkTranslateItem) (
 		return nil, nil
 	}
 
-	// If Gemini quota is locked but Grok is configured, fall back to Grok.
-	if geminiQuotaLocked.Load() {
-		utils.LoggerWithTrace(ctx).Warn("gemini_quota_lock_skip")
-		if c.cfg.GrokAPIKey == "" {
-			return nil, fmt.Errorf("gemini quota lock is active")
-		}
-	}
-
 	// safe to ignore: BulkTranslateItem contains only JSON-marshalable primitive fields.
 	inputJSON, _ := json.Marshal(items)
 
@@ -467,50 +455,54 @@ func (c *Client) TranslateBulk(ctx context.Context, items []BulkTranslateItem) (
 %s
 Return ONLY a raw JSON array.`, string(inputJSON))
 
+	// Quota locked: skip Gemini cascade entirely and go straight to Grok.
+	if geminiQuotaLocked.Load() {
+		utils.LoggerWithTrace(ctx).Warn("gemini_quota_lock_skip_to_grok")
+		return c.grokTranslateFallback(ctx, prompt)
+	}
+
 	var lastErr error
-	if !geminiQuotaLocked.Load() {
-		client, err := c.getGenaiClient(ctx)
-		if err != nil {
-			return nil, fmt.Errorf("помилка клієнта genai: %w", err)
+	client, err := c.getGenaiClient(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("помилка клієнта genai: %w", err)
+	}
+
+	for _, modelName := range c.getModels() {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
 		}
 
-		for _, modelName := range c.getModels() {
-			if ctx.Err() != nil {
-				return nil, ctx.Err()
-			}
+		if err := c.waitForRateLimit(ctx); err != nil {
+			return nil, err
+		}
 
-			if err := c.waitForRateLimit(ctx); err != nil {
-				return nil, err
-			}
+		config := &genai.GenerateContentConfig{
+			Temperature:      genai.Ptr[float32](0.1),
+			ResponseMIMEType: "application/json",
+			ResponseSchema:   buildBulkTranslateSchema(),
+		}
 
-			config := &genai.GenerateContentConfig{
-				Temperature:      genai.Ptr[float32](0.1),
-				ResponseMIMEType: "application/json",
-				ResponseSchema:   buildBulkTranslateSchema(),
-			}
-
-			resp, err := client.Models.GenerateContent(ctx, modelName, genai.Text(prompt), config)
-			if err != nil {
-				if isQuotaExhaustedError(err) {
-					if geminiQuotaLocked.CompareAndSwap(false, true) {
-						utils.LoggerWithTrace(ctx).Warn("gemini_quota_lock_enabled", slog.Any("error", err))
-					}
+		resp, err := client.Models.GenerateContent(ctx, modelName, genai.Text(prompt), config)
+		if err != nil {
+			if isQuotaExhaustedError(err) {
+				if geminiQuotaLocked.CompareAndSwap(false, true) {
+					utils.LoggerWithTrace(ctx).Warn("gemini_quota_lock_enabled", slog.Any("error", err))
 				}
-				lastErr = err
-				utils.LoggerWithTrace(ctx).Warn("bulk_translate_failed", slog.String("model", modelName), slog.Any("error", err))
-				continue
 			}
+			lastErr = err
+			utils.LoggerWithTrace(ctx).Warn("bulk_translate_failed", slog.String("model", modelName), slog.Any("error", err))
+			continue
+		}
 
-			if len(resp.Candidates) > 0 {
-				var results []BulkTranslateItem
-				cleaned := cleanJSON(resp.Text())
-				unmarshalErr := json.Unmarshal([]byte(cleaned), &results)
-				if unmarshalErr == nil {
-					return results, nil
-				}
-				lastErr = fmt.Errorf("parse error on %s: %w", modelName, unmarshalErr)
-				continue
+		if len(resp.Candidates) > 0 {
+			var results []BulkTranslateItem
+			cleaned := cleanJSON(resp.Text())
+			unmarshalErr := json.Unmarshal([]byte(cleaned), &results)
+			if unmarshalErr == nil {
+				return results, nil
 			}
+			lastErr = fmt.Errorf("parse error on %s: %w", modelName, unmarshalErr)
+			continue
 		}
 	}
 
@@ -518,29 +510,45 @@ Return ONLY a raw JSON array.`, string(inputJSON))
 		return nil, ctx.Err()
 	}
 
-	// Grok fallback — last resort after all Gemini models failed
-	if c.cfg.GrokAPIKey != "" {
-		utils.LoggerWithTrace(ctx).Info("grok_translate_fallback")
-		raw, grokErr := c.callGrok(ctx, prompt)
-		if grokErr == nil {
-			var results []BulkTranslateItem
-			cleaned := cleanJSON(raw)
-			if parseErr := json.Unmarshal([]byte(cleaned), &results); parseErr == nil {
-				utils.LoggerWithTrace(ctx).Info("grok_translate_success",
-					slog.Int("results_count", len(results)),
-				)
-				return results, nil
-			} else {
-				lastErr = fmt.Errorf("grok translate parse error: %w", parseErr)
-			}
-		} else {
-			lastErr = grokErr
-		}
+	// Grok fallback after all Gemini models failed.
+	if result, err := c.grokTranslateFallback(ctx, prompt); err == nil {
+		return result, nil
 	}
-
-	if geminiQuotaLocked.Load() && c.cfg.GrokAPIKey == "" {
-		return nil, fmt.Errorf("gemini quota lock is active")
-	}
-
 	return nil, fmt.Errorf("all AI models unavailable for translation (incl. Grok): %w", lastErr)
+}
+
+// grokRecognizeFallback calls Grok as a fallback for bulk file recognition.
+func (c *Client) grokRecognizeFallback(ctx context.Context, prompt string) ([]RecognizedTitle, error) {
+	if c.cfg.GrokAPIKey == "" {
+		return nil, fmt.Errorf("grok: not configured")
+	}
+	utils.LoggerWithTrace(ctx).Info("grok_recognize_fallback")
+	raw, err := c.callGrok(ctx, prompt)
+	if err != nil {
+		return nil, fmt.Errorf("grok recognize: %w", err)
+	}
+	result, err := parseRecognizeResponse(raw)
+	if err != nil {
+		return nil, fmt.Errorf("grok recognize parse: %w", err)
+	}
+	utils.LoggerWithTrace(ctx).Info("grok_recognize_success", slog.Int("results_count", len(result)))
+	return result, nil
+}
+
+// grokTranslateFallback calls Grok as a fallback for bulk translation.
+func (c *Client) grokTranslateFallback(ctx context.Context, prompt string) ([]BulkTranslateItem, error) {
+	if c.cfg.GrokAPIKey == "" {
+		return nil, fmt.Errorf("grok: not configured")
+	}
+	utils.LoggerWithTrace(ctx).Info("grok_translate_fallback")
+	raw, err := c.callGrok(ctx, prompt)
+	if err != nil {
+		return nil, fmt.Errorf("grok translate: %w", err)
+	}
+	var results []BulkTranslateItem
+	if err := json.Unmarshal([]byte(cleanJSON(raw)), &results); err != nil {
+		return nil, fmt.Errorf("grok translate parse: %w", err)
+	}
+	utils.LoggerWithTrace(ctx).Info("grok_translate_success", slog.Int("results_count", len(results)))
+	return results, nil
 }

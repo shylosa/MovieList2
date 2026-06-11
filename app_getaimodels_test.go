@@ -55,3 +55,32 @@ func TestGetAIModels_ReturnsGeminiModels(t *testing.T) {
 		t.Fatalf("expected gemini model in names: %v", names)
 	}
 }
+
+func TestGetAIModels_GrokOnlyMode(t *testing.T) {
+	app := NewApp()
+	app.cfg = &config.Config{
+		GeminiAPIKey: "", // Gemini відсутній
+		GrokAPIKey:   "test-grok-key",
+	}
+
+	names, err := app.GetAIModels()
+	if err != nil {
+		t.Fatalf("expected no error in Grok-only mode, got: %v", err)
+	}
+	if len(names) != 1 || names[0] != "grok-3-mini" {
+		t.Errorf("expected [grok-3-mini], got: %v", names)
+	}
+}
+
+func TestGetAIModels_NoKeysConfigured(t *testing.T) {
+	app := NewApp()
+	app.cfg = &config.Config{
+		GeminiAPIKey: "",
+		GrokAPIKey:   "",
+	}
+
+	_, err := app.GetAIModels()
+	if err == nil {
+		t.Fatal("expected error when no AI keys configured, got nil")
+	}
+}

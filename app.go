@@ -426,8 +426,12 @@ func (a *App) fetchAIModels(ctx context.Context) ([]string, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	// Grok-only mode: if Gemini key is absent but Grok is configured — report Grok as available.
 	if a.cfg.GeminiAPIKey == "" {
-		return nil, fmt.Errorf("Gemini API key is not configured in .env")
+		if a.cfg.GrokAPIKey != "" {
+			return []string{"grok-3-mini"}, nil
+		}
+		return nil, fmt.Errorf("no AI API key configured (set GEMINI_API_KEY or GROK_API_KEY in .env)")
 	}
 	a.modelsMutex.RLock()
 	if len(a.aiModelsCache) > 0 {
@@ -489,6 +493,11 @@ func (a *App) fetchAIModels(ctx context.Context) ([]string, error) {
 
 		if a.aiClient != nil {
 			a.aiClient.SetModels(names)
+		}
+
+		// Append Grok as a known fallback model if configured.
+		if a.cfg.GrokAPIKey != "" {
+			names = append(names, "grok-3-mini (fallback)")
 		}
 
 		return append([]string(nil), names...), nil
@@ -561,6 +570,11 @@ func (a *App) RunScan() {
 		// 🟢 Очищуємо кеш від попереднього сканування
 		if a.tmdbClient != nil {
 			a.tmdbClient.ClearCaches()
+		}
+
+		// Reset Gemini quota lock so recovered quotas are retried in this session.
+		if a.aiClient != nil {
+			a.aiClient.ResetQuotaLock()
 		}
 
 		diskPaths, err := scn.GetDiskFiles()

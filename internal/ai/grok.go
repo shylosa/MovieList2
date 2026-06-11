@@ -12,7 +12,6 @@ import (
 	"movielist-app/internal/utils"
 )
 
-const grokModel = "grok-3-mini"
 const grokAPIURL = "https://api.x.ai/v1/chat/completions"
 
 type grokRequest struct {
@@ -51,7 +50,7 @@ func (c *Client) callGrok(ctx context.Context, prompt string) (string, error) {
 	}
 
 	payload, err := json.Marshal(grokRequest{
-		Model:           grokModel,
+		Model:           c.cfg.GrokModel,
 		Messages:        []grokMessage{{Role: "user", Content: prompt}},
 		Temperature:     0.1,
 		ReasoningEffort: "none",

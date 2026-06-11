@@ -26,6 +26,7 @@ type Config struct {
 	GoogleSheetURL     string
 	SheetWorksheetName string
 	GrokAPIKey         string
+	GrokModel          string
 	GitHubPagesBranch  string
 }
 
@@ -82,10 +83,11 @@ func Load() *Config {
 		DBPath:             getEnvOrDefault("DB_PATH", "movies.db"),
 		HTMLPath:           getEnvOrDefault("HTML_PATH", "local_index.html"),
 		PostersDir:         getEnvOrDefault("POSTERS_DIR", "posters"),
-		GoogleSheetURL:      getEnvOrDefault("GOOGLE_SHEET_URL", ""),
-		SheetWorksheetName:  getEnvOrDefault("GOOGLE_SHEET_WORKSHEET_NAME", "base"),
-		GrokAPIKey:          os.Getenv("GROK_API_KEY"),
-		GitHubPagesBranch:   getEnvOrDefault("GITHUB_PAGES_BRANCH", "main"),
+		GoogleSheetURL:     getEnvOrDefault("GOOGLE_SHEET_URL", ""),
+		SheetWorksheetName: getEnvOrDefault("GOOGLE_SHEET_WORKSHEET_NAME", "base"),
+		GrokAPIKey:         os.Getenv("GROK_API_KEY"),
+		GrokModel:          getEnvOrDefault("GROK_MODEL", "grok-3-mini"),
+		GitHubPagesBranch:  getEnvOrDefault("GITHUB_PAGES_BRANCH", "main"),
 	}
 }
 

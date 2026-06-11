@@ -125,7 +125,7 @@ func TestTranslateBulk_GeminiQuotaLockedFallsBackToGrok(t *testing.T) {
 	defer geminiQuotaLocked.Store(oldLock)
 
 	client := &Client{
-		cfg: &config.Config{GrokAPIKey: "test-key"},
+		cfg:            &config.Config{GrokAPIKey: "test-key"},
 		grokHTTPClient: &http.Client{Timeout: 5 * time.Second, Transport: &grokTestTransport{serverURL: server.URL}},
 	}
 
@@ -191,5 +191,51 @@ func TestTranslateBulk_Gemini429FallsBackToGrok(t *testing.T) {
 	}
 	if reqCount < 3 {
 		t.Errorf("expected at least 3 HTTP requests (2 Gemini + 1 Grok), got %d", reqCount)
+	}
+}
+
+func TestRecognizeBulk_GeminiQuotaLockedFallsBackToGrok(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{
+			"choices": [{
+				"message": {
+					"content": "[{\"id\":1,\"original_file\":\"Enemy.2013.mkv\",\"en_title\":\"Enemy\",\"media_type\":\"movie\",\"confidence\":0.95}]"
+				}
+			}]
+		}`))
+	}))
+	defer server.Close()
+
+	oldLock := geminiQuotaLocked.Load()
+	geminiQuotaLocked.Store(true)
+	defer geminiQuotaLocked.Store(oldLock)
+
+	client := &Client{
+		cfg:            &config.Config{GrokAPIKey: "test-key", GrokModel: "grok-3-mini"},
+		grokHTTPClient: &http.Client{Timeout: 5 * time.Second, Transport: &grokTestTransport{serverURL: server.URL}},
+	}
+
+	contexts := []FileRecognitionContext{{ID: 1, OriginalFile: "Enemy.2013.mkv", CleanTitle: "Enemy", MediaType: "movie"}}
+	results, err := client.RecognizeBulk(context.Background(), contexts)
+	if err != nil {
+		t.Fatalf("expected RecognizeBulk to fall back to Grok when quota locked, got: %v", err)
+	}
+	if len(results) != 1 || results[0].ENTitle != "Enemy" {
+		t.Errorf("unexpected result: %+v", results)
+	}
+}
+
+func TestResetQuotaLock(t *testing.T) {
+	oldLock := geminiQuotaLocked.Load()
+	geminiQuotaLocked.Store(true)
+	defer geminiQuotaLocked.Store(oldLock)
+
+	c := &Client{cfg: &config.Config{}}
+	c.ResetQuotaLock()
+
+	if geminiQuotaLocked.Load() {
+		t.Error("expected quota lock to be reset to false after ResetQuotaLock()")
 	}
 }
