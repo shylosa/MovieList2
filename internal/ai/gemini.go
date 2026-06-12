@@ -260,10 +260,12 @@ func (c *Client) requestWithRetry(ctx context.Context, prompt string) ([]Recogni
 	}
 
 	// Grok fallback after all Gemini models failed.
-	if result, err := c.grokRecognizeFallback(ctx, prompt); err == nil {
+	result, grokErr := c.grokRecognizeFallback(ctx, prompt)
+	if grokErr == nil {
 		return result, nil
 	}
-	return nil, fmt.Errorf("all AI models unavailable (incl. Grok): %w", lastErr)
+	utils.LoggerWithTrace(ctx).Warn("grok_recognize_fallback_failed", slog.Any("error", grokErr))
+	return nil, fmt.Errorf("all AI models unavailable (incl. Grok): gemini=%w; grok=%s", lastErr, grokErr)
 }
 
 func (c *Client) makeRequest(ctx context.Context, prompt, modelName string) ([]RecognizedTitle, error) {
@@ -464,7 +466,9 @@ Return ONLY a raw JSON array.`, string(inputJSON))
 	var lastErr error
 	client, err := c.getGenaiClient(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("помилка клієнта genai: %w", err)
+		utils.LoggerWithTrace(ctx).Warn("translate_genai_client_failed", slog.Any("error", err))
+		lastErr = err
+		goto grokFallback
 	}
 
 	for _, modelName := range c.getModels() {
@@ -510,11 +514,14 @@ Return ONLY a raw JSON array.`, string(inputJSON))
 		return nil, ctx.Err()
 	}
 
+grokFallback:
 	// Grok fallback after all Gemini models failed.
-	if result, err := c.grokTranslateFallback(ctx, prompt); err == nil {
+	result, grokErr := c.grokTranslateFallback(ctx, prompt)
+	if grokErr == nil {
 		return result, nil
 	}
-	return nil, fmt.Errorf("all AI models unavailable for translation (incl. Grok): %w", lastErr)
+	utils.LoggerWithTrace(ctx).Warn("grok_translate_fallback_failed", slog.Any("error", grokErr))
+	return nil, fmt.Errorf("all AI models unavailable for translation (incl. Grok): gemini=%w; grok=%s", lastErr, grokErr)
 }
 
 // grokRecognizeFallback calls Grok as a fallback for bulk file recognition.

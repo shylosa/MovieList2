@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -224,6 +225,26 @@ func TestRecognizeBulk_GeminiQuotaLockedFallsBackToGrok(t *testing.T) {
 	}
 	if len(results) != 1 || results[0].ENTitle != "Enemy" {
 		t.Errorf("unexpected result: %+v", results)
+	}
+}
+
+func TestRecognizeBulk_QuotaLockedNoGrok(t *testing.T) {
+	oldLock := geminiQuotaLocked.Load()
+	geminiQuotaLocked.Store(true)
+	defer geminiQuotaLocked.Store(oldLock)
+
+	client := &Client{
+		cfg: &config.Config{GrokAPIKey: ""},
+	}
+
+	_, err := client.RecognizeBulk(context.Background(), []FileRecognitionContext{
+		{ID: 1, OriginalFile: "test.mkv", CleanTitle: "test", MediaType: "movie"},
+	})
+	if err == nil {
+		t.Fatal("expected error when quota locked and no Grok key, got nil")
+	}
+	if !strings.Contains(err.Error(), "not configured") {
+		t.Errorf("expected 'not configured' in error message, got: %v", err)
 	}
 }
 

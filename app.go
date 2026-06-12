@@ -487,18 +487,19 @@ func (a *App) fetchAIModels(ctx context.Context) ([]string, error) {
 			}
 		}
 
-		a.modelsMutex.Lock()
-		a.aiModelsCache = names
-		a.modelsMutex.Unlock()
-
 		if a.aiClient != nil {
-			a.aiClient.SetModels(names)
+			a.aiClient.SetModels(names) // SetModels receives only Gemini models — correct.
 		}
 
 		// Append Grok as a known fallback model if configured.
 		if a.cfg.GrokAPIKey != "" {
 			names = append(names, "grok-3-mini (fallback)")
 		}
+
+		// Cache includes Grok suffix so all callers see a consistent list.
+		a.modelsMutex.Lock()
+		a.aiModelsCache = append([]string(nil), names...)
+		a.modelsMutex.Unlock()
 
 		return append([]string(nil), names...), nil
 	})
@@ -821,6 +822,29 @@ func (a *App) processGeminiQueue(ctx context.Context, paths []string, aiClient *
 		if err != nil {
 			a.logFront(fmt.Sprintf("⚠️ Gemini помилка пачки %d: %v", currentBatchIdx, err))
 			utils.LoggerWithTrace(ctx).Warn("gemini_batch_failed", slog.Int("batch", currentBatchIdx), slog.Any("error", err))
+			
+			// Create placeholders for all files in this failed batch so they don't disappear.
+			var failedBatchMovies []storage.Movie
+			for _, path := range batch {
+				fname := a.getFileIdentifier(path)
+				parsed := tmdb.ParseFilename(path)
+				yearStr := ""
+				if parsed.Year > 0 {
+					yearStr = strconv.Itoa(parsed.Year)
+				}
+				failedBatchMovies = append(failedBatchMovies, storage.Movie{
+					Filename: fname,
+					TitleEN:  "Unresolved: " + fname,
+					TitleUA:  fname,
+					Year:     yearStr,
+					TmdbID:   0,
+				})
+			}
+			if len(failedBatchMovies) > 0 {
+				if errSave := a.db.SaveMoviesBatch(ctx, failedBatchMovies); errSave != nil {
+					utils.LoggerWithTrace(ctx).Error("batch_save_failed", slog.Any("error", errSave))
+				}
+			}
 			continue
 		}
 
@@ -838,12 +862,38 @@ func (a *App) processGeminiQueue(ctx context.Context, paths []string, aiClient *
 			if !ok || rec.ENTitle == "" {
 				a.logFront(fmt.Sprintf("⚠️ Gemini не розпізнав: '%s'", fname))
 				a.emitProgress(processed, total, "❓ Не розпізнано: "+fname)
+
+				// Create a placeholder movie record instead of silently skipping.
+				parsed := tmdb.ParseFilename(path)
+				yearStr := ""
+				if parsed.Year > 0 {
+					yearStr = strconv.Itoa(parsed.Year)
+				}
+				unresolvedMovie := storage.Movie{
+					Filename: fname,
+					TitleEN:  "Unresolved: " + fname,
+					TitleUA:  fname,
+					Year:     yearStr,
+					TmdbID:   0,
+				}
+				moviesToSave = append(moviesToSave, unresolvedMovie)
 				continue
 			}
 
 			a.emitProgress(processed, total, "🤖 Gemini: "+rec.ENTitle)
 
 			movie := a.mergeGeminiWithTMDB(ctx, path, rec)
+			if movie.TmdbID == 0 {
+				// Fill unresolved placeholder fields if the TMDB verification failed.
+				parsed := tmdb.ParseFilename(path)
+				yearStr := ""
+				if parsed.Year > 0 {
+					yearStr = strconv.Itoa(parsed.Year)
+				}
+				movie.TitleEN = "Unresolved: " + fname
+				movie.TitleUA = fname
+				movie.Year = yearStr
+			}
 			moviesToSave = append(moviesToSave, movie)
 			if movie.TmdbID > 0 {
 				yearVal := 0

@@ -77,7 +77,7 @@ Tech stack: Go 1.26+, Wails v2, SQLite, TMDB API, Google Gemini (`google.golang.
 * **Gemini SDK:** Use only `google.golang.org/genai`. Never use raw HTTP clients.
 * **Execution:** Gemini pipeline is intentionally sequential (batch size = 5/10) to respect RPM limits and shared rate limiters. Do not introduce aggressive parallelism.
 * **Model Loading:** Uses `singleflight.Group`. Do not duplicate concurrent requests.
-* **Grok Fallback:** `grok-3-mini` is used strictly as a last-resort fallback. It has no rate limiter. Reasoning tokens must remain disabled (`ReasoningEffort: "none"`). Never wrap JSON in markdown.
+* **Grok Fallback:** `grok-3-mini` (configurable via `GROK_MODEL`) acts as a primary backend when `geminiQuotaLocked` is active, and as a last-resort fallback after all Gemini models fail. Uses `grokLimiter` (30 RPM, burst=1). Reasoning tokens must remain disabled (`ReasoningEffort: "none"`). Never wrap JSON in markdown.
 * **Translation Safety:** If official Ukrainian title is unknown, preserve original title (do not hallucinate localization).
 * **TMDB Title Trust:** If `movie.TitleUA` is already validated as good Ukrainian, Gemini must not override it, even with Cyrillic calques or alternative transliterations.
 
@@ -274,4 +274,8 @@ POSTERS_DIR=posters
 * `app.go`: Оновлено `fetchAIModels` для коректної підтримки Grok-only режиму при відсутності `GEMINI_API_KEY`, а також додано індикацію fallback-моделі Grok у списку.
 * `internal/config/config.go` та `internal/ai/grok.go`: Додано параметр `GROK_MODEL` (дефолт: `grok-3-mini`) в структуру конфігурації замість захардкодженної константи моделі Grok.
 * `internal/ai/gemini_test.go` та `app_getaimodels_test.go`: Додано нові тести для перевірки Grok fallback при quota lock, скидання блокування квоти та роботи в Grok-only режимі.
+
+### Unresolved Placeholders Patch — Червень 2026
+
+* `app.go`: У методі `processGeminiQueue` додано створення заготовок (placeholders) `storage.Movie` з `TmdbID = 0`, назвою файлу як `TitleUA`, `"Unresolved: " + filename` як `TitleEN` та розпарсеним роком, якщо Gemini не зміг розпізнати файл або якщо виникла загальна помилка виконання батчу (наприклад, перевищено квоту). Також заповнюються ці поля, якщо фільм не пройшов верифікацію TMDB після розпізнавання ШІ. Це запобігає зникненню нерозпізнаних файлів з бази даних.
 
