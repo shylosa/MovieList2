@@ -115,7 +115,8 @@ const htmlLayout = `<!DOCTYPE html>
         .genre { color: #e50914; font-size: 0.9em; font-weight: bold; }
         .title-en { font-size: 1em; color: #888; margin: 0 0 15px 0; font-style: italic; }
         .plot { margin-top: 10px; font-size: 0.95em; color: #ccc; flex-grow: 1; }
-        .filename { margin-top: 20px; font-size: 0.85em; color: #aaa; font-family: monospace; text-align: right; border-top: 1px solid #333; padding-top: 5px; }
+        .file-path-badge { margin-top: 20px; font-size: 0.85em; color: #aaa; font-family: monospace; text-align: right; border-top: 1px solid #333; padding-top: 5px; }
+        .info .file-path-badge { font-size: 0.7rem; color: #888; word-break: break-all; margin-top: auto; padding-top: 6px; border-top: 1px solid #222; }
 
         /* ВЕРСТКА РЕЖИМУ СПИСКУ (Перенесено з Python) */
         .movie-list.list-mode { grid-template-columns: 1fr; gap: 12px; max-width: 1200px; margin: 0 auto; }
@@ -129,7 +130,7 @@ const htmlLayout = `<!DOCTYPE html>
         .movie-list.list-mode .title-en { grid-column: 1; grid-row: 2; font-size: 0.85em; margin-bottom: 5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
         .movie-list.list-mode .details { grid-column: 1; grid-row: 3 / 5; font-size: 0.85em; margin: 0; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
         .movie-list.list-mode .plot { grid-column: 2; grid-row: 1 / 4; margin: 0; font-size: 0.85em; color: #bbb; text-align: left; display: -webkit-box; -webkit-line-clamp: 5; -webkit-box-orient: vertical; overflow: hidden; }
-        .movie-list.list-mode .filename { grid-column: 2; grid-row: 4; margin: 0; text-align: right; align-self: end; font-size: 0.75em; border: none; padding: 0; color: #bbb; }
+        .movie-list.list-mode .file-path-badge { grid-column: 2; grid-row: 4; margin: 0; text-align: right; align-self: end; font-size: 0.75em; border: none; padding: 0; color: #bbb; }
 
         .no-results { text-align: center; padding: 50px; font-size: 1.2em; color: #888; display: none; }
 
@@ -319,7 +320,7 @@ const htmlLayout = `<!DOCTYPE html>
             .movie-list.grid-mode .genre,
             .movie-list.grid-mode .title-en,
             .movie-list.grid-mode .details,
-            .movie-list.grid-mode .filename {
+            .movie-list.grid-mode .file-path-badge {
                 display: none !important;
             }
             /* Keep plot visible in compact grid cards and allow more lines */
@@ -396,8 +397,18 @@ const htmlLayout = `<!DOCTYPE html>
                 color: #bdbdbd;
                 line-height: 1.25;
             }
-            .movie-list.list-mode .filename {
-                display: none !important;
+            .movie-list.list-mode .file-path-badge {
+                grid-column: 1 / span 2;
+                grid-row: 5;
+                display: block;
+                font-size: 0.72em;
+                color: #888;
+                word-break: break-all;
+                margin: 2px 0 0;
+                padding-top: 6px;
+                border-top: 1px solid #222;
+                text-align: left;
+                font-family: monospace;
             }
             .movie-list.list-mode .plot {
                 grid-column: 1 / span 2;
@@ -461,7 +472,7 @@ const htmlLayout = `<!DOCTYPE html>
                     <h3 class="title-en">{{.TitleEN}}</h3>
                     <div class="details"><strong>Актори:</strong> {{.Cast}}</div>
                     <div class="plot"><strong>Сюжет:</strong><br>{{.Plot}}</div>
-                    <div class="filename">{{.Filename}}</div>
+                    <div class="file-path-badge">📁 {{.Filename}}</div>
                 </div>
             </div>
             {{end}}

@@ -785,6 +785,38 @@ func (a *App) processScanResults(ctx context.Context, results <-chan scanResult)
 	return toSave, geminiQueue, translationQueue
 }
 
+// buildUnresolvedMovie creates a placeholder record for files Gemini/TMDB could not verify.
+func buildUnresolvedMovie(fname, path string) storage.Movie {
+	parsed := tmdb.ParseFilename(path)
+	yearStr := ""
+	if parsed.Year > 0 {
+		yearStr = strconv.Itoa(parsed.Year)
+	}
+	return storage.Movie{
+		Filename: fname,
+		TitleEN:  "Unresolved: " + fname,
+		TitleUA:  fname,
+		Year:     yearStr,
+		TmdbID:   0,
+	}
+}
+
+// appendUnresolvedIfNeeded adds a placeholder unless the file is already recognized (TmdbID > 0).
+func (a *App) appendUnresolvedIfNeeded(ctx context.Context, movies *[]storage.Movie, path string) {
+	fname := a.getFileIdentifier(path)
+	existing, err := a.db.GetMovieByFilename(ctx, fname)
+	if err != nil {
+		utils.LoggerWithTrace(ctx).Warn("get_movie_for_unresolved_failed",
+			slog.String("file", fname), slog.Any("error", err))
+	}
+	if existing != nil && existing.TmdbID > 0 {
+		utils.LoggerWithTrace(ctx).Warn("skip_unresolved_downgrade",
+			slog.String("file", fname), slog.Int("existing_tmdb_id", existing.TmdbID))
+		return
+	}
+	*movies = append(*movies, buildUnresolvedMovie(fname, path))
+}
+
 // processGeminiQueue — Gemini розпізнає назви → TMDB верифікує → мерж → збереження.
 // paths — повні шляхи до файлів (для парсера та збагаченого промпту).
 func (a *App) processGeminiQueue(ctx context.Context, paths []string, aiClient *ai.Client) []string {
@@ -822,23 +854,11 @@ func (a *App) processGeminiQueue(ctx context.Context, paths []string, aiClient *
 		if err != nil {
 			a.logFront(fmt.Sprintf("⚠️ Gemini помилка пачки %d: %v", currentBatchIdx, err))
 			utils.LoggerWithTrace(ctx).Warn("gemini_batch_failed", slog.Int("batch", currentBatchIdx), slog.Any("error", err))
-			
+
 			// Create placeholders for all files in this failed batch so they don't disappear.
 			var failedBatchMovies []storage.Movie
 			for _, path := range batch {
-				fname := a.getFileIdentifier(path)
-				parsed := tmdb.ParseFilename(path)
-				yearStr := ""
-				if parsed.Year > 0 {
-					yearStr = strconv.Itoa(parsed.Year)
-				}
-				failedBatchMovies = append(failedBatchMovies, storage.Movie{
-					Filename: fname,
-					TitleEN:  "Unresolved: " + fname,
-					TitleUA:  fname,
-					Year:     yearStr,
-					TmdbID:   0,
-				})
+				a.appendUnresolvedIfNeeded(ctx, &failedBatchMovies, path)
 			}
 			if len(failedBatchMovies) > 0 {
 				if errSave := a.db.SaveMoviesBatch(ctx, failedBatchMovies); errSave != nil {
@@ -864,19 +884,7 @@ func (a *App) processGeminiQueue(ctx context.Context, paths []string, aiClient *
 				a.emitProgress(processed, total, "❓ Не розпізнано: "+fname)
 
 				// Create a placeholder movie record instead of silently skipping.
-				parsed := tmdb.ParseFilename(path)
-				yearStr := ""
-				if parsed.Year > 0 {
-					yearStr = strconv.Itoa(parsed.Year)
-				}
-				unresolvedMovie := storage.Movie{
-					Filename: fname,
-					TitleEN:  "Unresolved: " + fname,
-					TitleUA:  fname,
-					Year:     yearStr,
-					TmdbID:   0,
-				}
-				moviesToSave = append(moviesToSave, unresolvedMovie)
+				a.appendUnresolvedIfNeeded(ctx, &moviesToSave, path)
 				continue
 			}
 
@@ -884,15 +892,8 @@ func (a *App) processGeminiQueue(ctx context.Context, paths []string, aiClient *
 
 			movie := a.mergeGeminiWithTMDB(ctx, path, rec)
 			if movie.TmdbID == 0 {
-				// Fill unresolved placeholder fields if the TMDB verification failed.
-				parsed := tmdb.ParseFilename(path)
-				yearStr := ""
-				if parsed.Year > 0 {
-					yearStr = strconv.Itoa(parsed.Year)
-				}
-				movie.TitleEN = "Unresolved: " + fname
-				movie.TitleUA = fname
-				movie.Year = yearStr
+				a.appendUnresolvedIfNeeded(ctx, &moviesToSave, path)
+				continue
 			}
 			moviesToSave = append(moviesToSave, movie)
 			if movie.TmdbID > 0 {
@@ -1046,8 +1047,8 @@ func (a *App) FixSelected(selected []map[string]interface{}) {
 	a.isScanning = true
 	a.scanMutex.Unlock()
 
-	// 1. Створюємо керований контекст 🟢
-	ctx, cancel := context.WithCancel(a.ctx)
+	// 1. Створюємо керований контекст з гарантованим trace_id 🟢
+	ctx, cancel := context.WithCancel(utils.EnsureTrace(a.ctx))
 	a.setScanCancel(cancel)
 	defer func() {
 		cancel()
@@ -1088,6 +1089,7 @@ func (a *App) FixSelected(selected []map[string]interface{}) {
 		// Перевірка, чи не натиснули СТОП
 		if ctx.Err() != nil {
 			a.logFront("🛑 Виправлення перервано.")
+			a.finalizeScan(ctx, "Виправлення перервано користувачем")
 			return
 		}
 
@@ -1127,12 +1129,13 @@ func (a *App) FixSelected(selected []map[string]interface{}) {
 		a.processTranslationQueue(ctx, translationQueue, a.aiClient)
 	}
 
-	a.finalizeScan(a.ctx, fmt.Sprintf("Виправлено %d файлів", total))
+	a.finalizeScan(ctx, fmt.Sprintf("Виправлено %d файлів", total))
 }
 
 // UpdateMovie — Wails API: оновлення одного запису за hint від користувача.
 func (a *App) UpdateMovie(filename, hint string) error {
-	return a.updateMovie(a.ctx, filename, hint)
+	ctx := utils.EnsureTrace(a.ctx)
+	return a.updateMovie(ctx, filename, hint)
 }
 
 // updateMovie — внутрішня реалізація з контекстом (FixSelected, тести).

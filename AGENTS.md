@@ -279,3 +279,15 @@ POSTERS_DIR=posters
 
 * `app.go`: У методі `processGeminiQueue` додано створення заготовок (placeholders) `storage.Movie` з `TmdbID = 0`, назвою файлу як `TitleUA`, `"Unresolved: " + filename` як `TitleEN` та розпарсеним роком, якщо Gemini не зміг розпізнати файл або якщо виникла загальна помилка виконання батчу (наприклад, перевищено квоту). Також заповнюються ці поля, якщо фільм не пройшов верифікацію TMDB після розпізнавання ШІ. Це запобігає зникненню нерозпізнаних файлів з бази даних.
 
+### Web Export & Trace ID Patch — Червень 2026
+
+* `internal/web/generator.go`: Замінено клас `.filename` на `.file-path-badge` з використанням monospaced стилю та префіксу емодзі папки (📁) відповідно до дизайну `CHECKLIST.md`. Налаштовано поведінку блоку на мобільних пристроях для запобігання розриву сітки.
+* `internal/utils/logger.go`: Додано допоміжну функцію `EnsureTrace(ctx)` для перевірки наявності `trace_id` у контексті та його автоматичної генерації за потреби.
+* `app.go`: Забезпечено генерацію та передачу `trace_id` при інтерактивних діях користувача (`FixSelected` та `UpdateMovie`) через `EnsureTrace`, ліквідувавши сліпу зону `trace_id: unknown` у логах.
+
+### Audit Fix Patch — Червень 2026
+
+* `internal/storage/storage.go`: `movieUpsertQuery` не перезаписує `title_ua`/`title_en`/`year`, якщо incoming `tmdb_id=0`, а в БД уже є розпізнаний запис (`tmdb_id > 0`).
+* `app.go`: `buildUnresolvedMovie` + `appendUnresolvedIfNeeded` — skip downgrade у `processGeminiQueue`; `FixSelected` викликає `finalizeScan` при STOP і передає trace-aware `ctx`.
+* `internal/utils/logger.go`: `EnsureTrace` генерує UUID (8 символів); порожній `trace_id` трактується як відсутній.
+

@@ -53,9 +53,18 @@ const movieUpsertQuery = `
 	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	ON CONFLICT(filename) DO UPDATE SET
 		tmdb_id = CASE WHEN excluded.tmdb_id != 0 THEN excluded.tmdb_id ELSE movies.tmdb_id END,
-		title_ua = COALESCE(NULLIF(excluded.title_ua, ''), movies.title_ua),
-		title_en = COALESCE(NULLIF(excluded.title_en, ''), movies.title_en),
-		year = COALESCE(NULLIF(excluded.year, ''), movies.year),
+		title_ua = CASE
+			WHEN excluded.tmdb_id = 0 AND movies.tmdb_id > 0 THEN movies.title_ua
+			ELSE COALESCE(NULLIF(excluded.title_ua, ''), movies.title_ua)
+		END,
+		title_en = CASE
+			WHEN excluded.tmdb_id = 0 AND movies.tmdb_id > 0 THEN movies.title_en
+			ELSE COALESCE(NULLIF(excluded.title_en, ''), movies.title_en)
+		END,
+		year = CASE
+			WHEN excluded.tmdb_id = 0 AND movies.tmdb_id > 0 THEN movies.year
+			ELSE COALESCE(NULLIF(excluded.year, ''), movies.year)
+		END,
 		genres = COALESCE(NULLIF(excluded.genres, ''), movies.genres),
 		"cast" = COALESCE(NULLIF(excluded."cast", ''), movies."cast"),
 		plot = COALESCE(NULLIF(excluded.plot, ''), movies.plot),

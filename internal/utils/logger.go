@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+
+	"github.com/google/uuid"
 )
 
 type contextKey string
@@ -62,10 +64,21 @@ func ContextWithTrace(ctx context.Context, traceID string) context.Context {
 	return context.WithValue(ctx, traceIDKey, traceID)
 }
 
+// EnsureTrace checks if context contains trace_id. If not, generates one.
+func EnsureTrace(ctx context.Context) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if v, ok := ctx.Value(traceIDKey).(string); ok && v != "" {
+		return ctx
+	}
+	return context.WithValue(ctx, traceIDKey, uuid.New().String()[:8])
+}
+
 // LoggerWithTrace дістає trace_id з контексту і додає його до логера
 func LoggerWithTrace(ctx context.Context) *slog.Logger {
 	traceID, ok := ctx.Value(traceIDKey).(string)
-	if !ok {
+	if !ok || traceID == "" {
 		traceID = "unknown"
 	}
 	return slog.Default().With(slog.String("trace_id", traceID))
