@@ -32,10 +32,10 @@ document.querySelector('#app').innerHTML = `
                     <span class="nav-icon">📊</span>
                 </div>
             </div>
-            <div class="toolbar-row">
+            <div class="toolbar-row github-toolbar">
                 <div class="nav-btn" id="btn-sync-github">
                     <span class="nav-icon">📱</span><span class="nav-label">Sync GitHub</span>
-                    <span class="nav-spinner"></span>
+                    <span class="nav-spinner" aria-hidden="true"></span>
                 </div>
                 <div class="nav-btn icon-btn" id="btn-open-project" title="Відкрити репозиторій">
                     <span class="nav-icon">💻</span>
@@ -211,10 +211,6 @@ function setGitHubSyncBusy(busy) {
     if (!btnSyncGitHub) return;
     btnSyncGitHub.classList.toggle('disabled', busy);
     btnSyncGitHub.classList.toggle('syncing', busy);
-    const label = btnSyncGitHub.querySelector('.nav-label');
-    if (label) {
-        label.textContent = busy ? 'Синхронізація...' : 'Sync GitHub';
-    }
 }
 
 btnSyncGitHub.onclick = () => {
@@ -436,7 +432,7 @@ function renderMovies(movies) {
         html += `
             <div class="movie-row">
                 <div class="col-cb"><input type="checkbox" class="row-cb" data-filename="${m.filename}" ${isChecked}></div>
-                <div class="col-file" title="${m.filename}">${m.filename}</div>
+                <div class="col-file" title="${m.filename}">${m.file_label || m.filename}</div>
                 <div class="col-arr">➜</div>
                 <div class="col-year">${m.year || '—'}</div>
                 <div class="col-title">
@@ -481,7 +477,8 @@ document.getElementById('search-input').addEventListener('input', (e) => {
     const q = e.target.value.toLowerCase();
     const filtered = allMovies.filter(m => {
         const title = (m.title_ua || m.title_en || "").toLowerCase();
-        return m.filename.toLowerCase().includes(q) || title.includes(q);
+        const label = (m.file_label || m.filename || "").toLowerCase();
+        return m.filename.toLowerCase().includes(q) || title.includes(q) || label.includes(q);
     });
     renderMovies(filtered);
 });

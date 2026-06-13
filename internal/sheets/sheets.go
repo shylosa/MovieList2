@@ -9,6 +9,7 @@ import (
 
 	"movielist-app/internal/config"
 	"movielist-app/internal/storage"
+	"movielist-app/internal/utils"
 
 	"google.golang.org/api/option"
 	"google.golang.org/api/sheets/v4"
@@ -53,14 +54,14 @@ func (c *Client) SyncMovies(ctx context.Context, movies []storage.Movie) error {
 		slog.String("sheet_name", sheetName))
 
 	// 1. Готуємо дані (Headers + Body)
-	headers := []interface{}{"File Path", "Title (UA)", "Title (EN)", "Year", "Genre", "Cast", "Plot", "Poster URL"}
+	headers := []interface{}{"File", "Title (UA)", "Title (EN)", "Year", "Genre", "Cast", "Plot", "Poster URL"}
 
 	var values [][]interface{}
 	values = append(values, headers)
 
 	for _, m := range movies {
 		row := []interface{}{
-			m.Filename,
+			utils.DisplayFileLabel(m.Filename, m.MediaType),
 			m.TitleUA,
 			m.TitleEN,
 			m.Year,

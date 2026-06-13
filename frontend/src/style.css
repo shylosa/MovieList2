@@ -178,7 +178,51 @@ html {
     display: flex;
     align-items: center;
     flex-wrap: nowrap;
-    justify-content: space-between;
+    gap: 5px;
+}
+
+.toolbar-row > .nav-btn:not(.icon-btn) {
+    flex: 1;
+    min-width: 0;
+}
+
+.toolbar-row > .nav-btn.icon-btn {
+    flex-shrink: 0;
+}
+
+.github-toolbar {
+    gap: 4px;
+}
+
+.github-toolbar > .nav-btn:not(.icon-btn) {
+    flex: 1 1 auto;
+    min-width: 0;
+    padding: 10px 6px 10px 15px;
+    gap: 10px;
+    margin: 5px 4px 5px 10px;
+}
+
+.github-toolbar > .nav-btn.icon-btn {
+    width: 34px;
+    min-width: 34px;
+    height: 34px;
+}
+
+#btn-sync-github .nav-label {
+    white-space: nowrap;
+}
+
+#btn-sync-github.syncing .nav-label {
+    display: none;
+}
+
+#btn-sync-github .nav-spinner {
+    display: none;
+    margin-left: 0;
+}
+
+#btn-sync-github.syncing .nav-spinner {
+    display: inline-block;
 }
 
 .nav-btn.icon-btn .nav-icon {

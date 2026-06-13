@@ -159,6 +159,9 @@ func (a *App) GetMovies() ([]storage.Movie, error) {
 	if movies == nil {
 		return []storage.Movie{}, nil
 	}
+	for i := range movies {
+		movies[i].FileLabel = utils.DisplayFileLabel(movies[i].Filename, movies[i].MediaType)
+	}
 	return movies, nil
 }
 

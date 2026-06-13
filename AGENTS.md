@@ -291,3 +291,24 @@ POSTERS_DIR=posters
 * `app.go`: `buildUnresolvedMovie` + `appendUnresolvedIfNeeded` — skip downgrade у `processGeminiQueue`; `FixSelected` викликає `finalizeScan` при STOP і передає trace-aware `ctx`.
 * `internal/utils/logger.go`: `EnsureTrace` генерує UUID (8 символів); порожній `trace_id` трактується як відсутній.
 
+### File Display Label Patch — Червень 2026
+
+**Правило:** `movies.filename` залишається **primary key** (повний відносний шлях). Для UI та експорту використовується скорочений лейбл `FileLabel`, обчислений через `utils.DisplayFileLabel`.
+
+| Тип | Логіка |
+|-----|--------|
+| `movie` | `basename` файлу |
+| `tv` | перша папка відносно `MEDIA_FOLDER_PATH` (каталог серіалу) |
+| `tv` у корені (без папки) | `basename` файлу |
+| unresolved (`media_type=""`) | евристика через regexp (`S\d{2}E\d{2}`, `Season \d+`, тощо) |
+
+* `internal/utils/path_display.go`: Нова функція `DisplayFileLabel(relativePath, mediaType string) string`. Регулярки `reSeason`/`reEpisode` скомпільовані один раз на рівні пакету. Для порожнього `mediaType` аналізується весь відносний шлях (а не тільки basename).
+* `internal/utils/path_display_test.go`: 9 табличних тест-кейсів (movie nested, movie flat, tv nested seasons, tv flat, tv root, unresolved movie, unresolved tv by S01E01, unresolved tv by Season, unresolved tv root). Всі проходять.
+* `internal/storage/storage.go`: Додано поле `FileLabel string \`json:"file_label,omitempty"\`` до `Movie`. Не зберігається у SQLite, обчислюється перед поверненням у UI.
+* `app.go` / `GetMovies()`: Заповнює `m.FileLabel = utils.DisplayFileLabel(m.Filename, m.MediaType)` для кожного запису перед поверненням через Wails IPC.
+* `internal/web/generator.go` / `Generate()`: Обчислює `m.FileLabel` для кожного запису в `displayMovies` перед рендерингом шаблону. У шаблоні `.file-path-badge` показує `{{.FileLabel}}`, а `title="{{.Filename}}"` зберігає повний шлях як tooltip.
+* `internal/sheets/sheets.go` / `SyncMovies()`: Заголовок першої колонки змінено з `"File Path"` на `"File"`. Значення у рядках — `utils.DisplayFileLabel(m.Filename, m.MediaType)` замість `m.Filename`.
+* `frontend/src/main.js`: Колонка `col-file` тепер показує `m.file_label || m.filename`; `title="${m.filename}"` зберігає повний шлях для діагностики; `data-filename` та всі Wails API лишаються незмінними (PK). Пошук у Редакторі розширено: `label.includes(q)` додано до фільтра.
+
+**Верифікація (2026-06-13):** `go build ./...` ✅ `go vet ./...` ✅ `gofmt -l .` ✅ `go test ./...` — 9/9 новий тест, всі існуючі пройшли ✅
+

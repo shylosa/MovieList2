@@ -3,6 +3,7 @@ export namespace storage {
 	export class Movie {
 	    id: number;
 	    filename: string;
+	    file_label?: string;
 	    tmdb_id: number;
 	    title_ua: string;
 	    title_en: string;
@@ -22,6 +23,7 @@ export namespace storage {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.id = source["id"];
 	        this.filename = source["filename"];
+	        this.file_label = source["file_label"];
 	        this.tmdb_id = source["tmdb_id"];
 	        this.title_ua = source["title_ua"];
 	        this.title_en = source["title_en"];
