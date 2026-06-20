@@ -312,3 +312,21 @@ POSTERS_DIR=posters
 
 **Верифікація (2026-06-13):** `go build ./...` ✅ `go vet ./...` ✅ `gofmt -l .` ✅ `go test ./...` — 9/9 новий тест, всі існуючі пройшли ✅
 
+### Web Export, Contexts, Batching & Typings Patch — Червень 2026
+
+* `internal/web/generator.go`: Updated the movie card template filename layout to use the class `file-source` with custom inline CSS properties for precise mobile responsiveness.
+* `app.go`: Removed `context.WithoutCancel` from `fetchAIModels` to allow the active request to be aborted immediately upon StopScan trigger.
+* `app.go`: Integrated `wg sync.WaitGroup` into the `App` struct to track background GitHub Pages operations, preventing database closure during active push/read in shutdown.
+* `app.go`: Refactored `appendUnresolvedIfNeeded` using `appendUnresolvedFromMap` with batch lookup `GetMoviesByFilenames` in `processGeminiQueue`, eliminating O(N) SELECT queries.
+* `app.go`: Structured Wails parameters by defining `FixRequest` and typing `FixSelected` method parameter signature.
+
+### Shutdown Safety & Generator Fix Patch — Червень 2026
+
+* `app.go` / `RunScan`: Added `a.wg.Add(1)` before goroutine launch and `defer a.wg.Done()` as first statement inside, ensuring `shutdown()` waits for scan completion before `db.Close()`.
+* `app.go` / `FixSelected`: Added `a.wg.Add(1)` after `isScanning = true` and `a.wg.Done()` as last statement in defer, closing the same race window with `db.Close()`.
+* `app.go` / `FixSelected`: Replaced `finalizeScan(ctx, ...)` with `finalizeScan(a.ctx, ...)` at both call sites — prevents `GetAllMovies` from receiving a cancelled context and overwriting `local_index.html` with an empty catalog.
+* `internal/web/generator.go`: Fixed movie card badge — class changed from `file-source` to `file-path-badge` (activating existing CSS rules); `{{.Filename}}` replaced with `{{.FileLabel}}` (human-readable label); `title="{{.Filename}}"` preserves full path as tooltip.
+* `app.go`: Removed dead function `appendUnresolvedIfNeeded` — all call sites migrated to `appendUnresolvedFromMap` in the previous patch.
+* `internal/ai/grok.go`: Updated stale comment on `callGrok` — removed false "no rate limiter" claim; documented actual `grokLimiter` (30 RPM, burst=1).
+
+

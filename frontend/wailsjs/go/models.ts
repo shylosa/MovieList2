@@ -1,3 +1,22 @@
+export namespace main {
+	
+	export class FixRequest {
+	    filename: string;
+	    hint: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new FixRequest(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.filename = source["filename"];
+	        this.hint = source["hint"];
+	    }
+	}
+
+}
+
 export namespace storage {
 	
 	export class Movie {

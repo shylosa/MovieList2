@@ -474,7 +474,9 @@ const htmlLayout = `<!DOCTYPE html>
                     <h3 class="title-en">{{.TitleEN}}</h3>
                     <div class="details"><strong>Актори:</strong> {{.Cast}}</div>
                     <div class="plot"><strong>Сюжет:</strong><br>{{.Plot}}</div>
-                    <div class="file-path-badge" title="{{.Filename}}">📁 {{.FileLabel}}</div>
+                    <div class="file-path-badge" title="{{.Filename}}">
+                        📁 {{.FileLabel}}
+                    </div>
                 </div>
             </div>
             {{end}}

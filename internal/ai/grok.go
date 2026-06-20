@@ -34,11 +34,9 @@ type grokResponse struct {
 	} `json:"choices"`
 }
 
-// NOTE: callGrok has no rate limiter — it is called only as a last-resort fallback
-// after all Gemini models fail. If called more frequently, add rate limiting.
-//
 // callGrok sends a prompt to the Grok API and returns raw content string.
-// The prompt must already instruct the model to respond in JSON.
+// Rate-limited via grokLimiter (30 RPM, burst=1). The prompt must already
+// instruct the model to respond in JSON without markdown wrapping.
 func (c *Client) callGrok(ctx context.Context, prompt string) (string, error) {
 	if c.grokLimiter != nil {
 		if err := c.grokLimiter.Wait(ctx); err != nil {

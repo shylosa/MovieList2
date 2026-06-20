@@ -50,6 +50,7 @@ type App struct {
 	scanMutex          sync.Mutex
 	isGitHubSyncing    bool
 	githubSyncMutex    sync.Mutex
+	wg                 sync.WaitGroup
 }
 
 type scanResult struct {
@@ -99,6 +100,7 @@ func (a *App) startup(ctx context.Context) {
 }
 
 func (a *App) shutdown(ctx context.Context) {
+	a.wg.Wait()
 	a.cancelScan()
 	if a.tmdbClient != nil {
 		a.tmdbClient.Close()
@@ -315,7 +317,9 @@ func (a *App) SyncToGitHub() {
 	a.isGitHubSyncing = true
 	a.githubSyncMutex.Unlock()
 
+	a.wg.Add(1)
 	go func() {
+		defer a.wg.Done()
 		defer func() {
 			a.githubSyncMutex.Lock()
 			a.isGitHubSyncing = false
@@ -451,10 +455,8 @@ func (a *App) fetchAIModels(ctx context.Context) ([]string, error) {
 		if client == nil {
 			client = &http.Client{Timeout: 10 * time.Second}
 		}
-		// WithoutCancel: model list is a global cache — scan cancellation
-		// must not abort this request, as other callers may be waiting on the same flight.
-		reqCtx := context.WithoutCancel(ctx)
-		req, err := http.NewRequestWithContext(reqCtx, "GET", url, nil)
+		// Use original context so that scan cancellation immediately aborts the HTTP request.
+		req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 		if err != nil {
 			return nil, err
 		}
@@ -531,7 +533,9 @@ func (a *App) RunScan() {
 	a.isScanning = true
 	a.scanMutex.Unlock()
 
+	a.wg.Add(1)
 	go func() {
+		defer a.wg.Done()
 		// 1. Створюємо контекст, який можна скасувати
 		ctx, cancel := context.WithCancel(a.ctx)
 		a.setScanCancel(cancel)
@@ -804,17 +808,13 @@ func buildUnresolvedMovie(fname, path string) storage.Movie {
 	}
 }
 
-// appendUnresolvedIfNeeded adds a placeholder unless the file is already recognized (TmdbID > 0).
-func (a *App) appendUnresolvedIfNeeded(ctx context.Context, movies *[]storage.Movie, path string) {
+// appendUnresolvedFromMap adds a placeholder unless the file is already recognized (TmdbID > 0) using pre-loaded map.
+func (a *App) appendUnresolvedFromMap(ctx context.Context, movies *[]storage.Movie, path string, existing map[string]storage.Movie) {
 	fname := a.getFileIdentifier(path)
-	existing, err := a.db.GetMovieByFilename(ctx, fname)
-	if err != nil {
-		utils.LoggerWithTrace(ctx).Warn("get_movie_for_unresolved_failed",
-			slog.String("file", fname), slog.Any("error", err))
-	}
-	if existing != nil && existing.TmdbID > 0 {
+	movie, exists := existing[fname]
+	if exists && movie.TmdbID > 0 {
 		utils.LoggerWithTrace(ctx).Warn("skip_unresolved_downgrade",
-			slog.String("file", fname), slog.Int("existing_tmdb_id", existing.TmdbID))
+			slog.String("file", fname), slog.Int("existing_tmdb_id", movie.TmdbID))
 		return
 	}
 	*movies = append(*movies, buildUnresolvedMovie(fname, path))
@@ -846,6 +846,17 @@ func (a *App) processGeminiQueue(ctx context.Context, paths []string, aiClient *
 
 		a.logFront(fmt.Sprintf("📦 Gemini пачка %d/%d (%d файлів) відправлена...", currentBatchIdx, totalBatches, len(batch)))
 
+		// Pre-fetch all existing movies in this batch from DB to eliminate O(N) queries
+		batchFnames := make([]string, len(batch))
+		for j, p := range batch {
+			batchFnames[j] = a.getFileIdentifier(p)
+		}
+		existingMovies, err := a.db.GetMoviesByFilenames(ctx, batchFnames)
+		if err != nil {
+			utils.LoggerWithTrace(ctx).Warn("batch_lookup_failed", slog.Any("error", err))
+			existingMovies = make(map[string]storage.Movie)
+		}
+
 		contexts := make([]ai.FileRecognitionContext, len(batch))
 		for j, path := range batch {
 			ctxObj := ai.FileRecognitionContextFromPath(path)
@@ -861,7 +872,7 @@ func (a *App) processGeminiQueue(ctx context.Context, paths []string, aiClient *
 			// Create placeholders for all files in this failed batch so they don't disappear.
 			var failedBatchMovies []storage.Movie
 			for _, path := range batch {
-				a.appendUnresolvedIfNeeded(ctx, &failedBatchMovies, path)
+				a.appendUnresolvedFromMap(ctx, &failedBatchMovies, path, existingMovies)
 			}
 			if len(failedBatchMovies) > 0 {
 				if errSave := a.db.SaveMoviesBatch(ctx, failedBatchMovies); errSave != nil {
@@ -887,7 +898,7 @@ func (a *App) processGeminiQueue(ctx context.Context, paths []string, aiClient *
 				a.emitProgress(processed, total, "❓ Не розпізнано: "+fname)
 
 				// Create a placeholder movie record instead of silently skipping.
-				a.appendUnresolvedIfNeeded(ctx, &moviesToSave, path)
+				a.appendUnresolvedFromMap(ctx, &moviesToSave, path, existingMovies)
 				continue
 			}
 
@@ -895,7 +906,7 @@ func (a *App) processGeminiQueue(ctx context.Context, paths []string, aiClient *
 
 			movie := a.mergeGeminiWithTMDB(ctx, path, rec)
 			if movie.TmdbID == 0 {
-				a.appendUnresolvedIfNeeded(ctx, &moviesToSave, path)
+				a.appendUnresolvedFromMap(ctx, &moviesToSave, path, existingMovies)
 				continue
 			}
 			moviesToSave = append(moviesToSave, movie)
@@ -1038,9 +1049,14 @@ func (a *App) mergeGeminiWithTMDB(ctx context.Context, filePath string, rec ai.R
 
 // ── Ручне виправлення ─────────────────────────────────────────────────────────
 
+type FixRequest struct {
+	Filename string `json:"filename"`
+	Hint     string `json:"hint"`
+}
+
 // FixSelected — виправлення вибраних записів.
 // hint може бути: TMDB URL/ID, назва фільму, рік, або порожнє (→ Gemini)
-func (a *App) FixSelected(selected []map[string]interface{}) {
+func (a *App) FixSelected(selected []FixRequest) {
 	a.scanMutex.Lock()
 	if a.isScanning {
 		a.scanMutex.Unlock()
@@ -1049,6 +1065,8 @@ func (a *App) FixSelected(selected []map[string]interface{}) {
 	}
 	a.isScanning = true
 	a.scanMutex.Unlock()
+
+	a.wg.Add(1)
 
 	// 1. Створюємо керований контекст з гарантованим trace_id 🟢
 	ctx, cancel := context.WithCancel(utils.EnsureTrace(a.ctx))
@@ -1059,25 +1077,24 @@ func (a *App) FixSelected(selected []map[string]interface{}) {
 		a.scanMutex.Lock()
 		a.isScanning = false
 		a.scanMutex.Unlock()
+		a.wg.Done()
 	}()
 
 	wailsRuntime.EventsEmit(a.ctx, "scan-started")
 
-	var withHint []map[string]interface{}
+	var withHint []FixRequest
 	var geminiQueue []string
 
 	for _, s := range selected {
-		filename, ok := s["filename"].(string)
-		if !ok || filename == "" {
+		if s.Filename == "" {
 			utils.LoggerWithTrace(ctx).Warn("fix_selected_invalid_filename", slog.Any("entry", s))
 			continue
 		}
-		hint, _ := s["hint"].(string)
 
-		if hint != "" && hint != "skip" {
+		if s.Hint != "" && s.Hint != "skip" {
 			withHint = append(withHint, s)
 		} else {
-			geminiQueue = append(geminiQueue, filepath.Join(a.cfg.MediaFolderPath, filename))
+			geminiQueue = append(geminiQueue, filepath.Join(a.cfg.MediaFolderPath, s.Filename))
 		}
 	}
 
@@ -1092,28 +1109,22 @@ func (a *App) FixSelected(selected []map[string]interface{}) {
 		// Перевірка, чи не натиснули СТОП
 		if ctx.Err() != nil {
 			a.logFront("🛑 Виправлення перервано.")
-			a.finalizeScan(ctx, "Виправлення перервано користувачем")
+			a.finalizeScan(a.ctx, "Виправлення перервано користувачем")
 			return
 		}
 
 		current++
-		filename, ok := fix["filename"].(string)
-		if !ok || filename == "" {
-			utils.LoggerWithTrace(ctx).Warn("fix_selected_invalid_filename", slog.Any("entry", fix))
-			continue
-		}
-		hint, _ := fix["hint"].(string)
-		a.emitProgress(current, total, "🔄 "+filename)
+		a.emitProgress(current, total, "🔄 "+fix.Filename)
 
 		// Передаємо локальний ctx
-		if err := a.updateMovie(ctx, filename, hint); err == nil {
-			if m, err := a.db.GetMovieByFilename(ctx, filename); err == nil && m != nil {
+		if err := a.updateMovie(ctx, fix.Filename, fix.Hint); err == nil {
+			if m, err := a.db.GetMovieByFilename(ctx, fix.Filename); err == nil && m != nil {
 				if m.TitleUA != "" && m.Plot != "" && utils.HasCyrillic(m.TitleUA) {
 					a.logFront(fmt.Sprintf("🎯 [TMDB Істина] Пропуск черги локалізації для '%s' (офіційний переклад та опис вже є)", m.TitleUA))
 					continue
 				}
 			}
-			translationQueue = append(translationQueue, filename)
+			translationQueue = append(translationQueue, fix.Filename)
 		}
 	}
 
@@ -1132,7 +1143,7 @@ func (a *App) FixSelected(selected []map[string]interface{}) {
 		a.processTranslationQueue(ctx, translationQueue, a.aiClient)
 	}
 
-	a.finalizeScan(ctx, fmt.Sprintf("Виправлено %d файлів", total))
+	a.finalizeScan(a.ctx, fmt.Sprintf("Виправлено %d файлів", total))
 }
 
 // UpdateMovie — Wails API: оновлення одного запису за hint від користувача.
