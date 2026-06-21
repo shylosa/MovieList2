@@ -288,7 +288,7 @@ POSTERS_DIR=posters
 ### Audit Fix Patch — Червень 2026
 
 * `internal/storage/storage.go`: `movieUpsertQuery` не перезаписує `title_ua`/`title_en`/`year`, якщо incoming `tmdb_id=0`, а в БД уже є розпізнаний запис (`tmdb_id > 0`).
-* `app.go`: `buildUnresolvedMovie` + `appendUnresolvedIfNeeded` — skip downgrade у `processGeminiQueue`; `FixSelected` викликає `finalizeScan` при STOP і передає trace-aware `ctx`.
+* `app.go`: `buildUnresolvedMovie` + `appendUnresolvedIfNeeded` — skip downgrade у `processGeminiQueue`; `FixSelected` викликає `finalizeScan` при STOP і передає trace-aware `ctx`. _(Superseded: `appendUnresolvedIfNeeded` removed in "Shutdown Safety & Generator Fix Patch")_
 * `internal/utils/logger.go`: `EnsureTrace` генерує UUID (8 символів); порожній `trace_id` трактується як відсутній.
 
 ### File Display Label Patch — Червень 2026
@@ -314,7 +314,7 @@ POSTERS_DIR=posters
 
 ### Web Export, Contexts, Batching & Typings Patch — Червень 2026
 
-* `internal/web/generator.go`: Updated the movie card template filename layout to use the class `file-source` with custom inline CSS properties for precise mobile responsiveness.
+* `internal/web/generator.go`: Updated the movie card template filename layout to use the class `file-source` with custom inline CSS properties for precise mobile responsiveness. _(Superseded: class replaced with `file-path-badge` and `{{.FileLabel}}` in "Shutdown Safety & Generator Fix Patch")_
 * `app.go`: Removed `context.WithoutCancel` from `fetchAIModels` to allow the active request to be aborted immediately upon StopScan trigger.
 * `app.go`: Integrated `wg sync.WaitGroup` into the `App` struct to track background GitHub Pages operations, preventing database closure during active push/read in shutdown.
 * `app.go`: Refactored `appendUnresolvedIfNeeded` using `appendUnresolvedFromMap` with batch lookup `GetMoviesByFilenames` in `processGeminiQueue`, eliminating O(N) SELECT queries.
@@ -328,5 +328,12 @@ POSTERS_DIR=posters
 * `internal/web/generator.go`: Fixed movie card badge — class changed from `file-source` to `file-path-badge` (activating existing CSS rules); `{{.Filename}}` replaced with `{{.FileLabel}}` (human-readable label); `title="{{.Filename}}"` preserves full path as tooltip.
 * `app.go`: Removed dead function `appendUnresolvedIfNeeded` — all call sites migrated to `appendUnresolvedFromMap` in the previous patch.
 * `internal/ai/grok.go`: Updated stale comment on `callGrok` — removed false "no rate limiter" claim; documented actual `grokLimiter` (30 RPM, burst=1).
+
+### Dead Code & Docs Cleanup Patch — Червень 2026
+
+* `internal/tmdb/search.go`: Removed dead function `isGoodUkrainian` (unreferenced) along with its 30-line misleading comment block. Active replacement is `utils.IsGoodUkrainian` in `lang.go`.
+* `AGENTS.md`: Marked two superseded changelog entries with `_(Superseded: ...)_` note — `appendUnresolvedIfNeeded` removal and `file-source` → `file-path-badge` migration, both done in "Shutdown Safety & Generator Fix Patch".
+* `internal/storage/storage_test.go`: Added `TestPatchMovie_MergesNonEmptyFields` and `TestPatchMovie_InsertsWhenMissing` — covers merge logic and insert-on-missing behaviour of `PatchMovie`.
+
 
 
