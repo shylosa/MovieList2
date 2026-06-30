@@ -1236,12 +1236,13 @@ func (a *App) updateMovie(ctx context.Context, filename, hint string) error {
 				a.logFront(fmt.Sprintf("🎯 [TMDB Істина] Знайдено офіційний переклад за підказкою '%s', пропуск Gemini", info.TitleUA))
 				return a.db.SaveMovie(ctx, *existing)
 			}
-			a.logFront(fmt.Sprintf("✅ TMDB знайшов за підказкою: '%s'", info.TitleUA))
+			// TMDB знайшов запис, але без UA-перекладу — застосовуємо EN/інші поля,
+			// і даємо потоку впасти у Варіант 2 (Gemini) для локалізації.
 			applyTMDBToMovie(existing, info)
-			return a.db.SaveMovie(ctx, *existing)
+			a.logFront(fmt.Sprintf("⚠️ TMDB знайшов '%s' без UA-перекладу, підключаємо Gemini для локалізації...", info.TitleEN))
+		} else {
+			a.logFront("⚠️ Прямий пошук не дав результату, підключаємо Gemini...")
 		}
-
-		a.logFront("⚠️ Прямий пошук не дав результату, підключаємо Gemini...")
 	}
 
 	// Варіант 2: текстова підказка не дала результату → Gemini → TMDB

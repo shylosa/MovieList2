@@ -91,16 +91,6 @@ func Load() *Config {
 	}
 }
 
-// getEnvRequired дістає значення або "панікує", якщо критичний ключ відсутній
-func getEnvRequired(key string) string {
-	val := os.Getenv(key)
-	if val == "" {
-		slog.Error("missing_required_env", slog.String("key", key))
-		panic("missing required env: " + key)
-	}
-	return val
-}
-
 // getEnvOrDefault дістає значення або повертає передане дефолтне
 func getEnvOrDefault(key, fallback string) string {
 	val := os.Getenv(key)
