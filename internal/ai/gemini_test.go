@@ -71,10 +71,6 @@ func TestGeminiCascadeFallback(t *testing.T) {
 	}))
 	defer server.Close()
 
-	oldLock := geminiQuotaLocked.Load()
-	geminiQuotaLocked.Store(false)
-	defer geminiQuotaLocked.Store(oldLock)
-
 	// 2. Налаштовуємо клієнта
 	cfg := &config.Config{
 		GeminiAPIKey: "fake-key",
@@ -86,6 +82,7 @@ func TestGeminiCascadeFallback(t *testing.T) {
 		// 🔴 ВИПРАВЛЕННЯ: Використовуємо наш кастомний транспорт
 		httpClient: &http.Client{Transport: &mockTransport{serverURL: server.URL}},
 	}
+	client.quotaLocked.Store(false)
 
 	// 3. Запускаємо запит
 	ctx := context.Background()
@@ -121,14 +118,11 @@ func TestTranslateBulk_GeminiQuotaLockedFallsBackToGrok(t *testing.T) {
 	}))
 	defer server.Close()
 
-	oldLock := geminiQuotaLocked.Load()
-	geminiQuotaLocked.Store(true)
-	defer geminiQuotaLocked.Store(oldLock)
-
 	client := &Client{
 		cfg:            &config.Config{GrokAPIKey: "test-key"},
 		grokHTTPClient: &http.Client{Timeout: 5 * time.Second, Transport: &grokTestTransport{serverURL: server.URL}},
 	}
+	client.quotaLocked.Store(true)
 
 	results, err := client.TranslateBulk(context.Background(), []BulkTranslateItem{{Filename: "test.mkv", Title: "", OriginalTitle: "Original", Plot: "Plot"}})
 	if err != nil {
@@ -164,10 +158,6 @@ func TestTranslateBulk_Gemini429FallsBackToGrok(t *testing.T) {
 	}))
 	defer server.Close()
 
-	oldLock := geminiQuotaLocked.Load()
-	geminiQuotaLocked.Store(false)
-	defer geminiQuotaLocked.Store(oldLock)
-
 	client := &Client{
 		cfg: &config.Config{
 			GeminiAPIKey: "fake-key",
@@ -179,6 +169,7 @@ func TestTranslateBulk_Gemini429FallsBackToGrok(t *testing.T) {
 		grokHTTPClient: &http.Client{Timeout: 5 * time.Second,
 			Transport: &grokTestTransport{serverURL: server.URL}},
 	}
+	client.quotaLocked.Store(false)
 
 	results, err := client.TranslateBulk(context.Background(), []BulkTranslateItem{{Filename: "test.mkv", Title: "", OriginalTitle: "Original", Plot: "Plot"}})
 	if err != nil {
@@ -209,14 +200,11 @@ func TestRecognizeBulk_GeminiQuotaLockedFallsBackToGrok(t *testing.T) {
 	}))
 	defer server.Close()
 
-	oldLock := geminiQuotaLocked.Load()
-	geminiQuotaLocked.Store(true)
-	defer geminiQuotaLocked.Store(oldLock)
-
 	client := &Client{
 		cfg:            &config.Config{GrokAPIKey: "test-key", GrokModel: "grok-3-mini"},
 		grokHTTPClient: &http.Client{Timeout: 5 * time.Second, Transport: &grokTestTransport{serverURL: server.URL}},
 	}
+	client.quotaLocked.Store(true)
 
 	contexts := []FileRecognitionContext{{ID: 1, OriginalFile: "Enemy.2013.mkv", CleanTitle: "Enemy", MediaType: "movie"}}
 	results, err := client.RecognizeBulk(context.Background(), contexts)
@@ -229,13 +217,10 @@ func TestRecognizeBulk_GeminiQuotaLockedFallsBackToGrok(t *testing.T) {
 }
 
 func TestRecognizeBulk_QuotaLockedNoGrok(t *testing.T) {
-	oldLock := geminiQuotaLocked.Load()
-	geminiQuotaLocked.Store(true)
-	defer geminiQuotaLocked.Store(oldLock)
-
 	client := &Client{
 		cfg: &config.Config{GrokAPIKey: ""},
 	}
+	client.quotaLocked.Store(true)
 
 	_, err := client.RecognizeBulk(context.Background(), []FileRecognitionContext{
 		{ID: 1, OriginalFile: "test.mkv", CleanTitle: "test", MediaType: "movie"},
@@ -249,14 +234,11 @@ func TestRecognizeBulk_QuotaLockedNoGrok(t *testing.T) {
 }
 
 func TestResetQuotaLock(t *testing.T) {
-	oldLock := geminiQuotaLocked.Load()
-	geminiQuotaLocked.Store(true)
-	defer geminiQuotaLocked.Store(oldLock)
-
 	c := &Client{cfg: &config.Config{}}
+	c.quotaLocked.Store(true)
 	c.ResetQuotaLock()
 
-	if geminiQuotaLocked.Load() {
+	if c.quotaLocked.Load() {
 		t.Error("expected quota lock to be reset to false after ResetQuotaLock()")
 	}
 }

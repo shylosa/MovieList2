@@ -20,8 +20,6 @@ import (
 	"google.golang.org/genai"
 )
 
-var geminiQuotaLocked atomic.Bool
-
 func isQuotaExhaustedError(err error) bool {
 	if err == nil {
 		return false
@@ -84,6 +82,7 @@ type Client struct {
 	cfg         *config.Config
 	limiter     *rate.Limiter
 	grokLimiter *rate.Limiter
+	quotaLocked atomic.Bool
 	// 🟢 ДОДАНО: Динамічний каскад та м'ютекс для його захисту
 	activeModels   []string
 	modelsMu       sync.RWMutex
@@ -191,7 +190,7 @@ func (c *Client) Close() {}
 // ResetQuotaLock clears the Gemini quota lock flag so that recovered quotas
 // are retried in the next scan session rather than skipped permanently.
 func (c *Client) ResetQuotaLock() {
-	if geminiQuotaLocked.CompareAndSwap(true, false) {
+	if c.quotaLocked.CompareAndSwap(true, false) {
 		slog.Info("gemini_quota_lock_reset")
 	}
 }
@@ -214,7 +213,7 @@ func (c *Client) RecognizeBulk(ctx context.Context, contexts []FileRecognitionCo
 
 func (c *Client) requestWithRetry(ctx context.Context, prompt string) ([]RecognizedTitle, error) {
 	// Quota locked: skip Gemini cascade entirely and go straight to Grok.
-	if geminiQuotaLocked.Load() {
+	if c.quotaLocked.Load() {
 		utils.LoggerWithTrace(ctx).Warn("gemini_quota_lock_skip_to_grok")
 		return c.grokRecognizeFallback(ctx, prompt)
 	}
@@ -287,7 +286,7 @@ func (c *Client) makeRequest(ctx context.Context, prompt, modelName string) ([]R
 	resp, err := client.Models.GenerateContent(ctx, modelName, genai.Text(prompt), config)
 	if err != nil {
 		if isQuotaExhaustedError(err) {
-			if geminiQuotaLocked.CompareAndSwap(false, true) {
+			if c.quotaLocked.CompareAndSwap(false, true) {
 				utils.LoggerWithTrace(ctx).Warn("gemini_quota_lock_enabled", slog.Any("error", err))
 			}
 		}
@@ -458,7 +457,7 @@ func (c *Client) TranslateBulk(ctx context.Context, items []BulkTranslateItem) (
 Return ONLY a raw JSON array.`, string(inputJSON))
 
 	// Quota locked: skip Gemini cascade entirely and go straight to Grok.
-	if geminiQuotaLocked.Load() {
+	if c.quotaLocked.Load() {
 		utils.LoggerWithTrace(ctx).Warn("gemini_quota_lock_skip_to_grok")
 		return c.grokTranslateFallback(ctx, prompt)
 	}
@@ -489,7 +488,7 @@ Return ONLY a raw JSON array.`, string(inputJSON))
 		resp, err := client.Models.GenerateContent(ctx, modelName, genai.Text(prompt), config)
 		if err != nil {
 			if isQuotaExhaustedError(err) {
-				if geminiQuotaLocked.CompareAndSwap(false, true) {
+				if c.quotaLocked.CompareAndSwap(false, true) {
 					utils.LoggerWithTrace(ctx).Warn("gemini_quota_lock_enabled", slog.Any("error", err))
 				}
 			}

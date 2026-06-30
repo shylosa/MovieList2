@@ -50,6 +50,8 @@ type App struct {
 	scanMutex          sync.Mutex
 	isGitHubSyncing    bool
 	githubSyncMutex    sync.Mutex
+	isCloudSyncing   bool
+	cloudSyncMutex   sync.Mutex
 	wg                 sync.WaitGroup
 }
 
@@ -71,7 +73,7 @@ var russianMarkersRE = regexp.MustCompile(`(?i)\b(?:из|как|что|это|б
 
 var (
 	reTMDBURL = regexp.MustCompile(`themoviedb\.org/(movie|tv)/(\d+)`)
-	reTMDBID  = regexp.MustCompile(`^\d+$`)
+	reTMDBID  = regexp.MustCompile(`^\d{5,}$`) // TMDB IDs: мін. 5 цифр, щоб не сплутати з роком
 )
 
 func NewApp() *App {
@@ -100,8 +102,8 @@ func (a *App) startup(ctx context.Context) {
 }
 
 func (a *App) shutdown(ctx context.Context) {
-	a.wg.Wait()
-	a.cancelScan()
+	a.cancelScan() // спочатку сигналізуємо зупинку всім горутинам
+	a.wg.Wait()    // потім чекаємо graceful завершення
 	if a.tmdbClient != nil {
 		a.tmdbClient.Close()
 	}
@@ -284,6 +286,21 @@ func (a *App) OpenShowcase() {
 }
 
 func (a *App) SyncToCloud() {
+	a.cloudSyncMutex.Lock()
+	if a.isCloudSyncing {
+		a.cloudSyncMutex.Unlock()
+		a.logFront("⚠️ Синхронізація з хмарою вже йде. Ігнорую повторний виклик.")
+		return
+	}
+	a.isCloudSyncing = true
+	a.cloudSyncMutex.Unlock()
+
+	defer func() {
+		a.cloudSyncMutex.Lock()
+		a.isCloudSyncing = false
+		a.cloudSyncMutex.Unlock()
+	}()
+
 	a.logFront("🚀 Підготовка до синхронізації...")
 	movies, err := a.db.GetAllMovies(a.ctx)
 	if err != nil {

@@ -335,5 +335,14 @@ POSTERS_DIR=posters
 * `AGENTS.md`: Marked two superseded changelog entries with `_(Superseded: ...)_` note — `appendUnresolvedIfNeeded` removal and `file-source` → `file-path-badge` migration, both done in "Shutdown Safety & Generator Fix Patch".
 * `internal/storage/storage_test.go`: Added `TestPatchMovie_MergesNonEmptyFields` and `TestPatchMovie_InsertsWhenMissing` — covers merge logic and insert-on-missing behaviour of `PatchMovie`.
 
+### Audit Round 7 Fix Patch — Червень 2026
+
+* `internal/ai/gemini.go`: `geminiQuotaLocked` перенесено з package-level `var` у поле `quotaLocked atomic.Bool` структури `Client`. Усуває shared state між інстансами та ізолює тести.
+* `app.go`: `reTMDBID` змінено з `^\d+$` на `^\d{5,}$` — запобігає хибному трактуванню року (наприклад, "2024") як TMDB ID у `extractTMDBID`.
+* `app.go` / `shutdown()`: Виправлено порядок — `cancelScan()` тепер викликається ДО `wg.Wait()`, щоб горутини могли завершитись замість зависання при довгому HTTP.
+* `app.go` / `SyncToCloud()`: Додано mutex-захист (`isCloudSyncing` + `cloudSyncMutex`) від паралельних викликів — аналогічно до `SyncToGitHub`.
+* `CHECKLIST.md`: Закрито всі виконані пункти (`- [x]`) попередньої сесії.
+
+
 
 
