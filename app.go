@@ -163,7 +163,7 @@ func (a *App) GetMovies() ([]storage.Movie, error) {
 		return []storage.Movie{}, nil
 	}
 	for i := range movies {
-		movies[i].FileLabel = utils.DisplayFileLabel(movies[i].Filename, movies[i].MediaType)
+		movies[i].FileLabel = utils.DisplayFileLabel(movies[i].Filename)
 	}
 	return movies, nil
 }
@@ -175,8 +175,8 @@ func (a *App) GetStats() map[string]interface{} {
 	}
 
 	lastScan := "Ніколи"
-	if info, err := os.Stat(a.cfg.DBPath); err == nil {
-		lastScan = info.ModTime().Format("2006-01-02 15:04")
+	if val := a.db.GetState(a.ctx, "last_scan_at"); val != "" {
+		lastScan = val
 	}
 	return map[string]interface{}{
 		"total": total,
@@ -1416,6 +1416,10 @@ func (a *App) finalizeScan(ctx context.Context, msg string) {
 	}
 	if err := web.Generate(a.cfg, movies, false); err != nil {
 		slog.Error("web_generate_failed", slog.Any("error", err))
+	}
+	// Записуємо час успішного сканування
+	if err := a.db.SetState(a.ctx, "last_scan_at", time.Now().Format("2006-01-02 15:04")); err != nil {
+		utils.LoggerWithTrace(a.ctx).Warn("set_last_scan_at_failed", slog.Any("error", err))
 	}
 	wailsRuntime.EventsEmit(a.ctx, "scan-finished", msg)
 	a.logFront("🏁 [ФІНАЛ] " + msg)

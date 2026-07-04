@@ -8,70 +8,41 @@ func TestDisplayFileLabel(t *testing.T) {
 	tests := []struct {
 		name         string
 		relativePath string
-		mediaType    string
 		expected     string
 	}{
 		{
-			name:         "Movie in nested directories",
+			name:         "Фільм у каталозі — повертає каталог",
+			relativePath: "Banshi.Inisherina.2022.WEB-DLRip/movie.mkv",
+			expected:     "Banshi.Inisherina.2022.WEB-DLRip",
+		},
+		{
+			name:         "Серіал у каталозі — повертає каталог",
+			relativePath: "How.to.Get.to.Heaven.From.Belfast.S01.2026.NF.WEB-DLRip-AVC.x264.seleZen/How.to.Get.to.Heaven.From.Belfast.S01E08.WEB-DLRip-AVC.x264.seleZen.mkv",
+			expected:     "How.to.Get.to.Heaven.From.Belfast.S01.2026.NF.WEB-DLRip-AVC.x264.seleZen",
+		},
+		{
+			name:         "Фільм у вкладеному каталозі — повертає перший рівень",
 			relativePath: "Movies/2024/Inception.mkv",
-			mediaType:    "movie",
-			expected:     "Inception.mkv",
+			expected:     "Movies",
 		},
 		{
-			name:         "Movie flat in root",
+			name:         "Плоский файл без каталогу — повертає ім'я файлу",
 			relativePath: "Inception.mkv",
-			mediaType:    "movie",
 			expected:     "Inception.mkv",
 		},
 		{
-			name:         "TV in nested season subdirectory",
-			relativePath: "Breaking Bad/Season 1/S01E01.mkv",
-			mediaType:    "tv",
-			expected:     "Breaking Bad",
-		},
-		{
-			name:         "TV directly inside TV folder",
-			relativePath: "Breaking Bad/S01E01.mkv",
-			mediaType:    "tv",
-			expected:     "Breaking Bad",
-		},
-		{
-			name:         "TV in root",
-			relativePath: "The.Show.S01E01.mkv",
-			mediaType:    "tv",
-			expected:     "The.Show.S01E01.mkv",
-		},
-		{
-			name:         "Unresolved movie (no mediaType)",
-			relativePath: "Movies/SomeMovie.mkv",
-			mediaType:    "",
-			expected:     "SomeMovie.mkv",
-		},
-		{
-			name:         "Unresolved TV (no mediaType) identified by S01E01",
-			relativePath: "Stranger Things/S01E01.mkv",
-			mediaType:    "",
-			expected:     "Stranger Things",
-		},
-		{
-			name:         "Unresolved TV (no mediaType) identified by Season",
-			relativePath: "Stranger Things/Season 3/episode.mkv",
-			mediaType:    "",
-			expected:     "Stranger Things",
-		},
-		{
-			name:         "Unresolved TV in root (no mediaType)",
-			relativePath: "Stranger.Things.S01E01.mkv",
-			mediaType:    "",
-			expected:     "Stranger.Things.S01E01.mkv",
+			name:         "Windows backslash — коректно обробляється",
+			relativePath: `Shows\Severance\S02E01.mkv`,
+			expected:     "Shows",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			actual := DisplayFileLabel(tt.relativePath, tt.mediaType)
+			actual := DisplayFileLabel(tt.relativePath)
 			if actual != tt.expected {
-				t.Errorf("DisplayFileLabel(%q, %q) = %q; expected %q", tt.relativePath, tt.mediaType, actual, tt.expected)
+				t.Errorf("DisplayFileLabel(%q) = %q; expected %q",
+					tt.relativePath, actual, tt.expected)
 			}
 		})
 	}

@@ -142,6 +142,15 @@ func (db *DB) InitSchema(ctx context.Context) error {
 		return err
 	}
 
+	_, err = db.db.ExecContext(ctx, `
+	CREATE TABLE IF NOT EXISTS app_state (
+		key   TEXT PRIMARY KEY,
+		value TEXT NOT NULL DEFAULT ''
+	)`)
+	if err != nil {
+		return fmt.Errorf("create app_state: %w", err)
+	}
+
 	var mode string
 	if err := db.db.QueryRowContext(ctx, "PRAGMA journal_mode = WAL;").Scan(&mode); err != nil {
 		return err
@@ -516,4 +525,21 @@ func (db *DB) DeleteAIResolution(ctx context.Context, filename string) error {
 	query := `DELETE FROM ai_resolutions WHERE original_filename = ?`
 	_, err := db.db.ExecContext(ctx, query, filename)
 	return err
+}
+
+// SetState зберігає довільне значення у app_state за ключем (upsert).
+func (db *DB) SetState(ctx context.Context, key, value string) error {
+	_, err := db.db.ExecContext(ctx,
+		`INSERT INTO app_state (key, value) VALUES (?, ?)
+		 ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+		key, value)
+	return err
+}
+
+// GetState повертає значення з app_state або порожній рядок якщо ключ відсутній.
+func (db *DB) GetState(ctx context.Context, key string) string {
+	var val string
+	_ = db.db.QueryRowContext(ctx,
+		`SELECT value FROM app_state WHERE key = ?`, key).Scan(&val)
+	return val
 }

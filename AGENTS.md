@@ -120,14 +120,7 @@ Examples: `Vrag` → `Враг`, `Nochnoj Rejs` → `Ночной Рейс`.
 
 ## File Display Label
 
-`movies.filename` remains the primary key (full relative path). UI uses a short `FileLabel` computed by `utils.DisplayFileLabel(relativePath, mediaType)`.
-
-| Media type | Logic |
-|------------|-------|
-| `movie` | file `basename` |
-| `tv` | first folder relative to `MEDIA_FOLDER_PATH` |
-| `tv` at root | file `basename` |
-| unresolved (`""`) | heuristic via regexp (`S\d{2}E\d{2}`, `Season \d+`, etc.) |
+`movies.filename` remains the primary key (full relative path). UI uses `FileLabel` computed by `utils.DisplayFileLabel(relativePath)` — raw folder name (first path segment) or file basename for flat files. Used as a navigation badge to locate files on disk.
 
 `FileLabel` is **not** stored in SQLite — computed in `GetMovies()` before returning to UI.
 
@@ -221,6 +214,27 @@ GITHUB_PAGES_BRANCH=main
 * `app.go` / `RunScan()`: Warmup goroutine (`fetchAIModels`) тепер tracked у `a.wg` (`wg.Add(1)` + `defer wg.Done()`). Раніше горутина могла пережити shutdown і звернутись до `a.aiClient` після `db.Close()`.
 * `app.go`: Видалено мертву змінну `russianMarkers []string` — артефакт рефакторингу, замінений на `russianMarkersRE`.
 * `internal/storage/storage.go`: Видалено мертвий метод `GetAllFilenames` і реліктовий коментар над ним.
+
+---
+
+### Audit Round 11 Fix Patch — Липень 2026
+
+* `internal/utils/path_display.go` / `reSeasonCut`: Видалено year-альтернатив (`[.\s]\d{4}[\s._].*`) — регекс більше не обрізає рік якщо він є частиною назви серіалу (The.1984.Show, 1923...). Обрізання відбувається тільки від маркера сезону `S\d{2}`. Додано регресійні тести.
+* `app.go` / `GetStats()`: Замінено `os.Stat(DBPath).ModTime()` на `db.GetState("last_scan_at")` — час останнього сканування тепер записується явно після завершення scan і не залежить від WAL checkpoint-ів SQLite.
+* `internal/storage/storage.go`: Додано таблицю `app_state (key TEXT PK, value TEXT)` і методи `SetState` / `GetState`.
+* `CHECKLIST.md`: Очищено (всі раунди 1–11 закриті).
+
+---
+
+### DisplayFileLabel: фінальна семантика — Липень 2026
+
+* `internal/utils/path_display.go`: Переписано повністю. Видалено `reSeason`, `reEpisode`,
+  `reSeasonCut`, `cleanFolderLabel`, імпорт `"regexp"`. Нова логіка: є каталог → сира назва
+  першого рівня; плоский файл → ім'я файлу. Badge слугує навігаційною міткою для пошуку
+  файлу на диску, тому потрібна точна сира назва, а не очищений UX-заголовок.
+* `internal/web/generator.go`: `title="{{.Filename}}"` → `title="{{.FileLabel}}"`.
+* Сигнатура `DisplayFileLabel` скорочена до 1 параметра. Оновлено всі 3 виклики
+  (app.go, generator.go, sheets.go) і тести.
 
 ---
 

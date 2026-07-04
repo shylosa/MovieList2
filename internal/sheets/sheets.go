@@ -61,7 +61,7 @@ func (c *Client) SyncMovies(ctx context.Context, movies []storage.Movie) error {
 
 	for _, m := range movies {
 		row := []interface{}{
-			utils.DisplayFileLabel(m.Filename, m.MediaType),
+			utils.DisplayFileLabel(m.Filename),
 			m.TitleUA,
 			m.TitleEN,
 			m.Year,

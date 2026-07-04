@@ -37,7 +37,7 @@ func Generate(cfg *config.Config, movies []storage.Movie, isMobile bool) error {
 			}
 		}
 		m.LocalPosterPath = posterSrc
-		m.FileLabel = utils.DisplayFileLabel(m.Filename, m.MediaType)
+		m.FileLabel = utils.DisplayFileLabel(m.Filename)
 		displayMovies[i] = m
 	}
 
@@ -473,7 +473,7 @@ const htmlLayout = `<!DOCTYPE html>
                     <h3 class="title-en">{{.TitleEN}}</h3>
                     <div class="details"><strong>Актори:</strong> {{.Cast}}</div>
                     <div class="plot"><strong>Сюжет:</strong><br>{{.Plot}}</div>
-                    <div class="file-path-badge" title="{{.Filename}}">
+                    <div class="file-path-badge" title="{{.FileLabel}}">
                         📁 {{.FileLabel}}
                     </div>
                 </div>
