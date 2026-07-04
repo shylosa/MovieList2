@@ -78,6 +78,27 @@ func (c *Client) SearchWithFallbacks(
 			logger.Info("search_success", slog.String("label", a.label), slog.String("title", info.TitleEN))
 			return info, nil
 		}
+
+		// Після провалу CYR-пошуку для варіанта "Папка" — EN cascade через латинську транслітерацію.
+		// Інакше cached null по кириличному запиту блокує EN-пошук (напр. "Скарпетта" → "Scarpetta").
+		if a.label == "Папка" && hasCyrillicChars(a.query) {
+			latinQuery := cyrillicToLatin(a.query)
+			if latinQuery != a.query {
+				logger.Info("folder_en_fallback",
+					slog.String("cyrillic", a.query),
+					slog.String("latin", latinQuery),
+				)
+				info, err = c.searchAndFetch(ctx, latinQuery, a.year, a.mediaType, originalFilename)
+				if err != nil {
+					logger.Warn("folder_en_fallback_failed", slog.Any("error", err))
+					continue
+				}
+				if info != nil {
+					logger.Info("search_success", slog.String("label", a.label+" EN"), slog.String("title", info.TitleEN))
+					return info, nil
+				}
+			}
+		}
 	}
 
 	return nil, nil

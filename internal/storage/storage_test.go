@@ -198,3 +198,37 @@ func TestPatchMovie_InsertsWhenMissing(t *testing.T) {
 	}
 }
 
+func TestSetAndGetState(t *testing.T) {
+	ctx := context.Background()
+
+	db, err := New(filepath.Join(t.TempDir(), "movies.db"))
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer db.Close()
+
+	if err := db.InitSchema(ctx); err != nil {
+		t.Fatalf("InitSchema() error = %v", err)
+	}
+
+	if err := db.SetState(ctx, "last_scan_at", "2026-07-04 12:00"); err != nil {
+		t.Fatalf("SetState failed: %v", err)
+	}
+	got := db.GetState(ctx, "last_scan_at")
+	if got != "2026-07-04 12:00" {
+		t.Errorf("GetState = %q; want %q", got, "2026-07-04 12:00")
+	}
+
+	if err := db.SetState(ctx, "last_scan_at", "2026-07-04 15:30"); err != nil {
+		t.Fatalf("SetState upsert failed: %v", err)
+	}
+	got = db.GetState(ctx, "last_scan_at")
+	if got != "2026-07-04 15:30" {
+		t.Errorf("GetState after upsert = %q; want %q", got, "2026-07-04 15:30")
+	}
+
+	got = db.GetState(ctx, "nonexistent_key")
+	if got != "" {
+		t.Errorf("GetState(nonexistent) = %q; want empty string", got)
+	}
+}

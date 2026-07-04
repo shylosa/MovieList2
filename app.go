@@ -50,8 +50,8 @@ type App struct {
 	scanMutex          sync.Mutex
 	isGitHubSyncing    bool
 	githubSyncMutex    sync.Mutex
-	isCloudSyncing   bool
-	cloudSyncMutex   sync.Mutex
+	isCloudSyncing     bool
+	cloudSyncMutex     sync.Mutex
 	wg                 sync.WaitGroup
 }
 
@@ -101,6 +101,7 @@ func (a *App) startup(ctx context.Context) {
 }
 
 func (a *App) shutdown(ctx context.Context) {
+	slog.Info("app_closed")
 	a.cancelScan() // спочатку сигналізуємо зупинку всім горутинам
 	a.wg.Wait()    // потім чекаємо graceful завершення
 	if a.tmdbClient != nil {
@@ -576,7 +577,7 @@ func (a *App) RunScan() {
 				if stoppedByUser {
 					msg = "Сканування перервано користувачем"
 				}
-				a.finalizeScan(a.ctx, msg)
+				a.finalizeScan(a.ctx, msg, !stoppedByUser)
 			}
 		}()
 
@@ -587,8 +588,10 @@ func (a *App) RunScan() {
 		a.wg.Add(1)
 		go func() {
 			defer a.wg.Done()
-			if _, err := a.fetchAIModels(scanCtx); err != nil {
-				utils.LoggerWithTrace(scanCtx).Debug("ai_models_warmup_failed", slog.Any("error", err))
+			// a.ctx (не scanCtx): warmup кешує моделі для всього lifecycle додатку.
+			// scanCtx скасовується при завершенні/зупинці скана і передчасно вбиває HTTP-запит.
+			if _, err := a.fetchAIModels(a.ctx); err != nil {
+				utils.LoggerWithTrace(a.ctx).Debug("ai_models_warmup_failed", slog.Any("error", err))
 			}
 		}()
 
@@ -606,7 +609,7 @@ func (a *App) RunScan() {
 
 		diskPaths, err := scn.GetDiskFiles()
 		if err != nil {
-			a.finalizeScan(scanCtx, fmt.Sprintf("❌ Помилка сканування диску: %v", err))
+			a.finalizeScan(scanCtx, fmt.Sprintf("❌ Помилка сканування диску: %v", err), false)
 			scanFinished = true
 			return
 		}
@@ -635,7 +638,7 @@ func (a *App) RunScan() {
 		// Визначаємо що треба обробити (нові + нерозпізнані)
 		filesToProcess := a.filterUnprocessed(scanCtx, diskPaths)
 		if len(filesToProcess) == 0 {
-			a.finalizeScan(scanCtx, "Змін не знайдено.")
+			a.finalizeScan(scanCtx, "Змін не знайдено.", true)
 			scanFinished = true
 			return
 		}
@@ -912,9 +915,48 @@ func (a *App) processGeminiQueue(ctx context.Context, paths []string, aiClient *
 			fname := a.getFileIdentifier(path)
 			rec, ok := recognizedMap[j]
 
-			if !ok || rec.ENTitle == "" {
+			if !ok {
+				utils.LoggerWithTrace(ctx).Warn("gemini_recognition_missing",
+					slog.String("file", fname),
+					slog.Int("batch", currentBatchIdx),
+					slog.Int("item_id", j),
+				)
 				a.logFront(fmt.Sprintf("⚠️ Gemini не розпізнав: '%s'", fname))
 				a.emitProgress(processed, total, "❓ Не розпізнано: "+fname)
+
+				// Create a placeholder movie record instead of silently skipping.
+				a.appendUnresolvedFromMap(ctx, &moviesToSave, path, existingMovies)
+				continue
+			}
+
+			yearVal := 0
+			if rec.Year != nil {
+				yearVal = *rec.Year
+			}
+			utils.LoggerWithTrace(ctx).Info("gemini_recognition_result",
+				slog.String("file", fname),
+				slog.String("en_title", rec.ENTitle),
+				slog.String("media_type", rec.MediaType),
+				slog.Int("year", yearVal),
+				slog.Float64("confidence", rec.Confidence),
+			)
+
+			if rec.ENTitle == "" {
+				utils.LoggerWithTrace(ctx).Warn("gemini_recognition_empty_title",
+					slog.String("file", fname),
+					slog.String("media_type", rec.MediaType),
+					slog.Int("year", yearVal),
+					slog.Float64("confidence", rec.Confidence),
+				)
+				a.logFront(fmt.Sprintf("⚠️ Gemini не розпізнав: '%s'", fname))
+				a.emitProgress(processed, total, "❓ Не розпізнано: "+fname)
+
+				movie := a.rescueEmptyGeminiWithFolder(ctx, path)
+				if movie.TmdbID > 0 {
+					moviesToSave = append(moviesToSave, movie)
+					recognizedFiles = append(recognizedFiles, fname)
+					continue
+				}
 
 				// Create a placeholder movie record instead of silently skipping.
 				a.appendUnresolvedFromMap(ctx, &moviesToSave, path, existingMovies)
@@ -930,10 +972,6 @@ func (a *App) processGeminiQueue(ctx context.Context, paths []string, aiClient *
 			}
 			moviesToSave = append(moviesToSave, movie)
 			if movie.TmdbID > 0 {
-				yearVal := 0
-				if rec.Year != nil {
-					yearVal = *rec.Year
-				}
 				if err := a.db.SaveAIResolution(ctx, storage.AIResolution{
 					OriginalFilename: fname,
 					ResolvedTitle:    rec.ENTitle,
@@ -968,14 +1006,22 @@ func (a *App) processGeminiQueue(ctx context.Context, paths []string, aiClient *
 // filePath — повний шлях або basename (для ParseFilename).
 func (a *App) mergeGeminiWithTMDB(ctx context.Context, filePath string, rec ai.RecognizedTitle) storage.Movie {
 	fname := a.getFileIdentifier(filePath)
+	logger := utils.LoggerWithTrace(ctx).With(
+		slog.String("file", fname),
+		slog.String("en_title", rec.ENTitle),
+		slog.String("gemini_media_type", rec.MediaType),
+		slog.Float64("confidence", rec.Confidence),
+	)
 
 	// 🛡️ КРОК 1: ПЕРЕВІРКА ВАЛІДНОСТІ ВІДПОВІДІ ШІ
 	if rec.ENTitle == "" {
+		logger.Warn("gemini_merge_skipped_empty_title")
 		a.logFront(fmt.Sprintf("⚠️ [GEMINI] Відсутня EN назва для '%s'. Пропускаємо пошук.", fname))
 		return storage.Movie{Filename: fname}
 	}
 
 	if rec.Confidence < aiConfidenceThreshold {
+		logger.Warn("gemini_merge_skipped_low_confidence")
 		a.logFront(fmt.Sprintf("🛡️ [ЗАХИСТ] Gemini невпевнений (%.2f) щодо '%s'. Відхиляємо.", rec.Confidence, fname))
 		return storage.Movie{Filename: fname}
 	}
@@ -1017,12 +1063,38 @@ func (a *App) mergeGeminiWithTMDB(ctx context.Context, filePath string, rec ai.R
 		yearStr = strconv.Itoa(*rec.Year)
 	}
 
+	logger = logger.With(
+		slog.String("tmdb_media_type", string(mt)),
+		slog.String("year", yearStr),
+	)
+	logger.Info("gemini_merge_started")
+
+	if ctx.Err() != nil {
+		logger.Warn("gemini_merge_cancelled_before_tmdb", slog.Any("error", ctx.Err()))
+		return storage.Movie{Filename: fname}
+	}
+
 	tmdbInfo, err := a.tmdbClient.FetchByCleanTitle(ctx, rec.ENTitle, yearStr, mt)
 	if err != nil {
+		logger.Warn("gemini_merge_tmdb_error", slog.Any("error", err))
 		a.logFront(fmt.Sprintf("⚠️ TMDB помилка для '%s': %v", rec.ENTitle, err))
 	}
 
+	if tmdbInfo == nil && err == nil && mt == tmdb.MediaTypeMovie && ctx.Err() == nil {
+		logger.Info("gemini_merge_tv_retry")
+		tmdbInfo, err = a.tmdbClient.FetchByCleanTitle(ctx, rec.ENTitle, yearStr, tmdb.MediaTypeTV)
+		if err != nil {
+			logger.Warn("gemini_merge_tv_retry_error", slog.Any("error", err))
+			a.logFront(fmt.Sprintf("⚠️ TMDB помилка TV-пошуку для '%s': %v", rec.ENTitle, err))
+		}
+	}
+
 	if tmdbInfo == nil {
+		if ctx.Err() != nil {
+			logger.Warn("gemini_merge_cancelled_after_tmdb", slog.Any("error", ctx.Err()))
+		} else {
+			logger.Warn("gemini_merge_tmdb_not_found")
+		}
 		a.logFront(fmt.Sprintf("❌ TMDB не знайшов '%s' — запис залишається нерозпізнаним", rec.ENTitle))
 		return storage.Movie{Filename: fname}
 	}
@@ -1042,6 +1114,12 @@ func (a *App) mergeGeminiWithTMDB(ctx context.Context, filePath string, rec ai.R
 	}
 
 	if jw < geminiTMDBVerifyMinJW {
+		logger.Warn("gemini_merge_post_verify_rejected",
+			slog.String("tmdb_title", tmdbInfo.TitleEN),
+			slog.String("search_title", tmdbInfo.SearchTitle),
+			slog.String("matched_alias", tmdbInfo.MatchedAlias),
+			slog.Float64("similarity", jw),
+		)
 		a.logFront(fmt.Sprintf(
 			"🛡️ [POST-VERIFY] Відхилено '%s': Gemini '%s' ≠ TMDB '%s' (Search: '%s', Alias: '%s', схожість %.2f)",
 			fname, rec.ENTitle, tmdbInfo.TitleEN, tmdbInfo.SearchTitle, tmdbInfo.MatchedAlias, jw,
@@ -1049,6 +1127,12 @@ func (a *App) mergeGeminiWithTMDB(ctx context.Context, filePath string, rec ai.R
 		return storage.Movie{Filename: fname}
 	}
 
+	logger.Info("gemini_merge_tmdb_accepted",
+		slog.Int("tmdb_id", tmdbInfo.TMDBID),
+		slog.String("tmdb_title", tmdbInfo.TitleEN),
+		slog.String("tmdb_media_type", string(tmdbInfo.MediaType)),
+		slog.String("tmdb_year", tmdbInfo.Year),
+	)
 	a.logFront(fmt.Sprintf("✅ TMDB знайшов: '%s' (%s)", tmdbInfo.TitleEN, tmdbInfo.Year))
 
 	// TMDB є джерелом повних даних після Gemini Resolve.
@@ -1064,6 +1148,191 @@ func (a *App) mergeGeminiWithTMDB(ctx context.Context, filePath string, rec ai.R
 	movie.MediaType = string(tmdbInfo.MediaType)
 
 	return movie
+}
+
+// rescueEmptyGeminiWithFolder tries a deterministic TMDB lookup when AI returned
+// an empty title but the file sits in a meaningful release folder.
+func (a *App) rescueEmptyGeminiWithFolder(ctx context.Context, filePath string) storage.Movie {
+	fname := a.getFileIdentifier(filePath)
+	logger := utils.LoggerWithTrace(ctx).With(slog.String("file", fname))
+
+	if ctx.Err() != nil {
+		logger.Warn("gemini_empty_rescue_cancelled_before_start", slog.Any("error", ctx.Err()))
+		return storage.Movie{Filename: fname}
+	}
+
+	parsed := tmdb.ParseFilename(filePath)
+	parentTitle := cleanRescueParentTitle(filePath, a.cfg.MediaFolderPath, parsed.ParentDir)
+	if parentTitle == "" {
+		logger.Warn("gemini_empty_rescue_skipped_no_parent_title")
+		return storage.Movie{Filename: fname}
+	}
+
+	parentParsed := tmdb.ParseFilename(parentTitle)
+	year := parsed.Year
+	if year == 0 {
+		year = parentParsed.Year
+	}
+	yearStr := ""
+	if year > 0 {
+		yearStr = strconv.Itoa(year)
+	}
+
+	candidates := buildGeminiEmptyRescueCandidates(parentParsed.CleanTitle)
+	if len(candidates) == 0 {
+		logger.Warn("gemini_empty_rescue_skipped_no_candidates", slog.String("parent", parentTitle))
+		return storage.Movie{Filename: fname}
+	}
+
+	logger.Info("gemini_empty_rescue_started",
+		slog.String("parent", parentTitle),
+		slog.Int("candidate_count", len(candidates)),
+		slog.String("year", yearStr),
+	)
+
+	for _, candidate := range candidates {
+		if ctx.Err() != nil {
+			logger.Warn("gemini_empty_rescue_cancelled", slog.Any("error", ctx.Err()))
+			return storage.Movie{Filename: fname}
+		}
+
+		tmdbInfo, err := a.tmdbClient.FetchByCleanTitle(ctx, candidate, yearStr, tmdb.MediaTypeMovie)
+		if err != nil {
+			logger.Warn("gemini_empty_rescue_tmdb_error",
+				slog.String("candidate", candidate),
+				slog.Any("error", err),
+			)
+			continue
+		}
+		if tmdbInfo == nil && ctx.Err() == nil {
+			logger.Info("gemini_empty_rescue_tv_retry", slog.String("candidate", candidate))
+			tmdbInfo, err = a.tmdbClient.FetchByCleanTitle(ctx, candidate, yearStr, tmdb.MediaTypeTV)
+			if err != nil {
+				logger.Warn("gemini_empty_rescue_tv_retry_error",
+					slog.String("candidate", candidate),
+					slog.Any("error", err),
+				)
+				continue
+			}
+		}
+		if tmdbInfo == nil {
+			logger.Info("gemini_empty_rescue_candidate_miss", slog.String("candidate", candidate))
+			continue
+		}
+
+		jw := maxTitleSimilarity(candidate, tmdbInfo)
+		if jw < geminiTMDBVerifyMinJW {
+			logger.Warn("gemini_empty_rescue_post_verify_rejected",
+				slog.String("candidate", candidate),
+				slog.String("tmdb_title", tmdbInfo.TitleEN),
+				slog.String("search_title", tmdbInfo.SearchTitle),
+				slog.String("matched_alias", tmdbInfo.MatchedAlias),
+				slog.Float64("similarity", jw),
+			)
+			continue
+		}
+
+		logger.Info("gemini_empty_rescue_accepted",
+			slog.String("candidate", candidate),
+			slog.Int("tmdb_id", tmdbInfo.TMDBID),
+			slog.String("tmdb_title", tmdbInfo.TitleEN),
+			slog.String("tmdb_media_type", string(tmdbInfo.MediaType)),
+			slog.String("tmdb_year", tmdbInfo.Year),
+			slog.Float64("similarity", jw),
+		)
+		a.logFront(fmt.Sprintf("✅ [RESCUE] TMDB знайшов: '%s' (%s)", tmdbInfo.TitleEN, tmdbInfo.Year))
+		return movieFromTMDB(fname, tmdbInfo)
+	}
+
+	logger.Warn("gemini_empty_rescue_failed", slog.String("parent", parentTitle))
+	return storage.Movie{Filename: fname}
+}
+
+func cleanRescueParentTitle(filePath, mediaRoot, parentDir string) string {
+	parent := strings.TrimSpace(parentDir)
+	if parent == "" || parent == "." || parent == string(filepath.Separator) {
+		return ""
+	}
+
+	if mediaRoot != "" {
+		fileAbs := filepath.Clean(filePath)
+		rootAbs := filepath.Clean(mediaRoot)
+		if !filepath.IsAbs(fileAbs) {
+			fileAbs = filepath.Join(rootAbs, fileAbs)
+		}
+		parentPath := filepath.Clean(filepath.Dir(fileAbs))
+		if rel, err := filepath.Rel(rootAbs, parentPath); err == nil && rel == "." {
+			return ""
+		}
+	}
+
+	switch strings.ToLower(parent) {
+	case "movie", "movies", "film", "films", "serial", "serials", "series", "show", "shows",
+		"video", "videos", "download", "downloads", "кино", "фильмы", "фільми", "серіали", "сериалы":
+		return ""
+	}
+
+	return parent
+}
+
+func buildGeminiEmptyRescueCandidates(title string) []string {
+	var candidates []string
+	seen := make(map[string]bool)
+	add := func(s string) {
+		s = strings.TrimSpace(s)
+		if len([]rune(s)) < 3 {
+			return
+		}
+		key := strings.ToLower(s)
+		if seen[key] {
+			return
+		}
+		seen[key] = true
+		candidates = append(candidates, s)
+	}
+
+	add(title)
+	latin := utils.CyrillicToLatin(title)
+	add(latin)
+	for _, variant := range borrowedLatinVariants(latin) {
+		add(variant)
+	}
+
+	return candidates
+}
+
+func borrowedLatinVariants(s string) []string {
+	if s == "" || utils.HasCyrillic(s) {
+		return nil
+	}
+
+	var variants []string
+	add := func(old, replacement string) {
+		if strings.HasPrefix(s, old) {
+			variants = append(variants, replacement+strings.TrimPrefix(s, old))
+		}
+	}
+
+	add("Sk", "Sc")
+	add("sk", "sc")
+	add("SK", "SC")
+
+	return variants
+}
+
+func maxTitleSimilarity(title string, info *tmdb.MovieInfo) float64 {
+	jw := tmdb.TitleSimilarity(title, info.TitleEN)
+	if info.SearchTitle != "" {
+		if jwSearch := tmdb.TitleSimilarity(title, info.SearchTitle); jwSearch > jw {
+			jw = jwSearch
+		}
+	}
+	if info.MatchedAlias != "" {
+		if jwAlias := tmdb.TitleSimilarity(title, info.MatchedAlias); jwAlias > jw {
+			jw = jwAlias
+		}
+	}
+	return jw
 }
 
 // ── Ручне виправлення ─────────────────────────────────────────────────────────
@@ -1128,7 +1397,7 @@ func (a *App) FixSelected(selected []FixRequest) {
 		// Перевірка, чи не натиснули СТОП
 		if ctx.Err() != nil {
 			a.logFront("🛑 Виправлення перервано.")
-			a.finalizeScan(a.ctx, "Виправлення перервано користувачем")
+			a.finalizeScan(a.ctx, "Виправлення перервано користувачем", false)
 			return
 		}
 
@@ -1162,7 +1431,7 @@ func (a *App) FixSelected(selected []FixRequest) {
 		a.processTranslationQueue(ctx, translationQueue, a.aiClient)
 	}
 
-	a.finalizeScan(a.ctx, fmt.Sprintf("Виправлено %d файлів", total))
+	a.finalizeScan(a.ctx, fmt.Sprintf("Виправлено %d файлів", total), true)
 }
 
 // UpdateMovie — Wails API: оновлення одного запису за hint від користувача.
@@ -1409,7 +1678,7 @@ func (a *App) emitProgress(current, total int, filename string) {
 	})
 }
 
-func (a *App) finalizeScan(ctx context.Context, msg string) {
+func (a *App) finalizeScan(ctx context.Context, msg string, success bool) {
 	movies, err := a.db.GetAllMovies(ctx)
 	if err != nil {
 		slog.Warn("finalize_scan_get_movies_failed", slog.Any("error", err))
@@ -1417,9 +1686,11 @@ func (a *App) finalizeScan(ctx context.Context, msg string) {
 	if err := web.Generate(a.cfg, movies, false); err != nil {
 		slog.Error("web_generate_failed", slog.Any("error", err))
 	}
-	// Записуємо час успішного сканування
-	if err := a.db.SetState(a.ctx, "last_scan_at", time.Now().Format("2006-01-02 15:04")); err != nil {
-		utils.LoggerWithTrace(a.ctx).Warn("set_last_scan_at_failed", slog.Any("error", err))
+	// Записуємо час ТІЛЬКИ при успішному завершенні
+	if success {
+		if err := a.db.SetState(a.ctx, "last_scan_at", time.Now().Format("2006-01-02 15:04")); err != nil {
+			utils.LoggerWithTrace(a.ctx).Warn("set_last_scan_at_failed", slog.Any("error", err))
+		}
 	}
 	wailsRuntime.EventsEmit(a.ctx, "scan-finished", msg)
 	a.logFront("🏁 [ФІНАЛ] " + msg)
@@ -1550,8 +1821,8 @@ func (a *App) processTranslationQueue(ctx context.Context, filenames []string, a
 		}
 	}
 
-	// Diagnostic: count how many movies in the DB appear to need translation
-	// but were not added to the translation payload (for later inspection).
+	// Diagnostic: серед файлів поточної черги рахуємо скільки потребують перекладу,
+	// але не потрапили до payload (наприклад, записи відсутні у БД або вже оброблені).
 	needCount := 0
 	for _, m := range movies {
 		if m.TitleUA == "" || needsTranslation(m.TitleUA) || m.Plot == "" || needsTranslation(m.Plot) {

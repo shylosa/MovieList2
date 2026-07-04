@@ -84,8 +84,9 @@ func LoggerWithTrace(ctx context.Context) *slog.Logger {
 	return slog.Default().With(slog.String("trace_id", traceID))
 }
 
+// CloseLogger синхронізує та закриває файл логів.
+// app_closed логується в app.shutdown() — реальному Wails OnShutdown хуку.
 func CloseLogger() {
-	slog.Info("app_closed")
 	if logFile != nil {
 		logFile.Sync()
 		logFile.Close()

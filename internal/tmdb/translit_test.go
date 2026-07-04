@@ -8,6 +8,7 @@ func TestCyrillicToLatin(t *testing.T) {
 		want string
 	}{
 		{"Слово Пацана", "Slovo Patsana"},
+		{"Скарпетта", "Skarpetta"},
 		{"Rick and Morty", "Rick and Morty"},
 		{"Враг", "Vrag"},
 	}

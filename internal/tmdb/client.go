@@ -290,8 +290,13 @@ func (c *Client) pipelineLatin(ctx context.Context, parsed ParsedFile, originalF
 		return info, nil
 	}
 
-	// Спроба 3: транслітерація латиниці → кирилиця
-	// 🟢 ВИПРАВЛЕННЯ: Прибрано ненадійний isLikelyEnglish. Якщо трансліт відрізняється — завжди пробуємо.
+	// Спроба 3: lat→cyr транслітерація — лише для змішаних рядків з кирилицею.
+	// Чиста ASCII (TitleLangLatin) → пропуск: lat→cyr дає "русизм", не EN-оригінал;
+	// економимо 2+ зайвих TMDB-запити (uk-UA + ru-RU) перед Gemini fallback.
+	if !utils.HasCyrillic(parsed.CleanTitle) {
+		return nil, nil
+	}
+
 	cyrillicTitle := latinToCyrillic(parsed.CleanTitle)
 	if cyrillicTitle != parsed.CleanTitle {
 		utils.LoggerWithTrace(ctx).Info("transliteration_applied",
@@ -451,43 +456,11 @@ func latinToCyrillic(s string) string {
 	return converted
 }
 
-// cyrillicToLatinMap — транслітерація кирилиці в латиницю для пошуку в en-US індексі TMDB.
-var cyrillicToLatinMap = map[rune]string{
-	'а': "a", 'б': "b", 'в': "v", 'г': "g", 'д': "d", 'е': "e", 'ё': "yo", 'ж': "zh",
-	'з': "z", 'и': "i", 'й': "y", 'к': "k", 'л': "l", 'м': "m", 'н': "n", 'о': "o",
-	'п': "p", 'р': "r", 'с': "s", 'т': "t", 'у': "u", 'ф': "f", 'х': "kh", 'ц': "ts",
-	'ч': "ch", 'ш': "sh", 'щ': "shch", 'ъ': "", 'ы': "y", 'ь': "", 'э': "e", 'ю': "yu", 'я': "ya",
-	'і': "i", 'ї': "i", 'є': "e", 'ґ': "g",
-	'А': "A", 'Б': "B", 'В': "V", 'Г': "G", 'Д': "D", 'Е': "E", 'Ё': "Yo", 'Ж': "Zh",
-	'З': "Z", 'И': "I", 'Й': "Y", 'К': "K", 'Л': "L", 'М': "M", 'Н': "N", 'О': "O",
-	'П': "P", 'Р': "R", 'С': "S", 'Т': "T", 'У': "U", 'Ф': "F", 'Х': "Kh", 'Ц': "Ts",
-	'Ч': "Ch", 'Ш': "Sh", 'Щ': "Shch", 'Ъ': "", 'Ы': "Y", 'Ь': "", 'Э': "E", 'Ю': "Yu", 'Я': "Ya",
-	'І': "I", 'Ї': "I", 'Є': "E", 'Ґ': "G",
-}
-
 // cyrillicToLatin конвертує кириличну назву в латиницю для пошуку TMDB.
-// "Слово Пацана" → "Slovo Patsana"
+// "Слово Пацана" → "Slovo Patsana", "Скарпетта" → "Skarpetta"
 func cyrillicToLatin(s string) string {
-	hasCyr := false
-	for _, r := range s {
-		if isCyrillic(r) {
-			hasCyr = true
-			break
-		}
-	}
-	if !hasCyr {
-		return s
-	}
-
-	var result strings.Builder
-	for _, r := range s {
-		if lat, ok := cyrillicToLatinMap[r]; ok {
-			result.WriteString(lat)
-		} else {
-			result.WriteRune(r)
-		}
-	}
-	return strings.TrimSpace(reSpaceFallback.ReplaceAllString(result.String(), " "))
+	converted := utils.CyrillicToLatin(s)
+	return strings.TrimSpace(reSpaceFallback.ReplaceAllString(converted, " "))
 }
 
 // digraphMap — двосимвольні комбінації (порядок важливий: обробляються першими)

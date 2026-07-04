@@ -200,6 +200,49 @@ GITHUB_PAGES_BRANCH=main
 
 ## Changelog
 
+### Round 13b — Аналіз логів після FIX-17 (Липень 2026)
+
+Підтверджено: FIX-15 (warmup a.ctx), FIX-17 (folder_en_fallback) — в логах присутні.
+`ai_models_warmup_failed` не спостерігається.
+
+Спостереження:
+* `"Скарпетта"→"Skarpetta"` через folder_en_fallback: технічно правильна транслітерація,
+  але TMDB назва `"Scarpetta"` (італійська) — не знайдено. Файл коректно перенаправлено
+  в Gemini, який повернув правильний EN title. Post-recognition lookup знайшов серіал через
+  TV endpoint. Каскад відпрацював.
+* `internal/utils/lang.go` / `CyrillicToLatin()`: FIX-19 — подвоєні приголосні (тт→tt тощо)
+  обробляються окремим replacer до одинарних (BGN/PCGN). Тест `TestCyrillicToLatinDoubleConsonants`.
+
+---
+
+### Audit Round 13 Fix Patch — Липень 2026 (Код + Аналіз логів)
+
+* `app.go` / `RunScan()` warmup goroutine: `fetchAIModels(scanCtx)` → `fetchAIModels(a.ctx)`.
+  Warmup кешує AI-моделі для lifecycle додатку; `scanCtx` скасовується при миттєвому
+  завершенні скана (нових файлів нема) і передчасно вбивав HTTP-запит (`context canceled`).
+* `internal/utils/logger.go` / `CloseLogger()`: Видалено `slog.Info("app_closed")`.
+* `app.go` / `shutdown()`: Додано `slog.Info("app_closed")` першим рядком. Усуває подвійні
+  `app_closed` при WebView2 retry (~15с) або повторному запуску exe на Windows.
+* `internal/tmdb/search.go`: Варіант "Папка" пробує EN cascade після провалу CYR — усуває
+  cache hit блокування EN-пошуку для кириличних назв папок.
+* `internal/tmdb/client.go` / `pipelineLatin()`: Guard `!HasCyrillic(cleanTitle)` → пропуск
+  lat→cyr транслітерації для чисто ASCII назв (заощаджує 2+ зайвих TMDB-запити).
+
+---
+
+### Audit Round 12 Fix Patch — Липень 2026
+
+* `app.go` / `finalizeScan()`: Додано параметр `success bool`. `SetState("last_scan_at")`
+  тепер викликається лише при `success = true` — виключає STOP користувачем і disk error
+  як хибні мітки часу "останнього сканування". Оновлено всі 5 викликів.
+* `app.go` / `processTranslationQueue()`: Виправлено коментар — `movies` є результатом
+  `GetMoviesByFilenames(filenames)`, а не "all movies in the DB".
+* `internal/storage/storage_test.go`: Додано `TestSetAndGetState` — базовий set/get,
+  upsert і відсутній ключ для `SetState`/`GetState`.
+* `CHECKLIST.md`: Очищено (всі раунди 1–12 закриті).
+
+---
+
 ### Audit Round 8 Fix Patch — Червень 2026
 
 * `app.go` / `updateMovie()`: Варіант 1.5 (прямий пошук за hint) більше не робить безумовний `return`, коли TMDB знаходить запис без українського перекладу (`TitleUA` порожній або не кириличний). Тепер потік провалюється у Варіант 2 (Gemini) для локалізації — раніше Gemini fallback був недосяжний у цьому сценарії, попри лог-повідомлення що обіцяло протилежне.

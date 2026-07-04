@@ -7,8 +7,10 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"movielist-app/internal/ai"
 	"movielist-app/internal/config"
 	"movielist-app/internal/storage"
 	"movielist-app/internal/tmdb"
@@ -93,5 +95,139 @@ func TestUpdateMovie_BypassesGeminiOnCyrillicTMDB(t *testing.T) {
 	}
 	if m.Plot != "Два друга міняються тілами." {
 		t.Errorf("expected Plot 'Два друга міняються тілами.', got '%s'", m.Plot)
+	}
+}
+
+func TestMergeGeminiWithTMDBAcceptsTVWhenGeminiSaysMovie(t *testing.T) {
+	ctx := context.Background()
+	year := 2025
+
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		switch {
+		case strings.Contains(r.URL.Path, "/search/movie"):
+			io.WriteString(w, `{"results":[]}`)
+		case strings.Contains(r.URL.Path, "/search/tv"):
+			io.WriteString(w, `{
+				"results": [{
+					"id": 98765,
+					"name": "Scarpetta",
+					"original_name": "Scarpetta",
+					"first_air_date": "2025-03-05",
+					"media_type": "tv",
+					"original_language": "en",
+					"popularity": 42
+				}]
+			}`)
+		case strings.Contains(r.URL.Path, "/tv/98765"):
+			io.WriteString(w, `{
+				"id": 98765,
+				"name": "Scarpetta",
+				"original_name": "Scarpetta",
+				"first_air_date": "2025-03-05",
+				"overview": "A medical examiner series.",
+				"genres": [{"name": "Drama"}],
+				"credits": {"cast": [{"name": "Nicole Kidman"}]}
+			}`)
+		default:
+			t.Fatalf("unexpected TMDB request path: %s", r.URL.Path)
+		}
+	})
+
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	u, _ := url.Parse(srv.URL)
+	app := NewApp()
+	app.cfg = &config.Config{
+		TMDBAPIKey: "fake-key",
+		PostersDir: t.TempDir(),
+	}
+	app.tmdbClient = tmdb.NewClient(app.cfg)
+	app.tmdbClient.SetTransport(&mockTransport{base: http.DefaultTransport, scheme: u.Scheme, host: u.Host})
+
+	movie := app.mergeGeminiWithTMDB(ctx, filepath.Join("Скарпетта", "Скарпетта 8.WEB-DLRip.mkv"), ai.RecognizedTitle{
+		ENTitle:    "Scarpetta",
+		Year:       &year,
+		MediaType:  "movie",
+		Confidence: 0.95,
+	})
+
+	if movie.TmdbID != 98765 {
+		t.Fatalf("expected TV result to be accepted, got tmdb_id=%d", movie.TmdbID)
+	}
+	if movie.MediaType != string(tmdb.MediaTypeTV) {
+		t.Fatalf("expected media_type tv, got %q", movie.MediaType)
+	}
+	if movie.TitleEN != "Scarpetta" {
+		t.Fatalf("expected title Scarpetta, got %q", movie.TitleEN)
+	}
+}
+
+func TestRescueEmptyGeminiWithFolderFindsBorrowedTVTitle(t *testing.T) {
+	ctx := context.Background()
+
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		switch {
+		case strings.Contains(r.URL.Path, "/search/movie"):
+			io.WriteString(w, `{"results":[]}`)
+		case strings.Contains(r.URL.Path, "/search/tv"):
+			if r.URL.Query().Get("query") != "Scarpetta" {
+				io.WriteString(w, `{"results":[]}`)
+				return
+			}
+			io.WriteString(w, `{
+				"results": [{
+					"id": 98765,
+					"name": "Scarpetta",
+					"original_name": "Scarpetta",
+					"first_air_date": "2025-03-05",
+					"media_type": "tv",
+					"original_language": "en",
+					"popularity": 42
+				}]
+			}`)
+		case strings.Contains(r.URL.Path, "/tv/98765"):
+			io.WriteString(w, `{
+				"id": 98765,
+				"name": "Scarpetta",
+				"original_name": "Scarpetta",
+				"first_air_date": "2025-03-05",
+				"overview": "A medical examiner series.",
+				"genres": [{"name": "Drama"}],
+				"credits": {"cast": [{"name": "Nicole Kidman"}]}
+			}`)
+		default:
+			t.Fatalf("unexpected TMDB request path: %s", r.URL.Path)
+		}
+	})
+
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	u, _ := url.Parse(srv.URL)
+	mediaRoot := t.TempDir()
+	app := NewApp()
+	app.cfg = &config.Config{
+		MediaFolderPath: mediaRoot,
+		TMDBAPIKey:      "fake-key",
+		PostersDir:      t.TempDir(),
+	}
+	app.tmdbClient = tmdb.NewClient(app.cfg)
+	app.tmdbClient.SetTransport(&mockTransport{base: http.DefaultTransport, scheme: u.Scheme, host: u.Host})
+
+	movie := app.rescueEmptyGeminiWithFolder(ctx, filepath.Join(mediaRoot, "Скарпетта", "Скарпетта 8.WEB-DLRip.mkv"))
+
+	if movie.TmdbID != 98765 {
+		t.Fatalf("expected rescue to find TV result, got tmdb_id=%d", movie.TmdbID)
+	}
+	if movie.MediaType != string(tmdb.MediaTypeTV) {
+		t.Fatalf("expected media_type tv, got %q", movie.MediaType)
+	}
+	if movie.TitleEN != "Scarpetta" {
+		t.Fatalf("expected title Scarpetta, got %q", movie.TitleEN)
 	}
 }
