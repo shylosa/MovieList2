@@ -507,6 +507,10 @@ Return ONLY a raw JSON array.`, string(inputJSON))
 			lastErr = fmt.Errorf("parse error on %s: %w", modelName, unmarshalErr)
 			continue
 		}
+		// Порожні Candidates — можливий safety block або content filter
+		lastErr = fmt.Errorf("model %s: empty candidates (possible safety block)", modelName)
+		utils.LoggerWithTrace(ctx).Warn("bulk_translate_empty_candidates",
+			slog.String("model", modelName))
 	}
 
 	if ctx.Err() != nil {

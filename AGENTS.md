@@ -215,7 +215,16 @@ GITHUB_PAGES_BRANCH=main
 
 ---
 
-## Current State Summary (станом на 2026-06-30)
+### Audit Round 9 Fix Patch — Липень 2026
+
+* `internal/ai/gemini.go` / `TranslateBulk()`: Додано `else`-гілку при `empty Candidates` — тепер логується `Warn("bulk_translate_empty_candidates")` і оновлюється `lastErr`. Раніше порожня відповідь від Gemini (safety block / content filter) мовчки пропускалась, що давало оманливий error message після вичерпання всіх моделей.
+* `app.go` / `RunScan()`: Warmup goroutine (`fetchAIModels`) тепер tracked у `a.wg` (`wg.Add(1)` + `defer wg.Done()`). Раніше горутина могла пережити shutdown і звернутись до `a.aiClient` після `db.Close()`.
+* `app.go`: Видалено мертву змінну `russianMarkers []string` — артефакт рефакторингу, замінений на `russianMarkersRE`.
+* `internal/storage/storage.go`: Видалено мертвий метод `GetAllFilenames` і реліктовий коментар над ним.
+
+---
+
+## Current State Summary (станом на 2026-07-04)
 
 | Area | Status |
 |------|--------|
@@ -227,6 +236,7 @@ GITHUB_PAGES_BRANCH=main
 | Mobile showcase | ✅ `index.html` (TMDB CDN) for GitHub Pages; `local_index.html` for desktop. |
 | Quota lock | ✅ `atomic.Bool` field on `Client`; reset at scan start. |
 | Trace IDs | ✅ `EnsureTrace` in `FixSelected` and `UpdateMovie`. |
-| Tests | ✅ All `go test ./...` pass (last verified 2026-06-30). |
+| Warmup goroutine | ✅ `fetchAIModels` tracked in `a.wg`; safe shutdown guaranteed. |
+| Tests | ✅ All `go test ./...` pass (last verified 2026-07-04). |
 
 > For full change history see [CHANGELOG.md](./CHANGELOG.md).

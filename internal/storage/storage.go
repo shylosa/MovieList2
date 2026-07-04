@@ -316,7 +316,7 @@ func (db *DB) GetMovieByFilename(ctx context.Context, filename string) (*Movie, 
 	return &m, nil
 }
 
-// Remaining methods (CleanMissingMovies, CleanOrphanPosters, GetAllFilenames) are unchanged
+// CleanMissingMovies та CleanOrphanPosters — нижче.
 func (db *DB) CleanMissingMovies(ctx context.Context, actualFiles []string) (int, error) {
 	actualMap := make(map[string]bool)
 	for _, f := range actualFiles {
@@ -408,24 +408,7 @@ func (db *DB) CleanOrphanPosters(ctx context.Context, postersDir string) (int, e
 	return deletedCount, nil
 }
 
-func (db *DB) GetAllFilenames(ctx context.Context) (map[string]bool, error) {
-	rows, err := db.db.QueryContext(ctx, "SELECT filename FROM movies")
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	res := make(map[string]bool)
-	for rows.Next() {
-		var f string
-		if err := rows.Scan(&f); err == nil {
-			res[f] = true
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return res, nil
-}
+
 
 func (db *DB) DeleteMovieByFilename(ctx context.Context, filename string) error {
 	query := `DELETE FROM movies WHERE filename = ?`

@@ -68,7 +68,6 @@ const aiConfidenceThreshold = 0.55
 // geminiTMDBVerifyMinJW — мінімальна схожість EN-назви Gemini і TMDB після верифікації.
 const geminiTMDBVerifyMinJW = 0.85
 
-var russianMarkers = []string{"из", "как", "что", "это", "бы", "вот"}
 var russianMarkersRE = regexp.MustCompile(`(?i)\b(?:из|как|что|это|бы|вот)\b`)
 
 var (
@@ -583,8 +582,11 @@ func (a *App) RunScan() {
 
 		wailsRuntime.EventsEmit(a.ctx, "scan-started")
 
-		// 🟢 ДОДАНО: Асинхронно прогріваємо кеш моделей, щоб aiClient отримав актуальний список
+		// 🟢 ДОДАНО: Асинхронно прогріваємо кеш моделей, щоб aiClient отримав актуальний список.
+		// Tracked у a.wg щоб shutdown не прийшов раніше завершення горутини.
+		a.wg.Add(1)
 		go func() {
+			defer a.wg.Done()
 			if _, err := a.fetchAIModels(scanCtx); err != nil {
 				utils.LoggerWithTrace(scanCtx).Debug("ai_models_warmup_failed", slog.Any("error", err))
 			}

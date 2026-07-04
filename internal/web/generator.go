@@ -118,7 +118,7 @@ const htmlLayout = `<!DOCTYPE html>
         .title-en { font-size: 1em; color: #888; margin: 0 0 15px 0; font-style: italic; }
         .plot { margin-top: 10px; font-size: 0.95em; color: #ccc; flex-grow: 1; }
         .file-path-badge { margin-top: 20px; font-size: 0.85em; color: #aaa; font-family: monospace; text-align: right; border-top: 1px solid #333; padding-top: 5px; }
-        .info .file-path-badge { font-size: 0.7rem; color: #888; word-break: break-all; margin-top: auto; padding-top: 6px; border-top: 1px solid #222; }
+        .info .file-path-badge { font-size: 0.7rem; color: #888; margin-top: auto; padding-top: 6px; border-top: 1px solid #222; }
 
         /* ВЕРСТКА РЕЖИМУ СПИСКУ (Перенесено з Python) */
         .movie-list.list-mode { grid-template-columns: 1fr; gap: 12px; max-width: 1200px; margin: 0 auto; }
@@ -405,7 +405,6 @@ const htmlLayout = `<!DOCTYPE html>
                 display: block;
                 font-size: 0.72em;
                 color: #888;
-                word-break: break-all;
                 margin: 2px 0 0;
                 padding-top: 6px;
                 border-top: 1px solid #222;
