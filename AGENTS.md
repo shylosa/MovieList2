@@ -200,6 +200,25 @@ GITHUB_PAGES_BRANCH=main
 
 ## Changelog
 
+### Audit Round 15 — Липень 2026
+
+Лог 12:58–12:59: FIX-15, FIX-16, FIX-20 підтверджені. Нуль багів.
+
+* `app_updatemovie_test.go`: `TestMaxTitleSimilarity_CyrillicCandidate` +
+  `TestMaxTitleSimilarity_MatchedAlias` — тести для FIX-20, пропущені в R14.
+* `CHECKLIST.md`: Очищено (раунди 1–15 закриті).
+
+### Audit Round 14 Fix Patch — Липень 2026 (Аналіз логів)
+
+Підтверджено логами: FIX-15 (warmup a.ctx) — нуль warmup_failed. FIX-16 (app_closed у
+shutdown) — рівно один app_closed в кінці сесії. FIX-17 (folder_en_fallback) — активний.
+
+* `app.go` / `maxTitleSimilarity()`: Додано перевірку `info.TitleUA` між `TitleEN` і
+  `SearchTitle`. Раніше кириличний кандидат ("Скарпетта") отримував similarity=0 проти
+  TitleEN="Scarpetta" (JaroWinkler між різними алфавітами = 0), хоча TitleUA="Скарпетта" —
+  точний збіг. Rescue витрачав 2 зайвих TMDB-запити і знаходив відповідь лише через
+  borrowedLatinVariants. Після фіксу: accepted на першому кандидаті (similarity=1).
+
 ### Round 13b — Аналіз логів після FIX-17 (Липень 2026)
 
 Підтверджено: FIX-15 (warmup a.ctx), FIX-17 (folder_en_fallback) — в логах присутні.

@@ -1322,6 +1322,13 @@ func borrowedLatinVariants(s string) []string {
 
 func maxTitleSimilarity(title string, info *tmdb.MovieInfo) float64 {
 	jw := tmdb.TitleSimilarity(title, info.TitleEN)
+	// TitleUA is the Cyrillic counterpart; JaroWinkler across alphabets is 0,
+	// so a Cyrillic candidate needs this check to avoid false rejection.
+	if info.TitleUA != "" {
+		if jwUA := tmdb.TitleSimilarity(title, info.TitleUA); jwUA > jw {
+			jw = jwUA
+		}
+	}
 	if info.SearchTitle != "" {
 		if jwSearch := tmdb.TitleSimilarity(title, info.SearchTitle); jwSearch > jw {
 			jw = jwSearch

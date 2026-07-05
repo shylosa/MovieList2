@@ -165,6 +165,37 @@ func TestMergeGeminiWithTMDBAcceptsTVWhenGeminiSaysMovie(t *testing.T) {
 	}
 }
 
+func TestMaxTitleSimilarity_CyrillicCandidate(t *testing.T) {
+	info := &tmdb.MovieInfo{
+		TitleEN: "Scarpetta",
+		TitleUA: "Скарпетта",
+	}
+
+	// Кириличний кандидат — через TitleUA (до FIX-20 давав 0, тепер 1)
+	if got := maxTitleSimilarity("Скарпетта", info); got < 0.99 {
+		t.Errorf("maxTitleSimilarity('Скарпетта') = %.4f; want >= 0.99 (TitleUA match)", got)
+	}
+	// Latin кандидат — через TitleEN
+	if got := maxTitleSimilarity("Scarpetta", info); got < 0.99 {
+		t.Errorf("maxTitleSimilarity('Scarpetta') = %.4f; want >= 0.99 (TitleEN match)", got)
+	}
+	// Повна невідповідність
+	if got := maxTitleSimilarity("Dune", info); got > 0.5 {
+		t.Errorf("maxTitleSimilarity('Dune') = %.4f; want < 0.5", got)
+	}
+}
+
+func TestMaxTitleSimilarity_MatchedAlias(t *testing.T) {
+	info := &tmdb.MovieInfo{
+		TitleEN:      "Scarpetta",
+		TitleUA:      "Скарпетта",
+		MatchedAlias: "Kay Scarpetta",
+	}
+	if got := maxTitleSimilarity("Kay Scarpetta", info); got < 0.90 {
+		t.Errorf("maxTitleSimilarity('Kay Scarpetta') = %.4f; want >= 0.90 (MatchedAlias)", got)
+	}
+}
+
 func TestRescueEmptyGeminiWithFolderFindsBorrowedTVTitle(t *testing.T) {
 	ctx := context.Background()
 
