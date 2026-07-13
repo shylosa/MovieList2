@@ -550,12 +550,15 @@ func (a *App) RunScan() {
 	a.isScanning = true
 	a.scanMutex.Unlock()
 
+	// 🟢 Створюємо контекст ДО запуску горутини (усуває race з StopScan).
+	// Якщо StopScan() викликається між wg.Add і setScanCancel — cancelScan() був silent no-op.
+	ctx, cancel := context.WithCancel(a.ctx)
+	a.setScanCancel(cancel)
+
 	a.wg.Add(1)
 	go func() {
 		defer a.wg.Done()
-		// 1. Створюємо контекст, який можна скасувати
-		ctx, cancel := context.WithCancel(a.ctx)
-		a.setScanCancel(cancel)
+		// ctx і cancel доступні через closure — не створювати повторно
 
 		// 2. Trace ID для всієї сесії сканування
 		scanTraceID := uuid.New().String()[:8]
@@ -675,6 +678,15 @@ func (a *App) RunScan() {
 
 // StopScan зупиняє поточний процес сканування
 func (a *App) StopScan() {
+	a.scanMutex.Lock()
+	isActive := a.scanCancel != nil
+	a.scanMutex.Unlock()
+
+	if !isActive {
+		a.logFront("⚠️ [СТОП] Немає активного сканування для зупинки.")
+		return
+	}
+
 	a.logFront("🚨 [СТОП] Сигнал скасування отримано бекендом!")
 	a.cancelScan()
 }

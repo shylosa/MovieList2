@@ -300,7 +300,18 @@ shutdown) — рівно один app_closed в кінці сесії. FIX-17 (f
 
 ---
 
-## Current State Summary (станом на 2026-07-04)
+### Audit Round 17 Fix Patch — Липень 2026 (StopScan race fix)
+
+* `app.go` / `RunScan()`: `ctx, cancel` і `a.setScanCancel(cancel)` перенесено перед
+  `a.wg.Add(1)` — поза горутиною. Усуває race: `StopScan()` міг викликатись до
+  реєстрації cancel у горутині → `cancelScan()` був silent no-op → скан не зупинявся.
+* `app.go` / `StopScan()`: Додано перевірку `scanCancel != nil` під `scanMutex`. Якщо
+  активного сканування немає — попередження `"⚠️ [СТОП] Немає активного сканування"`
+  замість хибного `"🚨 Сигнал отримано"`.
+
+---
+
+## Current State Summary (станом на 2026-07-13)
 
 | Area | Status |
 |------|--------|
@@ -313,6 +324,7 @@ shutdown) — рівно один app_closed в кінці сесії. FIX-17 (f
 | Quota lock | ✅ `atomic.Bool` field on `Client`; reset at scan start. |
 | Trace IDs | ✅ `EnsureTrace` in `FixSelected` and `UpdateMovie`. |
 | Warmup goroutine | ✅ `fetchAIModels` tracked in `a.wg`; safe shutdown guaranteed. |
-| Tests | ✅ All `go test ./...` pass (last verified 2026-07-04). |
+| StopScan race fix | ✅ `ctx/cancel` created before goroutine; `StopScan` guards with `scanMutex`. |
+| Tests | ✅ All `go test ./...` pass (last verified 2026-07-13). |
 
 > For full change history see [CHANGELOG.md](./CHANGELOG.md).
