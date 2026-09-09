@@ -1,6 +1,8 @@
 package scanner
 
 import (
+	"context"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -21,8 +23,11 @@ var videoExts = map[string]bool{
 	".mkv": true, ".mp4": true, ".avi": true, ".mov": true,
 }
 
-func (s *Scanner) GetDiskFiles() ([]string, error) {
+func (s *Scanner) GetDiskFiles(ctx context.Context) ([]string, error) {
 	var results []string
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 
 	root := s.cfg.MediaFolderPath
 	if _, err := os.Stat(root); os.IsNotExist(err) {
@@ -40,6 +45,9 @@ func (s *Scanner) GetDiskFiles() ([]string, error) {
 	}
 
 	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		name := entry.Name()
 		fullPath := filepath.Join(root, name)
 
@@ -53,7 +61,10 @@ func (s *Scanner) GetDiskFiles() ([]string, error) {
 				results = append(results, fullPath)
 			}
 		} else {
-			largestVideo := s.getLargestVideoInDir(fullPath)
+			largestVideo, err := s.getLargestVideoInDir(ctx, fullPath)
+			if err != nil {
+				return nil, fmt.Errorf("scan directory %q: %w", fullPath, err)
+			}
 			if largestVideo != "" {
 				results = append(results, largestVideo)
 			}
@@ -64,13 +75,16 @@ func (s *Scanner) GetDiskFiles() ([]string, error) {
 	return results, nil
 }
 
-func (s *Scanner) getLargestVideoInDir(dirPath string) string {
+func (s *Scanner) getLargestVideoInDir(ctx context.Context, dirPath string) (string, error) {
 	var largestVideo string
 	var maxSize int64
 
-	if err := filepath.WalkDir(dirPath, func(path string, d os.DirEntry, err error) error {
+	err := filepath.WalkDir(dirPath, func(path string, d os.DirEntry, err error) error {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
 		if err != nil {
-			return nil
+			return err
 		}
 		if !d.IsDir() {
 			ext := strings.ToLower(filepath.Ext(path))
@@ -83,9 +97,11 @@ func (s *Scanner) getLargestVideoInDir(dirPath string) string {
 			}
 		}
 		return nil
-	}); err != nil {
+	})
+	if err != nil {
 		slog.Warn("walkdir_error", slog.String("dir", dirPath), slog.Any("error", err))
+		return "", err
 	}
 
-	return largestVideo
+	return largestVideo, nil
 }

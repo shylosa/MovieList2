@@ -168,12 +168,9 @@ btnScan.addEventListener('click', async (e) => {
         await RunScan();
     } catch (err) {
         console.error("Помилка сканування:", err);
-    } finally {
-        // Цей блок тепер виконається ТІЛЬКИ коли перший процес реально завершиться
         isScanning = false;
         btnScan.classList.remove('disabled');
-        setStopButtonState('disabled'); // Стає сірою
-        setTimeout(() => { document.getElementById('progress-bar').style.width = '0%'; }, 2000);
+        setStopButtonState('disabled');
     }
 });
 
@@ -296,6 +293,7 @@ let scanTimerInterval;
 let scanStartTime;
 
 EventsOn('scan-started', () => {
+	isScanning = true;
     consoleBody.innerHTML = ""; // Чистимо консоль
     logToConsole("🚀 Запуск процесу...");
 
@@ -348,6 +346,7 @@ EventsOn('github-sync-finished', (data) => {
 });
 
 EventsOn('scan-finished', (msg) => {
+	isScanning = false;
     clearInterval(scanTimerInterval);
     logToConsole(`\n✅ ${msg}`, "log-success");
     cStatus.innerText = "Готово";
@@ -355,6 +354,7 @@ EventsOn('scan-finished', (msg) => {
     // 🟢 ЗМІНА 4: Робимо кнопку СТОП знову сірою після завершення (або скасування)
     const btnStop = document.getElementById('btn-stop-scan');
     if (btnStop) btnStop.className = "stop-btn disabled";
+	document.getElementById('btn-scan').classList.remove('disabled');
 
     document.getElementById('btn-scan').style.pointerEvents = "auto";
     document.getElementById('btn-scan').style.opacity = "1";
@@ -412,7 +412,7 @@ async function loadMovies() {
 
 function renderMovies(movies) {
     const list = document.getElementById('movie-list');
-    let html = '';
+	list.replaceChildren();
 
     movies.forEach((m) => {
         const title = m.title_ua || m.title_en || "Невідомо";
@@ -424,33 +424,70 @@ function renderMovies(movies) {
 
         // 👈 ФІКС: Дістаємо значення з кешу
         const hintVal = hintsCache[m.filename] || "";
-        const isChecked = checkedCache.has(m.filename) ? "checked" : "";
-
         const isUnrecognized = !m.tmdb_id || m.tmdb_id === 0;
         const titleColor = isUnrecognized ? "var(--warn-yellow)" : "#58a6ff";
 
-        html += `
-            <div class="movie-row">
-                <div class="col-cb"><input type="checkbox" class="row-cb" data-filename="${m.filename}" ${isChecked}></div>
-                <div class="col-file" title="${m.filename}">${m.file_label || m.filename}</div>
-                <div class="col-arr">➜</div>
-                <div class="col-year">${m.year || '—'}</div>
-                <div class="col-title">
-                    <span class="tmdb-link" data-url="${tmdbUrl}" style="color: ${titleColor}; cursor: pointer; text-decoration: none; font-weight: 500;">
-                        ${title}
-                    </span>
-                </div>
-                <div class="col-hint"><input type="text" class="hint-input" data-filename="${m.filename}" value="${hintVal}"></div>
-            </div>
-        `;
+		const row = document.createElement('div');
+		row.className = 'movie-row';
+
+		const checkboxCol = document.createElement('div');
+		checkboxCol.className = 'col-cb';
+		const checkbox = document.createElement('input');
+		checkbox.type = 'checkbox';
+		checkbox.className = 'row-cb';
+		checkbox.dataset.filename = m.filename;
+		checkbox.checked = checkedCache.has(m.filename);
+		checkboxCol.appendChild(checkbox);
+
+		const fileCol = document.createElement('div');
+		fileCol.className = 'col-file';
+		fileCol.title = m.filename;
+		fileCol.textContent = m.file_label || m.filename;
+
+		const arrowCol = document.createElement('div');
+		arrowCol.className = 'col-arr';
+		arrowCol.textContent = '➜';
+
+		const yearCol = document.createElement('div');
+		yearCol.className = 'col-year';
+		yearCol.textContent = m.year || '—';
+
+		const titleCol = document.createElement('div');
+		titleCol.className = 'col-title';
+		const link = document.createElement('span');
+		link.className = 'tmdb-link';
+		link.dataset.url = tmdbUrl;
+		link.style.color = titleColor;
+		link.style.cursor = 'pointer';
+		link.style.textDecoration = 'none';
+		link.style.fontWeight = '500';
+		link.textContent = title;
+		titleCol.appendChild(link);
+
+		const hintCol = document.createElement('div');
+		hintCol.className = 'col-hint';
+		const hintInput = document.createElement('input');
+		hintInput.type = 'text';
+		hintInput.className = 'hint-input';
+		hintInput.dataset.filename = m.filename;
+		hintInput.value = hintVal;
+		hintCol.appendChild(hintInput);
+
+		row.append(checkboxCol, fileCol, arrowCol, yearCol, titleCol, hintCol);
+		list.appendChild(row);
     });
-    list.innerHTML = html;
 
     document.querySelectorAll('.tmdb-link').forEach(el => {
         el.onclick = (e) => {
             const url = e.target.getAttribute('data-url');
-            if (typeof OpenURL === "function") OpenURL(url);
-            else window.open(url, '_blank');
+			try {
+				const parsed = new URL(url);
+				if (parsed.protocol !== 'https:' || parsed.hostname !== 'www.themoviedb.org') return;
+				if (typeof OpenURL === "function") OpenURL(parsed.href);
+				else window.open(parsed.href, '_blank');
+			} catch (err) {
+				console.error('Некоректний TMDB URL:', err);
+			}
         };
         el.onmouseover = () => el.style.textDecoration = 'underline';
         el.onmouseout = () => el.style.textDecoration = 'none';

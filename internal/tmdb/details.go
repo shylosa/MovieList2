@@ -50,10 +50,16 @@ func (c *Client) getMovieDetails(ctx context.Context, id int, originalFilename s
 	var finalInfo *MovieInfo
 
 	for _, lang := range langs {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		url := fmt.Sprintf("%s/movie/%d?api_key=%s&language=%s&append_to_response=credits", baseURL, id, c.apiKey, lang)
 		var d tmdbMovieDetails
 
 		if err := c.doRequestWithRetry(ctx, url, &d); err != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
 			continue
 		}
 
@@ -107,6 +113,9 @@ func (c *Client) getMovieDetails(ctx context.Context, id int, originalFilename s
 	if finalInfo.PosterURL != "" && originalFilename != "" {
 		lp, err := c.DownloadPoster(ctx, finalInfo.PosterURL, fmt.Sprintf("%d_%s", finalInfo.TMDBID, originalFilename))
 		if err != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
 			utils.LoggerWithTrace(ctx).Warn("poster_download_failed", slog.Int("tmdb_id", finalInfo.TMDBID), slog.Any("error", err))
 		}
 		finalInfo.LocalPosterPath = lp
@@ -121,10 +130,16 @@ func (c *Client) getTVDetails(ctx context.Context, id int, originalFilename stri
 	var finalInfo *MovieInfo
 
 	for _, lang := range langs {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		url := fmt.Sprintf("%s/tv/%d?api_key=%s&language=%s&append_to_response=credits", baseURL, id, c.apiKey, lang)
 		var d tmdbTVDetails
 
 		if err := c.doRequestWithRetry(ctx, url, &d); err != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
 			continue
 		}
 
@@ -173,6 +188,9 @@ func (c *Client) getTVDetails(ctx context.Context, id int, originalFilename stri
 	if finalInfo.PosterURL != "" && originalFilename != "" {
 		lp, err := c.DownloadPoster(ctx, finalInfo.PosterURL, fmt.Sprintf("%d_%s", finalInfo.TMDBID, originalFilename))
 		if err != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
 			utils.LoggerWithTrace(ctx).Warn("poster_download_failed", slog.Int("tmdb_id", finalInfo.TMDBID), slog.Any("error", err))
 		}
 		finalInfo.LocalPosterPath = lp

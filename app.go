@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -563,12 +564,18 @@ func (a *App) RunScan() {
 		// 2. Trace ID для всієї сесії сканування
 		scanTraceID := uuid.New().String()[:8]
 		scanCtx := utils.ContextWithTrace(ctx, scanTraceID)
+		scanStartedAt := time.Now()
 		utils.LoggerWithTrace(scanCtx).Info("scan_session_start")
 
 		scanFinished := false
 
 		defer func() {
 			stoppedByUser := ctx.Err() != nil
+			if stoppedByUser {
+				utils.LoggerWithTrace(scanCtx).Info("scan_cancelled",
+					slog.Duration("duration", time.Since(scanStartedAt)),
+				)
+			}
 			cancel()
 			a.clearScanCancel()
 			a.scanMutex.Lock()
@@ -610,7 +617,7 @@ func (a *App) RunScan() {
 			a.aiClient.ResetQuotaLock()
 		}
 
-		diskPaths, err := scn.GetDiskFiles()
+		diskPaths, err := scn.GetDiskFiles(scanCtx)
 		if err != nil {
 			a.finalizeScan(scanCtx, fmt.Sprintf("❌ Помилка сканування диску: %v", err), false)
 			scanFinished = true
@@ -746,6 +753,9 @@ func (a *App) runTMDBScan(ctx context.Context, paths []string) <-chan scanResult
 
 			info, err := a.tmdbClient.FetchFromFilename(fileCtx, path)
 			if err != nil {
+				if errors.Is(err, context.Canceled) || ctx.Err() != nil {
+					return
+				}
 				logger.Warn("tmdb_search_error",
 					slog.String("file", fname),
 					slog.Any("error", err),
@@ -1082,7 +1092,7 @@ func (a *App) mergeGeminiWithTMDB(ctx context.Context, filePath string, rec ai.R
 	logger.Info("gemini_merge_started")
 
 	if ctx.Err() != nil {
-		logger.Warn("gemini_merge_cancelled_before_tmdb", slog.Any("error", ctx.Err()))
+		logger.Debug("gemini_merge_cancelled_before_tmdb", slog.Any("error", ctx.Err()))
 		return storage.Movie{Filename: fname}
 	}
 
@@ -1103,7 +1113,7 @@ func (a *App) mergeGeminiWithTMDB(ctx context.Context, filePath string, rec ai.R
 
 	if tmdbInfo == nil {
 		if ctx.Err() != nil {
-			logger.Warn("gemini_merge_cancelled_after_tmdb", slog.Any("error", ctx.Err()))
+			logger.Debug("gemini_merge_cancelled_after_tmdb", slog.Any("error", ctx.Err()))
 		} else {
 			logger.Warn("gemini_merge_tmdb_not_found")
 		}
@@ -1169,7 +1179,7 @@ func (a *App) rescueEmptyGeminiWithFolder(ctx context.Context, filePath string) 
 	logger := utils.LoggerWithTrace(ctx).With(slog.String("file", fname))
 
 	if ctx.Err() != nil {
-		logger.Warn("gemini_empty_rescue_cancelled_before_start", slog.Any("error", ctx.Err()))
+		logger.Debug("gemini_empty_rescue_cancelled_before_start", slog.Any("error", ctx.Err()))
 		return storage.Movie{Filename: fname}
 	}
 
@@ -1204,7 +1214,7 @@ func (a *App) rescueEmptyGeminiWithFolder(ctx context.Context, filePath string) 
 
 	for _, candidate := range candidates {
 		if ctx.Err() != nil {
-			logger.Warn("gemini_empty_rescue_cancelled", slog.Any("error", ctx.Err()))
+			logger.Debug("gemini_empty_rescue_cancelled", slog.Any("error", ctx.Err()))
 			return storage.Movie{Filename: fname}
 		}
 

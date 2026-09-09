@@ -48,6 +48,18 @@ var (
 	)
 )
 
+type redactedError struct{ err error }
+
+func (e redactedError) Error() string { return maskAPIKey(e.err.Error()) }
+func (e redactedError) Unwrap() error { return e.err }
+
+func redactAPIKeyError(err error) error {
+	if err == nil {
+		return nil
+	}
+	return redactedError{err: err}
+}
+
 func maskAPIKey(rawURL string) string {
 	// 🟢 ОПТИМІЗАЦІЯ: Простий Replace працює швидше ніж повний парсинг URL
 	// Знаходимо api_key=... та замінюємо на маску
@@ -174,6 +186,9 @@ func (c *Client) doRequestWithRetry(ctx context.Context, url string, target any)
 // FetchFromFilename — точка входу для сирого імені файлу.
 // Парсить ім'я, визначає стратегію і запускає каскадний пошук.
 func (c *Client) FetchFromFilename(ctx context.Context, filename string) (*MovieInfo, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	parsed := ParseFilename(filename)
 
 	// 🟢 ДОДАНО: Очищуємо омогліфи одразу після парсингу
@@ -203,6 +218,9 @@ func (c *Client) FetchFromFilename(ctx context.Context, filename string) (*Movie
 	// 1. Спроба 0: Прямий пошук по IMDb ID (найшвидший та найточніший)
 	if parsed.IMDBID != "" {
 		info, err := c.tryFindByIMDB(ctx, parsed.IMDBID, filename)
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		if err == nil && info != nil {
 			utils.LoggerWithTrace(ctx).Info("imdb_match_found", slog.String("imdb_id", parsed.IMDBID), slog.String("title", info.TitleUA))
 			return info, nil // Ранній вихід!
@@ -271,6 +289,9 @@ func (c *Client) FetchByCleanTitle(ctx context.Context, title, year string, medi
 
 // runPipeline — повний каскад для сирого файлу
 func (c *Client) runPipeline(ctx context.Context, parsed ParsedFile, originalFilename string) (*MovieInfo, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	switch parsed.TitleLang {
 	case TitleLangCyrillic:
 		return c.pipelineCyrillic(ctx, parsed, originalFilename)
@@ -286,8 +307,8 @@ func (c *Client) runPipeline(ctx context.Context, parsed ParsedFile, originalFil
 // 4. Сигнал "потрібен Gemini" (nil, nil)
 func (c *Client) pipelineLatin(ctx context.Context, parsed ParsedFile, originalFilename string) (*MovieInfo, error) {
 	// Спроби 1-2: пряма EN назва
-	if info := c.trySearch(ctx, parsed, originalFilename); info != nil {
-		return info, nil
+	if info, err := c.trySearch(ctx, parsed, originalFilename); err != nil || info != nil {
+		return info, err
 	}
 
 	// Спроба 3: lat→cyr транслітерація — лише для змішаних рядків з кирилицею.
@@ -308,8 +329,8 @@ func (c *Client) pipelineLatin(ctx context.Context, parsed ParsedFile, originalF
 		cyrParsed.CleanTitle = cyrillicTitle
 		cyrParsed.TitleLang = TitleLangCyrillic
 
-		if info := c.trySearch(ctx, cyrParsed, originalFilename); info != nil {
-			return info, nil
+		if info, err := c.trySearch(ctx, cyrParsed, originalFilename); err != nil || info != nil {
+			return info, err
 		}
 	}
 
@@ -323,8 +344,8 @@ func (c *Client) pipelineLatin(ctx context.Context, parsed ParsedFile, originalF
 // 3. Транслітерація кирилиця → латиниця → TMDB (en-US індекс)
 // 4. Сигнал "потрібен Gemini" (nil, nil)
 func (c *Client) pipelineCyrillic(ctx context.Context, parsed ParsedFile, originalFilename string) (*MovieInfo, error) {
-	if info := c.trySearch(ctx, parsed, originalFilename); info != nil {
-		return info, nil
+	if info, err := c.trySearch(ctx, parsed, originalFilename); err != nil || info != nil {
+		return info, err
 	}
 
 	latinTitle := cyrillicToLatin(parsed.CleanTitle)
@@ -338,8 +359,8 @@ func (c *Client) pipelineCyrillic(ctx context.Context, parsed ParsedFile, origin
 		latinParsed.CleanTitle = latinTitle
 		latinParsed.TitleLang = TitleLangLatin
 
-		if info := c.trySearch(ctx, latinParsed, originalFilename); info != nil {
-			return info, nil
+		if info, err := c.trySearch(ctx, latinParsed, originalFilename); err != nil || info != nil {
+			return info, err
 		}
 	}
 
@@ -349,11 +370,17 @@ func (c *Client) pipelineCyrillic(ctx context.Context, parsed ParsedFile, origin
 // searchDirectly was removed — runPipeline is used to ensure transliteration paths are exercised.
 
 // trySearch — виконує пошук і жорстко контролює результат
-func (c *Client) trySearch(ctx context.Context, parsed ParsedFile, originalFilename string) *MovieInfo {
+func (c *Client) trySearch(ctx context.Context, parsed ParsedFile, originalFilename string) (*MovieInfo, error) {
 	// SearchWithFallbacks сама робить спроби "з роком", "без року" та "інший тип"
 	info, err := c.SearchWithFallbacks(ctx, parsed, originalFilename)
+	if err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 
-	if err == nil && info != nil {
+	if info != nil {
 		// 🟠 ФОЛЛБЕК РОКУ: Якщо TMDB повернув порожній рік — підхоплюємо з парсера
 		if info.Year == "" && parsed.Year > 0 {
 			info.Year = fmt.Sprintf("%d", parsed.Year)
@@ -366,7 +393,7 @@ func (c *Client) trySearch(ctx context.Context, parsed ParsedFile, originalFilen
 				// 🔴 ВИНЯТОК ДЛЯ СЕРІАЛІВ: TMDB зберігає рік старту шоу (напр. 2013 для Рік і Морті),
 				// а в файлі — рік релізу сезону (напр. 2023). Пропускаємо якщо TMDB старший або рівний.
 				if parsed.MediaType == MediaTypeTV && foundYear <= parsed.Year {
-					return info
+					return info, nil
 				}
 
 				diff := foundYear - parsed.Year
@@ -377,14 +404,14 @@ func (c *Client) trySearch(ctx context.Context, parsed ParsedFile, originalFilen
 						slog.Int("found_year", foundYear),
 						slog.Int("expected_year", parsed.Year),
 					)
-					return nil // Жорстко відхиляємо, віддаємо файл ШІ!
+					return nil, nil // Жорстко відхиляємо, віддаємо файл ШІ!
 				}
 			}
 		}
-		return info // Рік збігається — приймаємо
+		return info, nil // Рік збігається — приймаємо
 	}
 
-	return nil
+	return nil, nil
 }
 
 // --- Транслітерація латиниця → кирилиця (рос) ---
@@ -562,7 +589,7 @@ func (c *Client) doRequest(ctx context.Context, url string, target any) error {
 
 	resp, err := c.client.Do(req)
 	if err != nil {
-		return fmt.Errorf("doRequest: %w", err)
+		return fmt.Errorf("doRequest: %w", redactAPIKeyError(err))
 	}
 	defer resp.Body.Close()
 
@@ -608,16 +635,37 @@ func (c *Client) DownloadPoster(ctx context.Context, posterURL, filename string)
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("download poster: HTTP %d", resp.StatusCode)
 	}
-
-	f, err := os.Create(path)
+	f, err := os.CreateTemp(c.postersDir, ".poster-*.tmp")
 	if err != nil {
 		return "", err
 	}
-	defer f.Close()
+	tempPath := f.Name()
+	keepTemp := true
+	defer func() {
+		_ = f.Close()
+		if keepTemp {
+			_ = os.Remove(tempPath)
+		}
+	}()
 
-	if _, err = io.Copy(f, resp.Body); err != nil {
+	written, err := io.Copy(f, resp.Body)
+	if err != nil {
 		return "", err
 	}
+	if written == 0 {
+		return "", errors.New("download poster: empty response body")
+	}
+	if err := f.Close(); err != nil {
+		return "", err
+	}
+	if err := os.Rename(tempPath, path); err != nil {
+		// Another concurrent download may have completed first.
+		if _, statErr := os.Stat(path); statErr == nil {
+			return path, nil
+		}
+		return "", err
+	}
+	keepTemp = false
 	return path, nil
 }
 

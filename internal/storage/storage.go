@@ -288,7 +288,7 @@ func (db *DB) SaveMoviesBatch(ctx context.Context, movies []Movie) error {
 
 	for _, m := range movies {
 		if err := ctx.Err(); err != nil {
-			utils.LoggerWithTrace(ctx).Warn("batch_insert_cancelled", slog.Any("error", err))
+			utils.LoggerWithTrace(ctx).Debug("batch_insert_cancelled", slog.Any("error", err))
 			return err
 		}
 
@@ -416,8 +416,6 @@ func (db *DB) CleanOrphanPosters(ctx context.Context, postersDir string) (int, e
 	}
 	return deletedCount, nil
 }
-
-
 
 func (db *DB) DeleteMovieByFilename(ctx context.Context, filename string) error {
 	query := `DELETE FROM movies WHERE filename = ?`

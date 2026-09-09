@@ -59,9 +59,15 @@ func (c *Client) SearchWithFallbacks(
 	parsed ParsedFile,
 	originalFilename string,
 ) (*MovieInfo, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	attempts := buildAttempts(parsed, originalFilename, c.mediaRoot)
 
 	for _, a := range attempts {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		logger := utils.LoggerWithTrace(ctx).With(slog.String("component", "tmdb_search"))
 		logger.Info("search_attempt",
 			slog.String("label", a.label),
@@ -71,6 +77,9 @@ func (c *Client) SearchWithFallbacks(
 
 		info, err := c.searchAndFetch(ctx, a.query, a.year, a.mediaType, originalFilename)
 		if err != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
 			logger.Warn("search_failed", slog.String("label", a.label), slog.Any("error", err))
 			continue
 		}
@@ -82,6 +91,9 @@ func (c *Client) SearchWithFallbacks(
 		// Після провалу CYR-пошуку для варіанта "Папка" — EN cascade через латинську транслітерацію.
 		// Інакше cached null по кириличному запиту блокує EN-пошук (напр. "Скарпетта" → "Scarpetta").
 		if a.label == "Папка" && hasCyrillicChars(a.query) {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
 			latinQuery := cyrillicToLatin(a.query)
 			if latinQuery != a.query {
 				logger.Info("folder_en_fallback",
@@ -90,6 +102,9 @@ func (c *Client) SearchWithFallbacks(
 				)
 				info, err = c.searchAndFetch(ctx, latinQuery, a.year, a.mediaType, originalFilename)
 				if err != nil {
+					if ctx.Err() != nil {
+						return nil, ctx.Err()
+					}
 					logger.Warn("folder_en_fallback_failed", slog.Any("error", err))
 					continue
 				}
@@ -195,6 +210,9 @@ func (c *Client) searchAndFetch(
 	preferredType MediaType,
 	originalFilename string,
 ) (*MovieInfo, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if strings.TrimSpace(query) == "" {
 		return nil, nil
 	}
@@ -224,6 +242,9 @@ func (c *Client) searchAndFetch(
 
 LANG_LOOP:
 	for _, langParam := range langs {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		type searchEndpoint struct {
 			name             string
 			yearParam        string
@@ -258,6 +279,9 @@ LANG_LOOP:
 		}
 
 		for _, ep := range endpoints {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
 			searchURL := fmt.Sprintf(
 				"%s/search/%s?api_key=%s&query=%s&language=%s%s",
 				baseURL, ep.name, c.apiKey, url.QueryEscape(query), langParam, ep.yearParam,
@@ -271,6 +295,9 @@ LANG_LOOP:
 
 			var resp tmdbSearchResponse
 			if err := c.doRequestWithRetry(ctx, searchURL, &resp); err != nil {
+				if ctx.Err() != nil {
+					return nil, ctx.Err()
+				}
 				logger.Debug("search_failed_for_lang", slog.String("lang", langParam), slog.Any("error", err))
 				continue
 			}
@@ -291,6 +318,9 @@ LANG_LOOP:
 			}
 
 			bestForLang := c.rankResults(ctx, resp.Results, query, targetYear, preferredType)
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
 			if bestForLang != nil {
 				logger.Debug("best_for_lang",
 					slog.String("lang", langParam),
@@ -359,12 +389,18 @@ func (c *Client) rankResults(
 	var best *scoredResult
 
 	for i, res := range results {
+		if ctx.Err() != nil {
+			return nil
+		}
 		// Людей ігноруємо завжди
 		if res.MediaType == "person" {
 			continue
 		}
 
 		scored := c.scoreResult(ctx, res, i, normQuery, targetYear, preferredType)
+		if ctx.Err() != nil {
+			return nil
+		}
 
 		utils.LoggerWithTrace(ctx).Debug("candidate_evaluated",
 			slog.String("title", coalesce(res.Title, res.Name)),
@@ -722,4 +758,3 @@ func hasCyrillicChars(s string) bool {
 	}
 	return false
 }
-

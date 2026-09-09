@@ -300,6 +300,20 @@ shutdown) — рівно один app_closed в кінці сесії. FIX-17 (f
 
 ---
 
+### Audit Round 19 Fix Patch — Вересень 2026
+
+* TMDB network errors redact `api_key` inside error strings without breaking `errors.Is(err, context.Canceled)`.
+* Search attempts, language/endpoint loops, metadata waterfalls and poster downloads stop immediately when the scan context is cancelled; cancellation no longer appears as file-level WARN noise.
+* `RunScan` emits one structured `scan_cancelled` INFO event with trace ID and duration.
+* Regression tests verify secret redaction and that cancellation permits only the already-started transport request.
+
+### Audit Round 18 Fix Patch — Вересень 2026
+
+* `frontend/src/main.js`: scan UI керується подіями `scan-started` / `scan-finished`, тому асинхронний backend scan не втрачає активну кнопку STOP після повернення RPC. Movie editor використовує DOM API (`textContent`, properties, `dataset`) замість HTML-конкатенації зовнішніх даних; TMDB-посилання обмежені офіційним HTTPS-host.
+* `internal/scanner/scanner.go`: `GetDiskFiles(ctx)` і вкладений `WalkDir` перевіряють cancellation та повертають помилки. Неповний disk scan завершується до `CleanMissingMovies`, захищаючи валідні записи і постери від помилкового cleanup.
+* `internal/tmdb/client.go`: постер записується у temporary-файл і з'являється за фінальним шляхом лише після успішного непорожнього download та atomic rename.
+* Додано `internal/scanner/scanner_test.go` і `internal/tmdb/poster_test.go`. Повний набір тестів стабільно проходить у 10 послідовних прогонах.
+
 ### Audit Round 17 Fix Patch — Липень 2026 (StopScan race fix)
 
 * `app.go` / `RunScan()`: `ctx, cancel` і `a.setScanCancel(cancel)` перенесено перед
@@ -311,7 +325,7 @@ shutdown) — рівно один app_closed в кінці сесії. FIX-17 (f
 
 ---
 
-## Current State Summary (станом на 2026-07-13)
+## Current State Summary (станом на 2026-09-09)
 
 | Area | Status |
 |------|--------|
@@ -325,6 +339,6 @@ shutdown) — рівно один app_closed в кінці сесії. FIX-17 (f
 | Trace IDs | ✅ `EnsureTrace` in `FixSelected` and `UpdateMovie`. |
 | Warmup goroutine | ✅ `fetchAIModels` tracked in `a.wg`; safe shutdown guaranteed. |
 | StopScan race fix | ✅ `ctx/cancel` created before goroutine; `StopScan` guards with `scanMutex`. |
-| Tests | ✅ All `go test ./...` pass (last verified 2026-07-13). |
+| Tests | ✅ `go test ./... -count=10`, `go vet ./...`, `go build ./...` pass (last verified 2026-09-09). |
 
 > For full change history see [CHANGELOG.md](./CHANGELOG.md).

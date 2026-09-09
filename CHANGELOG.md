@@ -2,6 +2,24 @@
 
 All notable changes to this project. Dates are approximate (session-based).
 
+## Вересень 2026 — Audit Round 19 Fix Patch
+
+* TMDB HTTP errors now redact `api_key` throughout the error chain while preserving `errors.Is` cancellation semantics.
+* TMDB search attempts, language/endpoint cascades, metadata waterfalls and poster downloads now return immediately on context cancellation instead of producing additional fallbacks and WARN noise.
+* `RunScan` emits one structured `scan_cancelled` INFO record with trace ID and duration.
+* Added cancellation and secret-redaction regression tests, including a one-request assertion for cancelled cascades.
+
+---
+
+## Вересень 2026 — Audit Round 18 Fix Patch
+
+* `frontend/src/main.js`: стан сканування тепер завершується лише за подією `scan-finished`; STOP не вимикається після миттєвого повернення RPC `RunScan`. Рендеринг записів переписано на безпечні DOM API без вставки зовнішніх значень через `innerHTML`; TMDB URL обмежено офіційним HTTPS-host.
+* `internal/scanner/scanner.go`: дисковий обхід приймає `context.Context`, реагує на STOP і повертає помилки `WalkDir`. Cleanup БД більше не запускається після неповного або скасованого обходу.
+* `internal/tmdb/client.go`: постери завантажуються у temporary-файл і атомарно перейменовуються лише після повного непорожнього запису; partial-файли прибираються при помилці.
+* Додано регресійні тести scanner та завантаження постерів. `go test ./... -count=10`, `go vet ./...`, `go build ./...` і frontend build пройшли.
+
+---
+
 ## Червень 2026 — Audit Round 8 Fix Patch
 
 * `app.go` / `updateMovie()`: Варіант 1.5 (прямий пошук за hint) більше не робить безумовний `return`, коли TMDB знаходить запис без українського перекладу (`TitleUA` порожній або не кириличний). Тепер потік провалюється у Варіант 2 (Gemini) для локалізації — раніше Gemini fallback був недосяжний у цьому сценарії, попри лог-повідомлення що обіцяло протилежне.
