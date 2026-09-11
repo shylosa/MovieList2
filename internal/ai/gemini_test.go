@@ -2,9 +2,11 @@ package ai
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -31,6 +33,17 @@ func TestGetModelsFiltersTTS(t *testing.T) {
 	models := client.getModels()
 	if len(models) != 1 || models[0] != "gemini-2.5-flash" {
 		t.Fatalf("expected only gemini-2.5-flash, got %#v", models)
+	}
+}
+
+func TestModelUnavailableErrorClassification(t *testing.T) {
+	for _, message := range []string{"Error 404: model missing", "Status: NOT_FOUND", "model is no longer available"} {
+		if !isModelUnavailableError(errors.New(message)) {
+			t.Errorf("permanent model error not classified: %q", message)
+		}
+	}
+	if isModelUnavailableError(errors.New("Error 503: high demand")) {
+		t.Fatal("temporary 503 was classified as permanent")
 	}
 }
 
@@ -164,7 +177,7 @@ func TestTranslateBulk_Gemini429FallsBackToGrok(t *testing.T) {
 			GrokAPIKey:   "test-key",
 		},
 		limiter:      rate.NewLimiter(rate.Every(1*time.Millisecond), 1),
-		activeModels: []string{"gemini-2.5-flash", "gemini-2.5-pro"},
+		activeModels: []string{"gemini-2.5-flash", "gemini-flash-lite-latest"},
 		httpClient:   &http.Client{Transport: &mockTransport{serverURL: server.URL}},
 		grokHTTPClient: &http.Client{Timeout: 5 * time.Second,
 			Transport: &grokTestTransport{serverURL: server.URL}},
@@ -240,5 +253,69 @@ func TestResetQuotaLock(t *testing.T) {
 
 	if c.quotaLocked.Load() {
 		t.Error("expected quota lock to be reset to false after ResetQuotaLock()")
+	}
+}
+
+func TestRetryMissingRecognitionsOrdersByRequestID(t *testing.T) {
+	client := NewClient(&config.Config{})
+	contexts := []FileRecognitionContext{
+		{ID: 0, RequestID: "req-a", OriginalFile: "a.mkv"},
+		{ID: 1, RequestID: "req-b", OriginalFile: "b.mkv"},
+	}
+	results := []RecognizedTitle{
+		{ID: 1, RequestID: "req-b", ENTitle: "B"},
+		{ID: 0, RequestID: "req-a", ENTitle: "A"},
+	}
+	ordered, err := client.retryMissingRecognitions(context.Background(), contexts, results)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ordered) != 2 || ordered[0].RequestID != "req-a" || ordered[1].RequestID != "req-b" {
+		t.Fatalf("unexpected order: %+v", ordered)
+	}
+}
+
+func TestRetryMissingRecognitionsDoesNotRetryCancelledContext(t *testing.T) {
+	client := NewClient(&config.Config{})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := client.retryMissingRecognitions(ctx, []FileRecognitionContext{{ID: 1, RequestID: "missing"}}, nil)
+	if err != context.Canceled {
+		t.Fatalf("error = %v; want context.Canceled", err)
+	}
+}
+
+func TestRecognizeBulkRetriesOneMissingItem(t *testing.T) {
+	requestCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount++
+		w.Header().Set("Content-Type", "application/json")
+		payload := `[{"id":0,"request_id":"recognition-0","original_file":"a.mkv","en_title":"A","media_type":"movie","status":"resolved","confidence":0.9}]`
+		if requestCount == 2 {
+			payload = `[{"id":1,"request_id":"recognition-1","original_file":"b.mkv","en_title":"B","media_type":"movie","status":"resolved","confidence":0.9}]`
+		}
+		_, _ = w.Write([]byte(`{"candidates":[{"content":{"parts":[{"text":` + strconv.Quote(payload) + `}]}}]}`))
+	}))
+	defer server.Close()
+
+	client := &Client{
+		cfg:          &config.Config{GeminiAPIKey: "fake-key"},
+		limiter:      rate.NewLimiter(rate.Inf, 1),
+		activeModels: []string{"gemini-test-flash"},
+		httpClient:   &http.Client{Transport: &mockTransport{serverURL: server.URL}},
+	}
+	results, err := client.RecognizeBulk(context.Background(), []FileRecognitionContext{
+		{ID: 0, OriginalFile: "a.mkv", CleanTitle: "A", MediaType: "movie"},
+		{ID: 1, OriginalFile: "b.mkv", CleanTitle: "B", MediaType: "movie"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if requestCount != 2 || len(results) != 2 || results[1].ENTitle != "B" {
+		t.Fatalf("requests=%d results=%+v", requestCount, results)
+	}
+	metrics := client.CallMetrics()
+	if metrics.RecognitionBatch != 1 || metrics.RecognitionRetry != 1 {
+		t.Fatalf("unexpected metrics: %+v", metrics)
 	}
 }

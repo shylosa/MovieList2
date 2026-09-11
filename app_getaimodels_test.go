@@ -26,7 +26,7 @@ func (r *rewriteTransport) RoundTrip(req *http.Request) (*http.Response, error) 
 func TestGetAIModels_ReturnsGeminiModels(t *testing.T) {
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		io.WriteString(w, `{"models":[{"name":"models/gemini-2.5-flash"},{"name":"models/other"}]}`)
+		io.WriteString(w, `{"models":[{"name":"models/gemini-2.5-flash","supportedGenerationMethods":["generateContent"]},{"name":"models/other","supportedGenerationMethods":["generateContent"]}]}`)
 	})
 
 	srv := httptest.NewServer(handler)
@@ -53,6 +53,31 @@ func TestGetAIModels_ReturnsGeminiModels(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("expected gemini model in names: %v", names)
+	}
+}
+
+func TestGeminiModelDiscoveryFilteringAndConfiguredOrder(t *testing.T) {
+	discovered := map[string]bool{"gemini-flash-lite-latest": true, "gemini-2.5-flash": true}
+	got := selectConfiguredGeminiModels([]string{"missing", "gemini-2.5-flash", "gemini-flash-lite-latest"}, discovered)
+	want := []string{"gemini-2.5-flash", "gemini-flash-lite-latest"}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("selected models = %v; want %v", got, want)
+	}
+	for _, tc := range []struct {
+		name    string
+		methods []string
+		want    bool
+	}{
+		{"gemini-2.5-flash", []string{"generateContent"}, true},
+		{"gemini-2.5-pro", []string{"generateContent"}, false},
+		{"gemini-3.1-pro-preview", []string{"generateContent"}, false},
+		{"gemini-2.5-flash-preview-tts", []string{"generateContent"}, false},
+		{"gemini-embedding-001", []string{"embedContent"}, false},
+		{"gemini-2.5-flash", []string{"countTokens"}, false},
+	} {
+		if got := isUsableGeminiModel(tc.name, tc.methods); got != tc.want {
+			t.Errorf("isUsableGeminiModel(%q) = %v; want %v", tc.name, got, tc.want)
+		}
 	}
 }
 
@@ -84,3 +109,22 @@ func TestGetAIModels_NoKeysConfigured(t *testing.T) {
 		t.Fatal("expected error when no AI keys configured, got nil")
 	}
 }
+
+func TestGetAIModelsDiscoveryFailureUsesConfiguredFallback(t *testing.T) {
+	app := NewApp()
+	app.cfg = &config.Config{GeminiAPIKey: "fake", GeminiModels: []string{"gemini-2.5-pro", "gemini-2.5-flash"}}
+	app.aiModelsHTTPClient = &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, io.ErrUnexpectedEOF
+	})}
+	names, err := app.GetAIModels()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(names) != 1 || names[0] != "gemini-2.5-flash" {
+		t.Fatalf("fallback models = %v", names)
+	}
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }

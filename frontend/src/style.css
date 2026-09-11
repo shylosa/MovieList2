@@ -524,6 +524,27 @@ html {
     flex-shrink: 0;
 }
 
+.col-media-type {
+    width: 90px;
+    display: flex;
+    flex-shrink: 0;
+    padding-right: 8px;
+}
+
+.media-type-select {
+    width: 100%;
+    background-color: #393b40;
+    border: 1px solid var(--sidebar-brd);
+    color: var(--text-primary);
+    padding: 5px 6px;
+    border-radius: 4px;
+    outline: none;
+}
+
+.media-type-select:focus {
+    border-color: var(--text-muted);
+}
+
 /* Кастомні інпути та чекбокси */
 .hint-input {
     width: 100%;

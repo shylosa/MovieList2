@@ -125,3 +125,21 @@ func TestResolveHomoglyphs(t *testing.T) {
 		}
 	}
 }
+
+func TestNormalizeYearLikeTokens(t *testing.T) {
+	for _, input := range []string{"Iz.Tmy.2O16.mkv", "Iz.Tmy.2o16.mkv", "Iz.Tmy.2О16.mkv", "Iz.Tmy.2о16.mkv"} {
+		parsed := ParseFilename(input)
+		if parsed.Year != 2016 {
+			t.Errorf("ParseFilename(%q).Year = %d; want 2016", input, parsed.Year)
+		}
+	}
+
+	for _, word := range []string{"Room", "Doctor", "Oppenheimer"} {
+		if got := normalizeYearLikeTokens(word); got != word {
+			t.Errorf("normalizeYearLikeTokens(%q) = %q; want unchanged", word, got)
+		}
+	}
+	if got := ParseFilename("Film.2O99.mkv").Year; got != 0 {
+		t.Errorf("invalid future year parsed as %d; want 0", got)
+	}
+}

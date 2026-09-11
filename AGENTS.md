@@ -184,7 +184,7 @@ Examples: `Vrag` → `Враг`, `Nochnoj Rejs` → `Ночной Рейс`.
 ```env
 APP_VERSION=2.0
 GEMINI_API_KEY=
-GEMINI_MODELS=gemini-2.5-flash,gemini-2.0-flash,gemini-2.5-flash-lite
+GEMINI_MODELS=gemini-2.5-flash,gemini-flash-lite-latest
 GROK_API_KEY=
 GROK_MODEL=grok-3-mini
 TMDB_API_KEY=
@@ -199,6 +199,49 @@ GITHUB_PAGES_BRANCH=main
 ---
 
 ## Changelog
+
+### Audit Round 24 — Вересень 2026 (automatic exact disambiguation)
+
+* Gemini results first use exact typed movie+TV lookup; reported AI media type is only a weak tie-breaker.
+* Exact localized search titles are validated aliases for post-verification.
+* `scan_completed.processed_total` is the denominator for `tmdb_accepted + ai_accepted + unresolved`; `disk_total` remains the collection size.
+
+### Manual media type selector — Вересень 2026
+
+* `FixRequest.media_type` приймає `auto`, `movie` або `tv`; порожнє значення сумісне з `auto`.
+* Strict manual type обмежує пошук відповідним typed TMDB endpoint.
+* В Auto exact original/localized/alias titles рівноправні; popularity/year/type використовуються лише для deterministic tie-break.
+
+### Audit Round 23 — Вересень 2026 (authoritative manual titles)
+
+* Точна ручна назва не передається Gemini: typed TMDB exact search перевіряє primary/original/localized/alias titles, а filename year/type є лише tie-breakers.
+* Gemini discovery допускає лише `generateContent` production-моделі у configured order; недоступні 404-моделі вимикаються до refresh.
+* Default Gemini cascade: `gemini-2.5-flash,gemini-flash-lite-latest`.
+* Scan/fix summaries повідомляють фактичні unresolved counters.
+
+### Audit Round 22 — Вересень 2026 (lifecycle і deployment tests)
+
+* `finalizeScan` завжди використовує lifecycle-контекст; cancellation і disk errors не очищають showcase та не оновлюють `last_scan_at`.
+* GitHub Pages git execution і Wails event emission мають вузькі test adapters; публічні API та events незмінні.
+* Додано ізольовані тести scan lifecycle, GitHub deployment, web generator, config та Sheets row mapping.
+* Production `wails build` і повний набір Go-перевірок проходять.
+
+### Audit Round 21 — Вересень 2026 (IMDb manual hints)
+
+* `FixSelected` / `UpdateMovie` accept full IMDb title URLs and bare `tt...` IDs.
+* IMDb hints use TMDB `/find` directly and never fall through to title scoring or Gemini.
+* Unknown authoritative IDs return an explicit error instead of silently retrying as text.
+* FixSelected clears TMDB caches and reports actual resolved/unresolved counts.
+
+### Audit Round 20 — Вересень 2026
+
+* TMDB no-year fallback preserves the parsed target year for ranking and cache identity.
+* Gemini verification requires a strong original/validated-alias match; localized titles
+  are diagnostic-only signals.
+* Gemini batch outputs correlate by `request_id`; a missing item gets at most one
+  sequential retry and cancellation prevents retry.
+* Year-like homoglyph normalization is limited to four-digit year tokens.
+* `scan_completed` reports deterministic and AI recognition counts plus AI call metrics.
 
 ### Audit Round 15 — Липень 2026
 

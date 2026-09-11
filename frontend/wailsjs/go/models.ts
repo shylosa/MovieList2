@@ -3,6 +3,7 @@ export namespace main {
 	export class FixRequest {
 	    filename: string;
 	    hint: string;
+	    media_type?: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new FixRequest(source);
@@ -12,6 +13,7 @@ export namespace main {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.filename = source["filename"];
 	        this.hint = source["hint"];
+	        this.media_type = source["media_type"];
 	    }
 	}
 

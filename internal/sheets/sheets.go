@@ -54,24 +54,8 @@ func (c *Client) SyncMovies(ctx context.Context, movies []storage.Movie) error {
 		slog.String("sheet_name", sheetName))
 
 	// 1. Готуємо дані (Headers + Body)
-	headers := []interface{}{"File", "Title (UA)", "Title (EN)", "Year", "Genre", "Cast", "Plot", "Poster URL"}
-
-	var values [][]interface{}
-	values = append(values, headers)
-
-	for _, m := range movies {
-		row := []interface{}{
-			utils.DisplayFileLabel(m.Filename),
-			m.TitleUA,
-			m.TitleEN,
-			m.Year,
-			m.Genres,
-			m.Cast,
-			m.Plot,
-			m.PosterURL,
-		}
-		values = append(values, row)
-	}
+	values := movieValues(movies)
+	headers := values[0]
 
 	// 2. Очищення аркуша (аналог sheet.clear) з Retry-логікою
 	slog.Info("google_sheets_clear_started", slog.String("sheet_name", sheetName))
@@ -117,6 +101,24 @@ func (c *Client) SyncMovies(ctx context.Context, movies []storage.Movie) error {
 
 	slog.Info("google_sheets_sync_completed", slog.Int("rows_written", len(values)))
 	return nil
+}
+
+func movieValues(movies []storage.Movie) [][]interface{} {
+	values := make([][]interface{}, 0, len(movies)+1)
+	values = append(values, []interface{}{"File", "Title (UA)", "Title (EN)", "Year", "Genre", "Cast", "Plot", "Poster URL"})
+	for _, m := range movies {
+		values = append(values, []interface{}{
+			utils.DisplayFileLabel(m.Filename),
+			m.TitleUA,
+			m.TitleEN,
+			m.Year,
+			m.Genres,
+			m.Cast,
+			m.Plot,
+			m.PosterURL,
+		})
+	}
+	return values
 }
 
 // retry реалізує логіку повторних спроб (аналог _retry у Python)

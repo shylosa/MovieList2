@@ -34,6 +34,7 @@ func isQuotaExhaustedError(err error) bool {
 // FileRecognitionContext — структурований контекст файлу для промпту Gemini.
 type FileRecognitionContext struct {
 	ID           int    `json:"id"`
+	RequestID    string `json:"request_id"`
 	OriginalFile string `json:"original_file"`
 	FilePath     string `json:"-"`
 	CleanTitle   string `json:"parsed_title"`
@@ -70,26 +71,57 @@ func FileRecognitionContextFromPath(path string) FileRecognitionContext {
 //
 // Виняток: en_title та year — тільки для пошуку в TMDB, не зберігаємо напряму.
 type RecognizedTitle struct {
-	ID           int     `json:"id"`
-	OriginalFile string  `json:"original_file"` // ім'я файлу як є — для маппінгу
-	ENTitle      string  `json:"en_title"`      // оригінальна англійська назва (для TMDB пошуку)
-	Year         *int    `json:"year"`
-	MediaType    string  `json:"media_type"` // "movie" або "tv"
-	Confidence   float64 `json:"confidence"` // Оцінка впевненості 0.0-1.0, 0 якщо не вказано
+	ID                int     `json:"id"`
+	RequestID         string  `json:"request_id"`
+	OriginalFile      string  `json:"original_file"` // ім'я файлу як є — для маппінгу
+	ENTitle           string  `json:"en_title"`      // оригінальна англійська назва (для TMDB пошуку)
+	OriginalTitle     string  `json:"original_title,omitempty"`
+	Year              *int    `json:"year"`
+	PossibleYears     []int   `json:"possible_years,omitempty"`
+	MediaType         string  `json:"media_type"` // "movie" або "tv"
+	Country           string  `json:"country,omitempty"`
+	DirectorOrCreator string  `json:"director_or_creator,omitempty"`
+	Status            string  `json:"status,omitempty"`
+	Reason            string  `json:"reason,omitempty"`
+	Confidence        float64 `json:"confidence"` // Оцінка впевненості 0.0-1.0, 0 якщо не вказано
 }
 
 type Client struct {
-	cfg         *config.Config
-	limiter     *rate.Limiter
-	grokLimiter *rate.Limiter
-	quotaLocked atomic.Bool
+	cfg                   *config.Config
+	limiter               *rate.Limiter
+	grokLimiter           *rate.Limiter
+	quotaLocked           atomic.Bool
+	recognitionBatchCalls atomic.Int64
+	recognitionRetryCalls atomic.Int64
+	disambiguationCalls   atomic.Int64
 	// 🟢 ДОДАНО: Динамічний каскад та м'ютекс для його захисту
-	activeModels   []string
-	modelsMu       sync.RWMutex
-	genaiClient    *genai.Client
-	initMu         sync.Mutex
-	httpClient     *http.Client // 🔴 ДОДАНО ДЛЯ ТЕСТІВ: Дозволяє мокувати відповіді API
-	grokHTTPClient *http.Client
+	activeModels      []string
+	modelsMu          sync.RWMutex
+	unavailableModels sync.Map
+	genaiClient       *genai.Client
+	initMu            sync.Mutex
+	httpClient        *http.Client // 🔴 ДОДАНО ДЛЯ ТЕСТІВ: Дозволяє мокувати відповіді API
+	grokHTTPClient    *http.Client
+}
+
+type CallMetrics struct {
+	RecognitionBatch int64
+	RecognitionRetry int64
+	Disambiguation   int64
+}
+
+func (c *Client) ResetCallMetrics() {
+	c.recognitionBatchCalls.Store(0)
+	c.recognitionRetryCalls.Store(0)
+	c.disambiguationCalls.Store(0)
+}
+
+func (c *Client) CallMetrics() CallMetrics {
+	return CallMetrics{
+		RecognitionBatch: c.recognitionBatchCalls.Load(),
+		RecognitionRetry: c.recognitionRetryCalls.Load(),
+		Disambiguation:   c.disambiguationCalls.Load(),
+	}
 }
 
 func NewClient(cfg *config.Config) *Client {
@@ -109,6 +141,10 @@ func (c *Client) SetModels(models []string) {
 	defer c.modelsMu.Unlock()
 	// Копіюємо слайс, щоб уникнути data race
 	c.activeModels = append([]string(nil), models...)
+	c.unavailableModels.Range(func(key, _ any) bool {
+		c.unavailableModels.Delete(key)
+		return true
+	})
 }
 
 // getModels повертає актуальний список моделей для каскаду
@@ -125,7 +161,7 @@ func (c *Client) getModels() []string {
 		candidates = append([]string(nil), c.cfg.GeminiModels...)
 	} else {
 		// Пріоритет 3: Хардкод-фолбек
-		candidates = []string{"gemini-2.0-flash", "gemini-2.0-pro", "gemini-1.5-flash"}
+		candidates = []string{"gemini-2.5-flash", "gemini-flash-lite-latest"}
 	}
 
 	var filtered []string
@@ -135,8 +171,11 @@ func (c *Client) getModels() []string {
 		if strings.Contains(mLower, "embedding") ||
 			strings.Contains(mLower, "audio") ||
 			strings.Contains(mLower, "tts") ||
+			strings.Contains(mLower, "image") ||
+			strings.Contains(mLower, "preview") ||
 			strings.Contains(mLower, "robotics") ||
-			strings.Contains(mLower, "computer-use") {
+			strings.Contains(mLower, "computer-use") ||
+			mLower == "gemini-2.5-pro" {
 			continue
 		}
 		// Include only flash, pro, and lite
@@ -202,13 +241,80 @@ func (c *Client) RecognizeBulk(ctx context.Context, contexts []FileRecognitionCo
 		return nil, nil
 	}
 
-	prompt, err := buildPrompt(contexts)
+	prepared := append([]FileRecognitionContext(nil), contexts...)
+	for i := range prepared {
+		if prepared[i].RequestID == "" {
+			prepared[i].RequestID = fmt.Sprintf("recognition-%d", i)
+		}
+	}
+	prompt, err := buildPrompt(prepared)
 	if err != nil {
 		return nil, fmt.Errorf("build_prompt: %w", err)
 	}
 	utils.LoggerWithTrace(ctx).Info("gemini_recognition_start", slog.Int("file_count", len(contexts)))
+	c.recognitionBatchCalls.Add(1)
 
-	return c.requestWithRetry(ctx, prompt)
+	results, err := c.requestWithRetry(ctx, prompt)
+	if err != nil {
+		return nil, err
+	}
+	return c.retryMissingRecognitions(ctx, prepared, results)
+}
+
+func (c *Client) retryMissingRecognitions(ctx context.Context, contexts []FileRecognitionContext, results []RecognizedTitle) ([]RecognizedTitle, error) {
+	matched := make(map[string]RecognizedTitle, len(results))
+	legacy := make(map[int]RecognizedTitle, len(results))
+	for _, result := range results {
+		if result.RequestID != "" {
+			matched[result.RequestID] = result
+		} else {
+			legacy[result.ID] = result
+		}
+	}
+
+	ordered := make([]RecognizedTitle, 0, len(contexts))
+	for _, input := range contexts {
+		if result, ok := matched[input.RequestID]; ok {
+			ordered = append(ordered, result)
+			continue
+		}
+		// Compatibility with cached/older model responses during schema rollout.
+		if result, ok := legacy[input.ID]; ok {
+			result.RequestID = input.RequestID
+			ordered = append(ordered, result)
+			continue
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+
+		utils.LoggerWithTrace(ctx).Warn("gemini_recognition_retry_missing",
+			slog.String("request_id", input.RequestID),
+			slog.String("file", input.OriginalFile),
+		)
+		c.recognitionRetryCalls.Add(1)
+		prompt, err := buildPrompt([]FileRecognitionContext{input})
+		if err != nil {
+			return nil, err
+		}
+		retry, err := c.requestWithRetry(ctx, prompt)
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			utils.LoggerWithTrace(ctx).Warn("gemini_recognition_retry_failed",
+				slog.String("request_id", input.RequestID), slog.Any("error", err))
+			continue
+		}
+		for _, result := range retry {
+			if result.RequestID == input.RequestID || (result.RequestID == "" && result.ID == input.ID) {
+				result.RequestID = input.RequestID
+				ordered = append(ordered, result)
+				break
+			}
+		}
+	}
+	return ordered, nil
 }
 
 func (c *Client) requestWithRetry(ctx context.Context, prompt string) ([]RecognizedTitle, error) {
@@ -222,6 +328,9 @@ func (c *Client) requestWithRetry(ctx context.Context, prompt string) ([]Recogni
 
 	// Йдемо по списку моделей (каскад)
 	for i, modelName := range models {
+		if _, unavailable := c.unavailableModels.Load(modelName); unavailable {
+			continue
+		}
 		// Перевіряємо чи не скасовано контекст користувачем
 		select {
 		case <-ctx.Done():
@@ -248,6 +357,10 @@ func (c *Client) requestWithRetry(ctx context.Context, prompt string) ([]Recogni
 
 		// Якщо помилка, записуємо її і йдемо на наступну ітерацію (до наступної моделі)
 		lastErr = err
+		if isModelUnavailableError(err) {
+			c.unavailableModels.Store(modelName, true)
+			utils.LoggerWithTrace(ctx).Warn("gemini_model_disabled", slog.String("model", modelName))
+		}
 		utils.LoggerWithTrace(ctx).Warn("gemini_model_failed",
 			slog.String("model", modelName),
 			slog.Any("error", err),
@@ -265,6 +378,15 @@ func (c *Client) requestWithRetry(ctx context.Context, prompt string) ([]Recogni
 	}
 	utils.LoggerWithTrace(ctx).Warn("grok_recognize_fallback_failed", slog.Any("error", grokErr))
 	return nil, fmt.Errorf("all AI models unavailable (incl. Grok): gemini=%w; grok=%s", lastErr, grokErr)
+}
+
+func isModelUnavailableError(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "404") || strings.Contains(message, "not_found") ||
+		strings.Contains(message, "no longer available")
 }
 
 func (c *Client) makeRequest(ctx context.Context, prompt, modelName string) ([]RecognizedTitle, error) {
@@ -368,14 +490,21 @@ func buildGenAISchema() *genai.Schema {
 		Items: &genai.Schema{
 			Type: genai.TypeObject,
 			Properties: map[string]*genai.Schema{
-				"id":            {Type: genai.TypeInteger, Description: "exact integer identifier from input"},
-				"original_file": {Type: genai.TypeString, Description: "exact original filename as provided, unchanged"},
-				"en_title":      {Type: genai.TypeString, Description: "original English title for TMDB search. Must be the international release title, not a translation."},
-				"year":          {Type: genai.TypeInteger, Nullable: genai.Ptr(true), Description: "release year. null if uncertain."},
-				"media_type":    {Type: genai.TypeString, Description: "\"movie\" or \"tv\". Use \"tv\" only for clear series markers."},
-				"confidence":    {Type: genai.TypeNumber, Description: "Confidence score 0.0-1.0, 0 if not provided."},
+				"id":                  {Type: genai.TypeInteger, Description: "exact integer identifier from input"},
+				"request_id":          {Type: genai.TypeString, Description: "exact request_id from input"},
+				"original_file":       {Type: genai.TypeString, Description: "exact original filename as provided, unchanged"},
+				"en_title":            {Type: genai.TypeString, Description: "original English title for TMDB search. Must be the international release title, not a translation."},
+				"original_title":      {Type: genai.TypeString, Description: "official original-language title, empty if unknown"},
+				"year":                {Type: genai.TypeInteger, Nullable: genai.Ptr(true), Description: "release year. null if uncertain."},
+				"possible_years":      {Type: genai.TypeArray, Items: &genai.Schema{Type: genai.TypeInteger}},
+				"media_type":          {Type: genai.TypeString, Description: "\"movie\" or \"tv\". Use \"tv\" only for clear series markers."},
+				"country":             {Type: genai.TypeString, Description: "production country, empty if unknown"},
+				"director_or_creator": {Type: genai.TypeString, Description: "director for movie or creator for TV, empty if unknown"},
+				"status":              {Type: genai.TypeString, Description: "resolved, ambiguous, or unresolved"},
+				"reason":              {Type: genai.TypeString, Description: "short machine-readable reason"},
+				"confidence":          {Type: genai.TypeNumber, Description: "Confidence score 0.0-1.0, 0 if not provided."},
 			},
-			Required: []string{"id", "original_file", "en_title", "media_type", "confidence"},
+			Required: []string{"id", "request_id", "original_file", "en_title", "original_title", "possible_years", "media_type", "country", "director_or_creator", "status", "reason", "confidence"},
 		},
 	}
 }
@@ -411,7 +540,7 @@ Example: "Moj malenkij angel" ≠ "My Little Angel" → actual title is "Foster"
 
 Input JSON (TRUST parsed_year and parsed_media_type — do not re-guess them):
 %s
-"original_file" in your response MUST exactly match "original_file" from input.
+"request_id" and "original_file" in your response MUST exactly match the input.
 
 MERGE STRATEGY: "en_title" is used to search TMDB. TMDB data always wins.
 Return "" if uncertain — a miss is better than a hallucination.
@@ -432,6 +561,8 @@ RULES:
 1. en_title: exact TMDB-searchable title. "" if not 100%% certain — do NOT guess.
 2. year: use parsed_year from input; if absent extract from filename; null if uncertain.
 3. media_type: use parsed_media_type from input; "tv" only for S01/Season markers; default "movie".
+4. status: resolved only when the identity is reliable; ambiguous for multiple plausible works; unresolved when unknown.
+5. Return exactly one output per input. Never return or invent a TMDB ID.
 
 Return ONLY a raw JSON array. No markdown, no explanation.`, string(filesJSON)), nil
 }
@@ -474,6 +605,9 @@ Return ONLY a raw JSON array.`, string(inputJSON))
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
+		if _, unavailable := c.unavailableModels.Load(modelName); unavailable {
+			continue
+		}
 
 		if err := c.waitForRateLimit(ctx); err != nil {
 			return nil, err
@@ -493,6 +627,10 @@ Return ONLY a raw JSON array.`, string(inputJSON))
 				}
 			}
 			lastErr = err
+			if isModelUnavailableError(err) {
+				c.unavailableModels.Store(modelName, true)
+				utils.LoggerWithTrace(ctx).Warn("gemini_model_disabled", slog.String("model", modelName))
+			}
 			utils.LoggerWithTrace(ctx).Warn("bulk_translate_failed", slog.String("model", modelName), slog.Any("error", err))
 			continue
 		}

@@ -124,7 +124,7 @@ MEDIA_FOLDER_PATH=/path/to/your/media
 # AI (опційно)
 GROK_API_KEY=your_key          # Резервний AI-провайдер
 GROK_MODEL=grok-3-mini         # Модель Grok (default: grok-3-mini)
-GEMINI_MODELS=gemini-2.5-flash,gemini-2.0-flash,gemini-2.5-flash-lite
+GEMINI_MODELS=gemini-2.5-flash,gemini-flash-lite-latest
 
 # Збереження
 DB_PATH=movies.db

@@ -2,6 +2,45 @@
 
 All notable changes to this project. Dates are approximate (session-based).
 
+## Вересень 2026 — Audit Round 24 Fix Patch
+
+* Automatic Gemini→TMDB merge тепер спочатку виконує exact dual-type lookup; Gemini media type є tie-breaker, а не жорстким endpoint lock.
+* Exact localized title передається як validated alias для strong post-verification. Regression підтверджує `The Bureau` → TV `62476` замість movie `802663`.
+* `scan_completed` розділяє `disk_total` і `processed_total`; accepted/unresolved counters описують лише реально оброблені файли.
+
+---
+
+## Вересень 2026 — Manual media type selector
+
+* У редакторі додано selector `Авто / Фільм / Серіал` для кожної ручної підказки; вибір зберігається при фільтрації списку й передається у `FixSelected` як `media_type`.
+* Strict `Фільм` використовує лише `/search/movie`, strict `Серіал` — лише `/search/tv`; `Авто` перевіряє обидва typed endpoints.
+* Exact primary, original, localized та validated-alias matches отримують однакову базову вагу. Неоднозначність розв'язують популярність, рік і слабкий filename type hint.
+* Додано regression для `The Bureau` зі strict TV та перевіркою, що movie endpoint не викликається.
+
+---
+
+## Вересень 2026 — Audit Round 23 Fix Patch
+
+* Ручна текстова назва стала авторитетною підказкою: вона проходить окремий exact TMDB movie/TV lookup і більше не переписується filename parser, scoring або Gemini.
+* Exact original/localized/validated-alias match підтверджує назву; рік і media type використовуються лише як tie-breakers. `TmdbID` як і раніше походить виключно з TMDB.
+* Додано регресії для `The Bureau`, `Enemy` проти `Shatru`, розбіжності року та заборони Gemini fallback для ручної назви.
+* Gemini discovery тепер враховує `supportedGenerationMethods`, configured order і фільтрує preview/TTS/image/embedding та відому недоступну `gemini-2.5-pro`.
+* Дефолтний каскад оновлено до `gemini-2.5-flash,gemini-flash-lite-latest`; постійно недоступна модель вимикається до наступного refresh.
+* `scan_completed.needs_review` більше не є константою; `FixSelected` пише підсумок requested/resolved/unresolved.
+
+---
+
+## Вересень 2026 — Audit Round 22 Fix Patch
+
+* `finalizeScan` більше не може отримати скасований scan-контекст: усі фінальні читання БД та генерація showcase виконуються через lifecycle-контекст додатку.
+* Додано регресійні тести для cancellation, disk scan error, no-change scan, `last_scan_at` та єдиного `scan-finished`.
+* GitHub Pages workflow отримав ін'єктований git runner та синхронне тестове ядро без зміни публічного Wails API чи назв events.
+* Покрито порожню БД, відсутній repository, порядок add/commit/push, commit/push failures, configured branch, duplicate guard і `App.wg` без реальних push або мережі.
+* Додано unit-тести `internal/web`, `internal/config` та pure mapping для `internal/sheets`.
+* Пройдено `go test ./...`, coverage, vet, build, 10 повторів тестів і production `wails build`.
+
+---
+
 ## Вересень 2026 — Audit Round 19 Fix Patch
 
 * TMDB HTTP errors now redact `api_key` throughout the error chain while preserving `errors.Is` cancellation semantics.
@@ -165,3 +204,23 @@ All notable changes to this project. Dates are approximate (session-based).
 | `.gitignore` | — | Ignore `local_index.html`; track `index.html`; add `*.env`. |
 
 **Final verification (2026-06-04):** `go build ./...` ✅ `go vet ./...` ✅ `gofmt -l .` ✅
+# Audit Round 20 — Вересень 2026 (Recognition hardening)
+
+* TMDB fallback тепер окремо зберігає `queryYear` і `targetYear`: API-запит може бути
+  розширений без року, але scoring, cache key і фінальна перевірка не втрачають рік файла.
+* Post-Gemini та L2-cache verification більше не приймають збіг лише через локалізований
+  `SearchTitle`; потрібен збіг з original title або перевіреним alternate title, сумісні
+  рік і тип медіа.
+* Language/popularity винесено в tie-breaker відносно identity score.
+* `2O16`, `2o16`, `2О16` нормалізуються як рік без заміни літер у звичайних словах.
+* Gemini recognition отримав `request_id`, ambiguity metadata, зіставлення незалежно від
+  порядку відповіді та один індивідуальний retry для пропущеного batch-елемента.
+* Додано `scan_completed` з підсумковими recognition/API-call метриками.
+# Audit Round 21 — Вересень 2026 (Ручне уточнення через IMDb)
+
+* Додано підтримку повних IMDb URL та чистих `tt...` ID у ручному уточненні.
+* IMDb-підказка викликає TMDB `/find` і details напряму, без title scoring, року файла
+  та Gemini fallback.
+* Невідомий IMDb ID повертає явну помилку й не запускає неточний текстовий пошук.
+* `FixSelected` очищає TMDB cache, рахує фактичні успіхи та не додає невдалі записи
+  до черги перекладу.

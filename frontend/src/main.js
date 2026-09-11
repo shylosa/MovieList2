@@ -115,6 +115,7 @@ document.querySelector('#app').innerHTML = `
                 <div class="col-arr"></div>
                 <div class="col-year">Рік</div>
                 <div class="col-title">Розпізнано як</div>
+                <div class="col-media-type">Тип</div>
                 <div class="col-hint">Підказка</div>
             </div>
             <div id="movie-list" style="overflow-y: scroll; flex-grow: 1;">Завантаження...</div>
@@ -399,6 +400,7 @@ async function loadStats() {
 // --- ЛОГІКА РЕДАКТОРА ---
 let allMovies = []; // Зберігаємо список глобально для швидкого пошуку
 let hintsCache = {}; // 👈 ФІКС: Кеш для текстових підказок
+let mediaTypesCache = {}; // auto | movie | tv для ручного уточнення
 let checkedCache = new Set(); // 👈 ФІКС: Кеш для вибраних чекбоксів
 
 async function loadMovies() {
@@ -464,6 +466,20 @@ function renderMovies(movies) {
 		link.textContent = title;
 		titleCol.appendChild(link);
 
+		const mediaTypeCol = document.createElement('div');
+		mediaTypeCol.className = 'col-media-type';
+		const mediaTypeSelect = document.createElement('select');
+		mediaTypeSelect.className = 'media-type-select';
+		mediaTypeSelect.dataset.filename = m.filename;
+		for (const [value, label] of [['auto', 'Авто'], ['movie', 'Фільм'], ['tv', 'Серіал']]) {
+			const option = document.createElement('option');
+			option.value = value;
+			option.textContent = label;
+			mediaTypeSelect.appendChild(option);
+		}
+		mediaTypeSelect.value = mediaTypesCache[m.filename] || 'auto';
+		mediaTypeCol.appendChild(mediaTypeSelect);
+
 		const hintCol = document.createElement('div');
 		hintCol.className = 'col-hint';
 		const hintInput = document.createElement('input');
@@ -473,7 +489,7 @@ function renderMovies(movies) {
 		hintInput.value = hintVal;
 		hintCol.appendChild(hintInput);
 
-		row.append(checkboxCol, fileCol, arrowCol, yearCol, titleCol, hintCol);
+		row.append(checkboxCol, fileCol, arrowCol, yearCol, titleCol, mediaTypeCol, hintCol);
 		list.appendChild(row);
     });
 
@@ -505,8 +521,11 @@ document.getElementById('movie-list').addEventListener('change', (e) => {
     if (e.target.classList.contains('row-cb')) {
         const fname = e.target.getAttribute('data-filename');
         if (e.target.checked) checkedCache.add(fname);
-        else checkedCache.delete(fname);
-    }
+		else checkedCache.delete(fname);
+	}
+	if (e.target.classList.contains('media-type-select')) {
+		mediaTypesCache[e.target.dataset.filename] = e.target.value;
+	}
 });
 
 // Пошук по списку (без звернення до бази)
@@ -555,16 +574,18 @@ document.getElementById('movie-list').addEventListener('click', async (e) => {
 document.getElementById('btn-fix').onclick = () => {
     const selected = [];
     // 👈 ФІКС: Беремо дані з кешу, а не з DOM, бо елементи можуть бути відфільтровані
-    checkedCache.forEach(filename => {
-        const hint = hintsCache[filename] || '';
-        selected.push({ filename, hint });
+	checkedCache.forEach(filename => {
+		const hint = hintsCache[filename] || '';
+		const media_type = mediaTypesCache[filename] || 'auto';
+		selected.push({ filename, hint, media_type });
     });
 
     if (selected.length === 0) return;
 
     // Очищаємо кеш після відправки
-    checkedCache.clear();
-    hintsCache = {};
+	checkedCache.clear();
+	hintsCache = {};
+	mediaTypesCache = {};
 
     switchTab('overview', 'Виправлення');
     FixSelected(selected);

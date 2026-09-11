@@ -98,6 +98,47 @@ func TestUpdateMovie_BypassesGeminiOnCyrillicTMDB(t *testing.T) {
 	}
 }
 
+func TestUpdateMovieAuthoritativeManualTitleNeverCallsGemini(t *testing.T) {
+	ctx := context.Background()
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/search/movie"):
+			io.WriteString(w, `{"results":[{"id":181886,"title":"Enemy","original_title":"Enemy","release_date":"2014-03-14","popularity":25},{"id":103663,"title":"Enemy","original_title":"Shatru","release_date":"2013-08-23","popularity":2}]}`)
+		case strings.HasSuffix(r.URL.Path, "/search/tv"):
+			io.WriteString(w, `{"results":[]}`)
+		case strings.HasSuffix(r.URL.Path, "/movie/181886"):
+			io.WriteString(w, `{"id":181886,"title":"Enemy","original_title":"Enemy","release_date":"2014-03-14"}`)
+		default:
+			http.NotFound(w, r)
+		}
+	})
+	server := httptest.NewServer(handler)
+	defer server.Close()
+	u, _ := url.Parse(server.URL)
+	db, err := storage.New(filepath.Join(t.TempDir(), "movies.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.InitSchema(ctx); err != nil {
+		t.Fatal(err)
+	}
+	app := NewApp()
+	app.db = db
+	app.cfg = &config.Config{TMDBAPIKey: "fake", PostersDir: t.TempDir()}
+	app.tmdbClient = tmdb.NewClient(app.cfg)
+	app.tmdbClient.SetTransport(&mockTransport{base: http.DefaultTransport, scheme: u.Scheme, host: u.Host})
+	app.aiClient = nil // A successful manual title must not need or call Gemini.
+	if err := app.updateMovie(ctx, "Vrag.2013.mkv", "Enemy"); err != nil {
+		t.Fatal(err)
+	}
+	movie, err := db.GetMovieByFilename(ctx, "Vrag.2013.mkv")
+	if err != nil || movie == nil || movie.TmdbID != 181886 {
+		t.Fatalf("saved movie=%+v err=%v; want TMDB 181886", movie, err)
+	}
+}
+
 func TestMergeGeminiWithTMDBAcceptsTVWhenGeminiSaysMovie(t *testing.T) {
 	ctx := context.Background()
 	year := 2025
@@ -165,6 +206,37 @@ func TestMergeGeminiWithTMDBAcceptsTVWhenGeminiSaysMovie(t *testing.T) {
 	}
 }
 
+func TestMergeGeminiWithTMDBPrefersPopularExactTVForTheBureau(t *testing.T) {
+	ctx := context.Background()
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/search/movie"):
+			io.WriteString(w, `{"results":[{"id":802663,"title":"The Bureau","original_title":"The Bureau","release_date":"2020-01-01","popularity":1}]}`)
+		case strings.HasSuffix(r.URL.Path, "/search/tv"):
+			io.WriteString(w, `{"results":[{"id":62476,"name":"The Bureau","original_name":"Le Bureau des légendes","first_air_date":"2015-04-27","popularity":35}]}`)
+		case strings.HasSuffix(r.URL.Path, "/tv/62476"):
+			io.WriteString(w, `{"id":62476,"name":"The Bureau","original_name":"Le Bureau des légendes","first_air_date":"2015-04-27"}`)
+		default:
+			http.NotFound(w, r)
+		}
+	})
+	server := httptest.NewServer(handler)
+	defer server.Close()
+	u, _ := url.Parse(server.URL)
+	root := t.TempDir()
+	app := NewApp()
+	app.cfg = &config.Config{MediaFolderPath: root, TMDBAPIKey: "fake", PostersDir: t.TempDir()}
+	app.tmdbClient = tmdb.NewClient(app.cfg)
+	app.tmdbClient.SetTransport(&mockTransport{base: http.DefaultTransport, scheme: u.Scheme, host: u.Host})
+	movie := app.mergeGeminiWithTMDB(ctx, filepath.Join(root, "Bjuro legend", "episode.08.avi"), ai.RecognizedTitle{
+		ENTitle: "The Bureau", MediaType: "movie", Confidence: 0.9, Status: "resolved",
+	})
+	if movie.TmdbID != 62476 || movie.MediaType != "tv" {
+		t.Fatalf("automatic exact merge = %+v; want TV 62476", movie)
+	}
+}
+
 func TestMaxTitleSimilarity_CyrillicCandidate(t *testing.T) {
 	info := &tmdb.MovieInfo{
 		TitleEN: "Scarpetta",
@@ -193,6 +265,188 @@ func TestMaxTitleSimilarity_MatchedAlias(t *testing.T) {
 	}
 	if got := maxTitleSimilarity("Kay Scarpetta", info); got < 0.90 {
 		t.Errorf("maxTitleSimilarity('Kay Scarpetta') = %.4f; want >= 0.90 (MatchedAlias)", got)
+	}
+}
+
+func TestLocalizedTitleCannotReplaceStrongGeminiVerification(t *testing.T) {
+	info := &tmdb.MovieInfo{
+		TitleEN:     "Shatru",
+		TitleUA:     "Ворог",
+		SearchTitle: "Enemy",
+	}
+	strong := tmdb.TitleSimilarity("Enemy", info.TitleEN)
+	localized := maxLocalizedTitleSimilarity("Enemy", info)
+	if strong >= geminiTMDBVerifyMinJW {
+		t.Fatalf("strong similarity = %.3f; want rejection", strong)
+	}
+	if localized < 0.99 {
+		t.Fatalf("fixture must prove localized false positive, got %.3f", localized)
+	}
+}
+
+func TestGeminiTMDBYearCompatible(t *testing.T) {
+	year2023 := 2023
+	if !geminiTMDBYearCompatible(2023, &year2023, "2024") {
+		t.Fatal("year difference of one should be accepted")
+	}
+	if geminiTMDBYearCompatible(2023, &year2023, "2025") {
+		t.Fatal("year difference of two should be rejected")
+	}
+}
+
+func TestValidatedAliasIsStrongSignal(t *testing.T) {
+	info := &tmdb.MovieInfo{
+		TitleEN:      "Harry Potter and the Philosopher's Stone",
+		MatchedAlias: "Harry Potter and the Sorcerer's Stone",
+	}
+	if got := maxTitleSimilarity("Harry Potter and the Sorcerer's Stone", info); got < 0.99 {
+		t.Fatalf("validated alias similarity = %.3f; want exact match", got)
+	}
+}
+
+func TestExtractIMDBID(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"https://www.imdb.com/title/tt4925252", "tt4925252"},
+		{"https://www.imdb.com/title/tt2316411/?ref_=ext_shr_lnk", "tt2316411"},
+		{"TT2316411", "tt2316411"},
+		{"https://www.imdb.com/title/not-an-id", ""},
+		{"Enemy 2013", ""},
+	}
+	for _, tt := range tests {
+		if got := extractIMDBID(tt.input); got != tt.want {
+			t.Errorf("extractIMDBID(%q) = %q; want %q", tt.input, got, tt.want)
+		}
+	}
+}
+
+func TestUpdateMovieIMDbHintUsesFindAndBypassesSearch(t *testing.T) {
+	ctx := context.Background()
+	searchCalled := false
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/search/"):
+			searchCalled = true
+			t.Fatalf("IMDb hint must not use text search: %s", r.URL.Path)
+		case r.URL.Path == "/3/find/tt2316411":
+			if r.URL.Query().Get("external_source") != "imdb_id" {
+				t.Fatalf("missing external_source=imdb_id")
+			}
+			_, _ = io.WriteString(w, `{"movie_results":[{"id":103663}],"tv_results":[]}`)
+		case r.URL.Path == "/3/movie/103663":
+			_, _ = io.WriteString(w, `{
+				"id":103663,
+				"title":"Ворог",
+				"original_title":"Enemy",
+				"release_date":"2014-03-14",
+				"overview":"Історія професора.",
+				"genres":[{"name":"Thriller"}],
+				"credits":{"cast":[]}
+			}`)
+		default:
+			t.Fatalf("unexpected request: %s", r.URL.Path)
+		}
+	})
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+	u, _ := url.Parse(srv.URL)
+
+	tempDB := filepath.Join(t.TempDir(), "movies.db")
+	db, err := storage.New(tempDB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.InitSchema(ctx); err != nil {
+		t.Fatal(err)
+	}
+	app := NewApp()
+	app.db = db
+	app.cfg = &config.Config{MediaFolderPath: t.TempDir(), TMDBAPIKey: "fake-key", PostersDir: t.TempDir()}
+	app.tmdbClient = tmdb.NewClient(app.cfg)
+	app.tmdbClient.SetTransport(&mockTransport{base: http.DefaultTransport, scheme: u.Scheme, host: u.Host})
+
+	filename := "Vrag.2013.mkv"
+	if err := app.updateMovie(ctx, filename, "https://www.imdb.com/title/tt2316411/"); err != nil {
+		t.Fatal(err)
+	}
+	movie, err := db.GetMovieByFilename(ctx, filename)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if movie == nil || movie.TmdbID != 103663 || movie.TitleEN != "Enemy" {
+		t.Fatalf("unexpected saved movie: %+v", movie)
+	}
+	if searchCalled {
+		t.Fatal("text search was called")
+	}
+}
+
+func TestUpdateMovieUnknownIMDbHintDoesNotFallBack(t *testing.T) {
+	ctx := context.Background()
+	requestCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestCount++
+		if r.URL.Path != "/3/find/tt9999999" {
+			t.Errorf("unexpected fallback request: %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"movie_results":[],"tv_results":[]}`)
+	}))
+	defer server.Close()
+	u, _ := url.Parse(server.URL)
+
+	tempDB := filepath.Join(t.TempDir(), "movies.db")
+	db, err := storage.New(tempDB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.InitSchema(ctx); err != nil {
+		t.Fatal(err)
+	}
+	app := NewApp()
+	app.db = db
+	app.cfg = &config.Config{TMDBAPIKey: "fake-key", PostersDir: t.TempDir()}
+	app.tmdbClient = tmdb.NewClient(app.cfg)
+	app.tmdbClient.SetTransport(&mockTransport{base: http.DefaultTransport, scheme: u.Scheme, host: u.Host})
+
+	err = app.updateMovie(ctx, "unknown.mkv", "tt9999999")
+	if err == nil {
+		t.Fatal("unknown IMDb ID must return an explicit error")
+	}
+	if requestCount != 1 {
+		t.Fatalf("request count = %d; want only one /find request", requestCount)
+	}
+}
+
+func TestFetchByIMDBSupportsTVResult(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/3/find/tt7654321":
+			_, _ = io.WriteString(w, `{"movie_results":[],"tv_results":[{"id":76543}]}`)
+		case "/3/tv/76543":
+			_, _ = io.WriteString(w, `{"id":76543,"name":"Тестовий серіал","original_name":"Test Series","first_air_date":"2020-01-01","overview":"Опис","credits":{"cast":[]}}`)
+		default:
+			t.Errorf("unexpected request: %s", r.URL.Path)
+		}
+	}))
+	defer server.Close()
+	u, _ := url.Parse(server.URL)
+	cfg := &config.Config{TMDBAPIKey: "fake-key", PostersDir: t.TempDir()}
+	client := tmdb.NewClient(cfg)
+	client.SetTransport(&mockTransport{base: http.DefaultTransport, scheme: u.Scheme, host: u.Host})
+
+	info, err := client.FetchByIMDB(context.Background(), "TT7654321", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info == nil || info.TMDBID != 76543 || info.MediaType != tmdb.MediaTypeTV {
+		t.Fatalf("unexpected TV result: %+v", info)
 	}
 }
 

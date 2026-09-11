@@ -37,10 +37,136 @@ type tmdbSearchResponse struct {
 
 // scoredResult — кандидат з підрахованим балом
 type scoredResult struct {
-	result       tmdbSearchResult
-	score        int
-	year         int
-	matchedAlias string
+	result        tmdbSearchResult
+	score         int
+	identityScore int
+	year          int
+	matchedAlias  string
+}
+
+// SearchExactTitle resolves an authoritative title supplied by the user.
+// Filename-derived year/type are tie-breakers only and can never reject an exact title.
+func (c *Client) SearchExactTitle(ctx context.Context, title string, year int, preferredType MediaType, strictType bool, originalFilename string) (*MovieInfo, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	title = strings.TrimSpace(title)
+	if title == "" {
+		return nil, nil
+	}
+	norm := normalizeForCompare(title)
+	var best *scoredResult
+	endpoints := []struct {
+		name      string
+		typeValue MediaType
+	}{{"movie", MediaTypeMovie}, {"tv", MediaTypeTV}}
+	if strictType {
+		if preferredType == MediaTypeTV {
+			endpoints = endpoints[1:]
+		} else {
+			endpoints = endpoints[:1]
+		}
+	}
+	for _, ep := range endpoints {
+		searchURL := fmt.Sprintf("%s/search/%s?api_key=%s&query=%s&language=en-US", baseURL, ep.name, c.apiKey, url.QueryEscape(title))
+		var resp tmdbSearchResponse
+		if err := c.doRequestWithRetry(ctx, searchURL, &resp); err != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			return nil, err
+		}
+		for index, result := range resp.Results {
+			result.MediaType = string(ep.typeValue)
+			score, resultYear, exact := manualCandidateScore(result, norm, year, preferredType)
+			matchedAlias := ""
+			if exact && normalizeForCompare(coalesce(result.OriginalTitle, result.OriginalName)) != norm {
+				matchedAlias = coalesce(result.Title, result.Name)
+			}
+			if !exact && index < 3 {
+				aliases, aliasErr := c.getAlternativeTitles(ctx, result.ID, ep.typeValue)
+				if aliasErr == nil {
+					for _, alias := range aliases {
+						if normalizeForCompare(alias) == norm {
+							exact = true
+							matchedAlias = alias
+							score, resultYear = manualAliasScore(result, year, preferredType)
+							break
+						}
+					}
+				}
+			}
+			if !exact {
+				continue
+			}
+			candidate := &scoredResult{result: result, score: score, year: resultYear, matchedAlias: matchedAlias}
+			if best == nil || candidate.score > best.score || (candidate.score == best.score && candidate.result.ID < best.result.ID) {
+				best = candidate
+			}
+		}
+	}
+	if best == nil {
+		return nil, nil
+	}
+	detailType := MediaType(best.result.MediaType)
+	info, err := c.GetDetails(ctx, detailType, best.result.ID, originalFilename)
+	if err == nil && info != nil {
+		info.SearchTitle = title
+		info.MatchedAlias = best.matchedAlias
+	}
+	return info, err
+}
+
+func manualAliasScore(result tmdbSearchResult, targetYear int, preferredType MediaType) (int, int) {
+	// Every exact validated title has the same base authority.
+	result.Title = ""
+	result.Name = ""
+	result.OriginalTitle = ""
+	result.OriginalName = ""
+	resultYear := 0
+	date := coalesce(result.ReleaseDate, result.FirstAirDate)
+	if len(date) >= 4 {
+		resultYear, _ = strconv.Atoi(date[:4])
+	}
+	score := 1000 + int(result.Popularity*10)
+	if MediaType(result.MediaType) == preferredType {
+		score += 30
+	}
+	if targetYear > 0 && resultYear > 0 {
+		if diff := abs(targetYear - resultYear); diff == 0 {
+			score += 100
+		} else if diff == 1 {
+			score += 50
+		}
+	}
+	return score, resultYear
+}
+
+func manualCandidateScore(result tmdbSearchResult, normTitle string, targetYear int, preferredType MediaType) (int, int, bool) {
+	display := normalizeForCompare(coalesce(result.Title, result.Name))
+	original := normalizeForCompare(coalesce(result.OriginalTitle, result.OriginalName))
+	if display != normTitle && original != normTitle {
+		return 0, 0, false
+	}
+	resultYear := 0
+	date := coalesce(result.ReleaseDate, result.FirstAirDate)
+	if len(date) >= 4 {
+		resultYear, _ = strconv.Atoi(date[:4])
+	}
+	score := int(result.Popularity * 10)
+	score += 1000
+	if MediaType(result.MediaType) == preferredType {
+		score += 30
+	}
+	if targetYear > 0 && resultYear > 0 {
+		switch diff := abs(targetYear - resultYear); diff {
+		case 0:
+			score += 100
+		case 1:
+			score += 50
+		}
+	}
+	return score, resultYear, true
 }
 
 var genericParentDirs = map[string]bool{
@@ -72,10 +198,11 @@ func (c *Client) SearchWithFallbacks(
 		logger.Info("search_attempt",
 			slog.String("label", a.label),
 			slog.String("query", a.query),
-			slog.Int("year", a.year),
+			slog.Int("query_year", a.queryYear),
+			slog.Int("target_year", a.targetYear),
 		)
 
-		info, err := c.searchAndFetch(ctx, a.query, a.year, a.mediaType, originalFilename)
+		info, err := c.searchAndFetch(ctx, a.query, a.queryYear, a.targetYear, a.mediaType, originalFilename)
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
@@ -100,7 +227,7 @@ func (c *Client) SearchWithFallbacks(
 					slog.String("cyrillic", a.query),
 					slog.String("latin", latinQuery),
 				)
-				info, err = c.searchAndFetch(ctx, latinQuery, a.year, a.mediaType, originalFilename)
+				info, err = c.searchAndFetch(ctx, latinQuery, a.queryYear, a.targetYear, a.mediaType, originalFilename)
 				if err != nil {
 					if ctx.Err() != nil {
 						return nil, ctx.Err()
@@ -121,10 +248,11 @@ func (c *Client) SearchWithFallbacks(
 
 // searchAttempt — одна спроба пошуку
 type searchAttempt struct {
-	query     string
-	year      int
-	mediaType MediaType
-	label     string
+	query      string
+	queryYear  int
+	targetYear int
+	mediaType  MediaType
+	label      string
 }
 
 // buildAttempts формує розумний список спроб пошуку, використовуючи кандидатів
@@ -147,9 +275,9 @@ func buildAttempts(parsed ParsedFile, originalFilename, mediaRoot string) []sear
 		}
 
 		if year > 0 {
-			attempts = append(attempts, searchAttempt{title, year, mt, labelPrefix + "+рік"})
+			attempts = append(attempts, searchAttempt{title, year, year, mt, labelPrefix + "+рік"})
 		}
-		attempts = append(attempts, searchAttempt{title, 0, mt, labelPrefix + " без року"})
+		attempts = append(attempts, searchAttempt{title, 0, year, mt, labelPrefix + " без року"})
 	}
 
 	if len(candidates) > 0 {
@@ -158,7 +286,7 @@ func buildAttempts(parsed ParsedFile, originalFilename, mediaRoot string) []sear
 		if mt == MediaTypeMovie {
 			opposite = MediaTypeTV
 		}
-		attempts = append(attempts, searchAttempt{bestTitle, 0, opposite, "Протилежний тип"})
+		attempts = append(attempts, searchAttempt{bestTitle, 0, year, opposite, "Протилежний тип"})
 	}
 
 	// 🟢 Додаємо фоллбек на батьківську папку з низьким пріоритетом.
@@ -170,10 +298,11 @@ func buildAttempts(parsed ParsedFile, originalFilename, mediaRoot string) []sear
 		dirParsed := ParseFilename(parsed.ParentDir)
 		if dirParsed.CleanTitle != parsed.CleanTitle && len(dirParsed.CleanTitle) > 2 {
 			attempts = append(attempts, searchAttempt{
-				query:     dirParsed.CleanTitle,
-				year:      dirParsed.Year,
-				mediaType: dirParsed.MediaType,
-				label:     "Папка",
+				query:      dirParsed.CleanTitle,
+				queryYear:  dirParsed.Year,
+				targetYear: dirParsed.Year,
+				mediaType:  dirParsed.MediaType,
+				label:      "Папка",
 			})
 		}
 	}
@@ -206,6 +335,7 @@ func isScanRootParent(filename, mediaRoot string) bool {
 func (c *Client) searchAndFetch(
 	ctx context.Context,
 	query string,
+	queryYear int,
 	targetYear int,
 	preferredType MediaType,
 	originalFilename string,
@@ -219,9 +349,10 @@ func (c *Client) searchAndFetch(
 
 	// 🟢 Спочатку перевіряємо кеш пошуку (уніфікований формат з client.go)
 	cacheKey := SearchCacheKey{
-		query:     strings.ToLower(query),
-		year:      targetYear,
-		mediaType: preferredType,
+		query:      strings.ToLower(query),
+		queryYear:  queryYear,
+		targetYear: targetYear,
+		mediaType:  preferredType,
 	}
 	if val, ok := c.searchCache.Load(cacheKey); ok {
 		// safe to ignore: only *MovieInfo values are stored in searchCache.
@@ -255,22 +386,22 @@ LANG_LOOP:
 		switch preferredType {
 		case MediaTypeMovie:
 			yearParam := ""
-			if targetYear > 0 {
-				yearParam = fmt.Sprintf("&year=%d", targetYear)
+			if queryYear > 0 {
+				yearParam = fmt.Sprintf("&year=%d", queryYear)
 			}
 			endpoints = []searchEndpoint{{"movie", yearParam, "movie"}}
 		case MediaTypeTV:
 			yearParam := ""
-			if targetYear > 0 {
-				yearParam = fmt.Sprintf("&first_air_date_year=%d", targetYear)
+			if queryYear > 0 {
+				yearParam = fmt.Sprintf("&first_air_date_year=%d", queryYear)
 			}
 			endpoints = []searchEndpoint{{"tv", yearParam, "tv"}}
 		default:
 			movieYear := ""
 			tvYear := ""
-			if targetYear > 0 {
-				movieYear = fmt.Sprintf("&year=%d", targetYear)
-				tvYear = fmt.Sprintf("&first_air_date_year=%d", targetYear)
+			if queryYear > 0 {
+				movieYear = fmt.Sprintf("&year=%d", queryYear)
+				tvYear = fmt.Sprintf("&first_air_date_year=%d", queryYear)
 			}
 			endpoints = []searchEndpoint{
 				{"movie", movieYear, "movie"},
@@ -410,7 +541,11 @@ func (c *Client) rankResults(
 			slog.Int("score", scored.score),
 		)
 
-		if best == nil || scored.score > best.score {
+		// Мова та популярність є лише tie-breaker: вони не можуть перекрити
+		// суттєво кращий збіг назви, року й типу.
+		const identityTieWindow = 30
+		if best == nil || scored.identityScore > best.identityScore+identityTieWindow ||
+			(abs(scored.identityScore-best.identityScore) <= identityTieWindow && scored.score > best.score) {
 			best = &scored
 		}
 	}
@@ -547,6 +682,7 @@ func (c *Client) scoreResult(
 		(preferredType == MediaTypeTV && res.MediaType == "tv") {
 		score += ScoreMediaTypeMatch
 	}
+	identityScore := score
 
 	// --- Мова оригіналу ---
 	queryIsCyrillic := hasCyrillicChars(normQuery)
@@ -582,10 +718,11 @@ func (c *Client) scoreResult(
 		slog.Int("yearScore", yearScore),
 		slog.Int("langScore", langScore),
 		slog.Int("popBonus", popBonus),
+		slog.Int("identityScore", identityScore),
 		slog.Int("finalScore", score),
 	)
 
-	return scoredResult{result: res, score: score, year: resYear, matchedAlias: matchedAlias}
+	return scoredResult{result: res, score: score, identityScore: identityScore, year: resYear, matchedAlias: matchedAlias}
 }
 
 // matchScore повертає бал за збіг запиту з назвами результату.

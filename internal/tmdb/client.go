@@ -29,15 +29,17 @@ const (
 
 // SearchCacheKey — ключ для кешування результатів пошуку (запобігає подвійним запитам).
 type SearchCacheKey struct {
-	query     string
-	year      int
-	mediaType MediaType
+	query      string
+	queryYear  int
+	targetYear int
+	mediaType  MediaType
 }
 
 var (
 	ErrNotFound            = fmt.Errorf("resource not found")
 	reLatinOnly            = regexp.MustCompile(`^[a-zA-Z0-9\s\-\:\.,!?']+$`)
 	reInvalidFilenameChars = regexp.MustCompile(`[^\w\-]`)
+	reIMDBIDExact          = regexp.MustCompile(`(?i)^tt\d{7,10}$`)
 	homoglyphToLatin       = strings.NewReplacer(
 		"а", "a", "о", "o", "е", "e", "с", "c", "р", "p", "х", "x", "у", "y", "і", "i",
 		"А", "A", "О", "O", "Е", "E", "С", "C", "Р", "P", "Х", "X", "У", "Y", "І", "I",
@@ -204,9 +206,10 @@ func (c *Client) FetchFromFilename(ctx context.Context, filename string) (*Movie
 
 	// 🟢 ПЕРЕВІРКА КЕШУ: struct-ключ не потребує алокацій strings.ToLower або fmt.Sprintf
 	cacheKey := SearchCacheKey{
-		query:     strings.ToLower(parsed.CleanTitle),
-		year:      parsed.Year,
-		mediaType: parsed.MediaType,
+		query:      strings.ToLower(parsed.CleanTitle),
+		queryYear:  parsed.Year,
+		targetYear: parsed.Year,
+		mediaType:  parsed.MediaType,
 	}
 	if val, ok := c.searchCache.Load(cacheKey); ok {
 		// safe to ignore: only *MovieInfo values are stored in searchCache.
@@ -255,6 +258,19 @@ func (c *Client) tryFindByIMDB(ctx context.Context, imdbID, originalFilename str
 		return c.getTVDetails(ctx, resp.TvResults[0].ID, originalFilename)
 	}
 	return nil, nil
+}
+
+// FetchByIMDB resolves an authoritative IMDb identifier through TMDB /find.
+// It deliberately bypasses title scoring and filename-year verification.
+func (c *Client) FetchByIMDB(ctx context.Context, imdbID, originalFilename string) (*MovieInfo, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	imdbID = strings.ToLower(strings.TrimSpace(imdbID))
+	if !reIMDBIDExact.MatchString(imdbID) {
+		return nil, fmt.Errorf("invalid IMDb ID %q", imdbID)
+	}
+	return c.tryFindByIMDB(ctx, imdbID, originalFilename)
 }
 
 // FetchByCleanTitle — точка входу після Gemini.

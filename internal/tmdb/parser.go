@@ -14,10 +14,11 @@ import (
 // reSeason — детектор серіальних маркерів що go-ptn пропускає:
 // S07 (без епізоду), Season 3, сезон
 var (
-	reSeason        = regexp.MustCompile(`(?i)\bS(\d{2})\b(?:E\d{2})?|\bSeason\s*\d+\b|\bсезон\b`)
-	rePunctFallback = regexp.MustCompile(`[._]`)
-	reSpaceFallback = regexp.MustCompile(`\s{2,}`)
-	zeroReplacer    = strings.NewReplacer("O", "0", "О", "0", "o", "0", "о", "0")
+	reSeason         = regexp.MustCompile(`(?i)\bS(\d{2})\b(?:E\d{2})?|\bSeason\s*\d+\b|\bсезон\b`)
+	rePunctFallback  = regexp.MustCompile(`[._]`)
+	reSpaceFallback  = regexp.MustCompile(`\s{2,}`)
+	yearZeroReplacer = strings.NewReplacer("O", "0", "О", "0", "o", "0", "о", "0")
+	reYearLike       = regexp.MustCompile(`\b(?:19\d{2}|20\d{2}|2[OoОо]\d{2})\b`)
 	// reLangTag — знімає мовні теги виду [2xUkr,Eng] або [UKR_ENG] перед go-ptn.
 	// Без цього go-ptn плутає "2x" з лічильником сезону/епізоду і ставить IsMovie=false.
 	reLangTag = regexp.MustCompile(`(?i)\[\d*x?(?:Ukr|Eng|Rus|UA|EN|RU|UKR|ENG|RUS|DUB|VO|MVO|LF|MULTI)[^\]]*\]`)
@@ -50,7 +51,7 @@ func ParseFilename(fullPath string) ParsedFile {
 
 	// 🛡️ АГРЕСИВНИЙ ПОШУК РОКУ (Рятує від помилок go-ptn)
 	// Нормалізуємо одруківки: латинська та кирилична "О" замість нуля (напр. 2O15 -> 2015)
-	searchName := zeroReplacer.Replace(name)
+	searchName := normalizeYearLikeTokens(name)
 
 	manualYear := 0
 	maxAllowedYear := time.Now().Year() + 1 // +1 для ранніх WEB-релізів/анонсів
@@ -119,7 +120,7 @@ func ParseFilename(fullPath string) ParsedFile {
 		if len(words) > 0 {
 			lastWord := words[len(words)-1]
 			// Перевіряємо чи останнє слово після нормалізації нулів відповідає знайденому року
-			if mustAtoi(zeroReplacer.Replace(lastWord)) == manualYear {
+			if mustAtoi(normalizeYearLikeTokens(lastWord)) == manualYear {
 				title = strings.TrimSuffix(title, lastWord)
 				title = strings.TrimSpace(title)
 			}
@@ -136,6 +137,12 @@ func ParseFilename(fullPath string) ParsedFile {
 	result.TitleLang = detectLanguage(result.CleanTitle)
 
 	return result
+}
+
+// normalizeYearLikeTokens виправляє O/o/О/о лише у чотиризначному токені року.
+// Звичайні слова на кшталт Room або Doctor залишаються незмінними.
+func normalizeYearLikeTokens(s string) string {
+	return reYearLike.ReplaceAllStringFunc(s, yearZeroReplacer.Replace)
 }
 
 // --- ОПТИМІЗАЦІЯ: Регулярки скомпільовані один раз при запуску ---
