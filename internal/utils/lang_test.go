@@ -25,3 +25,19 @@ func TestCyrillicToLatinPassthrough(t *testing.T) {
 		t.Errorf("non-Cyrillic passthrough = %q", got)
 	}
 }
+
+func TestDetectTextLanguage(t *testing.T) {
+	tests := map[string]TextLanguage{
+		"Суперкопы 80":    LanguageRussian,
+		"Любимые фильмы":  LanguageRussian,
+		"Улюблені фільми": LanguageUkrainian,
+		"Нічний рейс":     LanguageUkrainian,
+		"Super Troopers":  LanguageEnglish,
+		"":                LanguageUnknown,
+	}
+	for text, want := range tests {
+		if got := DetectTextLanguage(text); got != want {
+			t.Errorf("DetectTextLanguage(%q)=%q, want %q", text, got, want)
+		}
+	}
+}

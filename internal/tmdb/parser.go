@@ -147,7 +147,7 @@ func normalizeYearLikeTokens(s string) string {
 
 // --- ОПТИМІЗАЦІЯ: Регулярки скомпільовані один раз при запуску ---
 var (
-	reResidual = regexp.MustCompile(`(?i)\b(ELEKTRI4KA|UNIONGANG|NNMClub|MegaPeer|stalkerok|new-team|HELLYWOOD|MIXTV|HRIME|HDClub|HDCLUB|LineFilm|grab777|vitolinform|ivanes|seleZen|JNS82|Dalemake|R\.G\.Resident|lexx256|Jaskier|Hurtom)`)
+	reResidual = regexp.MustCompile(`(?i)\b(ELEKTRI4KA|UNIONGANG|NNM-?Club|MegaPeer|stalkerok|new-team|HELLYWOOD|MIXTV|HRIME|HDClub|LineFilm|grab777|vitolinform|ivanes|seleZen|JNS82|Dalemake|R\.G\.Resident|lexx256|Jaskier|Hurtom|Open[ ._-]*Matte)\b`)
 	reLang     = regexp.MustCompile(`(?i)\b(Ukr|Eng|Rus|RUS|DUB|VO|MVO|LF|WEB)\b`)
 	reTrail    = regexp.MustCompile(`[\s\-_\[(\.,•:()\]]+$`)
 	reSpace    = regexp.MustCompile(`\s{2,}`)

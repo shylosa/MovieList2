@@ -407,7 +407,7 @@ shutdown) — рівно один app_closed в кінці сесії. FIX-17 (f
 | Manual title correction | ✅ Authoritative exact title with `Авто / Фільм / Серіал`; strict mode limits typed endpoint. |
 | Automatic ambiguity | ✅ Exact movie+TV disambiguation before fuzzy Gemini merge; `The Bureau` regression selects TV 62476. |
 | Scan metrics | ✅ `processed_total` is distinct from complete collection `disk_total`. |
-| Active Round 25 | ⏳ Planned in `CHECKLIST.md`; no Round 25 implementation has started. |
-| Tests | ✅ `go test ./... -count=10`, `go vet ./...`, `go build ./...`, `wails build` passed for Round 24 (verified 2026-09-11). |
+| Active Round 25 | 🧪 Implemented; production runtime verification and a small set of explicit checklist follow-ups remain. |
+| Tests | ✅ Round 25 automated verification is maintained in `CHECKLIST.md`; runtime-only checks require a fresh production log. |
 
 > For full change history see [CHANGELOG.md](./CHANGELOG.md).

@@ -108,7 +108,7 @@ func TestGeminiCascadeFallback(t *testing.T) {
 		t.Fatalf("Регресія: Каскад впав з помилкою замість перемикання: %v", err)
 	}
 
-	if len(results) == 0 || results[0].ENTitle != "Success Movie" {
+	if len(results) == 0 || results[0].ENTitle != "Success Movie" || results[0].Provider != "gemini" || results[0].Model != "gemini-success-flash-model" {
 		t.Errorf("Отримано неправильний результат від резервної моделі")
 	}
 
@@ -224,7 +224,7 @@ func TestRecognizeBulk_GeminiQuotaLockedFallsBackToGrok(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected RecognizeBulk to fall back to Grok when quota locked, got: %v", err)
 	}
-	if len(results) != 1 || results[0].ENTitle != "Enemy" {
+	if len(results) != 1 || results[0].ENTitle != "Enemy" || results[0].Provider != "grok" || results[0].Model != "grok-3-mini" {
 		t.Errorf("unexpected result: %+v", results)
 	}
 }

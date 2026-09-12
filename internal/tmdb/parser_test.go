@@ -90,6 +90,17 @@ func TestParseFilename(t *testing.T) {
 				TitleLang:    TitleLangLatin,
 			},
 		},
+		{
+			name:  "Open Matte release marker should be removed",
+			input: "Fracture.Open.Matte.2007.WEB-DLRip.by.Seven.avi",
+			expected: ParsedFile{
+				OriginalName: "Fracture.Open.Matte.2007.WEB-DLRip.by.Seven",
+				CleanTitle:   "Fracture",
+				Year:         2007,
+				MediaType:    MediaTypeMovie,
+				TitleLang:    TitleLangLatin,
+			},
+		},
 	}
 
 	for _, tt := range tests {

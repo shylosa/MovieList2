@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"database/sql"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -304,5 +305,46 @@ func TestSetAndGetState(t *testing.T) {
 	got = db.GetState(ctx, "nonexistent_key")
 	if got != "" {
 		t.Errorf("GetState(nonexistent) = %q; want empty string", got)
+	}
+}
+
+func TestCleanOrphanPostersReportsCheckedAndPreservesDatabasePaths(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	db, err := New(filepath.Join(dir, "movies.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.InitSchema(ctx); err != nil {
+		t.Fatal(err)
+	}
+	posters := filepath.Join(dir, "posters")
+	if err := os.Mkdir(posters, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	valid := filepath.Join(posters, "valid.jpg")
+	orphan := filepath.Join(posters, "orphan.jpg")
+	if err := os.WriteFile(valid, []byte("valid"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(orphan, []byte("orphan"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SaveMoviesBatch(ctx, []Movie{{Filename: "Valid.mkv", TmdbID: 1, LocalPosterPath: valid}}); err != nil {
+		t.Fatal(err)
+	}
+	checked, deleted, err := db.CleanOrphanPosters(ctx, posters)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if checked != 2 || deleted != 1 {
+		t.Fatalf("checked=%d deleted=%d", checked, deleted)
+	}
+	if _, err := os.Stat(valid); err != nil {
+		t.Fatalf("valid poster removed: %v", err)
+	}
+	if _, err := os.Stat(orphan); !os.IsNotExist(err) {
+		t.Fatalf("orphan still exists: %v", err)
 	}
 }

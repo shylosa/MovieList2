@@ -72,7 +72,14 @@ func (c *Client) SearchCandidates(ctx context.Context, title string, year int, r
 	if err := search(title, "en-US"); err != nil {
 		return nil, err
 	}
-	if len(out) == 0 {
+	hasYearCompatible := year == 0
+	for _, candidate := range out {
+		if candidate.Year == 0 || abs(candidate.Year-year) <= 1 {
+			hasYearCompatible = true
+			break
+		}
+	}
+	if len(out) == 0 || !hasYearCompatible {
 		transliterated := strings.TrimSpace(latinToCyrillic(title))
 		if transliterated != "" && !strings.EqualFold(transliterated, title) {
 			if err := search(transliterated, "uk-UA"); err != nil {

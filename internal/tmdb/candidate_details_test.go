@@ -40,6 +40,18 @@ func TestGetCandidateDetailsShortFilmAndCache(t *testing.T) {
 	}
 }
 
+func TestPreferredLocalizedTextPriorities(t *testing.T) {
+	if got := preferredLocalizedText("Суперкопы 80", "Super Troopers 80", "Суперкопы 80"); got != "Super Troopers 80" {
+		t.Fatalf("title source=%q", got)
+	}
+	if got := preferredLocalizedText("Russian plot with ы", "Російський опис", "English plot"); got != "Російський опис" {
+		t.Fatalf("plot source=%q", got)
+	}
+	if got := preferredLocalizedText("Українська назва", "English", "Русская"); got != "Українська назва" {
+		t.Fatalf("ukrainian source=%q", got)
+	}
+}
+
 type candidateDetailsTransport struct{ serverURL string }
 
 func (t *candidateDetailsTransport) RoundTrip(req *http.Request) (*http.Response, error) {

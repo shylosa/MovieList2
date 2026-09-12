@@ -447,10 +447,10 @@ func (db *DB) CleanMissingMovies(ctx context.Context, actualFiles []string) (int
 	return len(toDelete), nil
 }
 
-func (db *DB) CleanOrphanPosters(ctx context.Context, postersDir string) (int, error) {
+func (db *DB) CleanOrphanPosters(ctx context.Context, postersDir string) (int, int, error) {
 	rows, err := db.db.QueryContext(ctx, "SELECT local_poster_path, filename FROM movies")
 	if err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	defer rows.Close()
 	allValid := make(map[string]bool)
@@ -470,17 +470,22 @@ func (db *DB) CleanOrphanPosters(ctx context.Context, postersDir string) (int, e
 		}
 	}
 	if err := rows.Err(); err != nil {
-		return 0, err
+		return 0, 0, err
 	}
 	entries, err := os.ReadDir(postersDir)
 	if err != nil {
-		return 0, nil
+		return 0, 0, nil
 	}
+	checkedCount := 0
 	deletedCount := 0
 	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return checkedCount, deletedCount, err
+		}
 		if entry.IsDir() {
 			continue
 		}
+		checkedCount++
 		fullPath := filepath.Join(postersDir, entry.Name())
 		// safe to ignore: non-absolute paths still compare consistently as cleaned fallbacks.
 		absPath, _ := filepath.Abs(fullPath)
@@ -490,7 +495,7 @@ func (db *DB) CleanOrphanPosters(ctx context.Context, postersDir string) (int, e
 			}
 		}
 	}
-	return deletedCount, nil
+	return checkedCount, deletedCount, nil
 }
 
 func (db *DB) DeleteMovieByFilename(ctx context.Context, filename string) error {

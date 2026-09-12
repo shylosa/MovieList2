@@ -14,6 +14,10 @@ export function FixSelected(arg1) {
   return window['go']['main']['App']['FixSelected'](arg1);
 }
 
+export function GetAIModelCatalog() {
+  return window['go']['main']['App']['GetAIModelCatalog']();
+}
+
 export function GetAIModels() {
   return window['go']['main']['App']['GetAIModels']();
 }
@@ -72,6 +76,10 @@ export function SearchTMDBCandidates(arg1) {
 
 export function SelectMediaFolder() {
   return window['go']['main']['App']['SelectMediaFolder']();
+}
+
+export function SetAIModels(arg1) {
+  return window['go']['main']['App']['SetAIModels'](arg1);
 }
 
 export function StopScan() {

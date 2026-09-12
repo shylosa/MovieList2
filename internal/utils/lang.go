@@ -1,9 +1,21 @@
 package utils
 
 import (
+	"regexp"
 	"strings"
 	"unicode"
 )
+
+type TextLanguage string
+
+const (
+	LanguageUnknown   TextLanguage = "unknown"
+	LanguageUkrainian TextLanguage = "uk"
+	LanguageRussian   TextLanguage = "ru"
+	LanguageEnglish   TextLanguage = "en"
+)
+
+var russianWordMarkersRE = regexp.MustCompile(`(?i)\b(?:из|как|что|это|бы|вот)\b`)
 
 // cyrToLatDoubles — подвоєні кириличні приголосні (BGN/PCGN: зберігаються у латиниці).
 // Обробляються ПЕРЕД одинарними, щоб "тт" не розпався на два "t" через інший механізм.
@@ -91,29 +103,35 @@ func HasCyrillic(s string) bool {
 	return false
 }
 
-// IsGoodUkrainian returns true if the string looks like valid Ukrainian text.
-// It requires Cyrillic script, at least one Ukrainian-specific character, and no
-// strong Russian-only markers.
-func IsGoodUkrainian(s string) bool {
-	if s == "" {
-		return false
+// DetectTextLanguage classifies internet text conservatively by alphabet markers.
+func DetectTextLanguage(s string) TextLanguage {
+	if strings.TrimSpace(s) == "" {
+		return LanguageUnknown
 	}
-
+	if russianWordMarkersRE.MatchString(strings.ToLower(s)) {
+		return LanguageRussian
+	}
 	foundCyrillic := false
-	foundRussianLetter := false
-	foundUkrainianLetter := false
-
 	for _, r := range s {
 		if IsCyrillic(r) {
 			foundCyrillic = true
 		}
 		switch r {
 		case 'ы', 'э', 'ъ', 'ё', 'Ы', 'Э', 'Ъ', 'Ё':
-			foundRussianLetter = true
+			return LanguageRussian
 		case 'і', 'ї', 'є', 'ґ', 'І', 'Ї', 'Є', 'Ґ':
-			foundUkrainianLetter = true
+			return LanguageUkrainian
 		}
 	}
+	if foundCyrillic {
+		return LanguageUkrainian
+	}
+	return LanguageEnglish
+}
 
-	return foundCyrillic && !foundRussianLetter && foundUkrainianLetter
+// IsGoodUkrainian returns true if the string looks like valid Ukrainian text.
+// It requires Cyrillic script, at least one Ukrainian-specific character, and no
+// strong Russian-only markers.
+func IsGoodUkrainian(s string) bool {
+	return DetectTextLanguage(s) == LanguageUkrainian
 }

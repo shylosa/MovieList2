@@ -54,6 +54,8 @@ type tmdbTVDetails struct {
 func (c *Client) getMovieDetails(ctx context.Context, id int, originalFilename string) (*MovieInfo, error) {
 	langs := []string{"uk-UA", "ru-RU", "en-US"}
 	var finalInfo *MovieInfo
+	titles := make(map[string]string, len(langs))
+	plots := make(map[string]string, len(langs))
 
 	for _, lang := range langs {
 		if err := ctx.Err(); err != nil {
@@ -68,6 +70,8 @@ func (c *Client) getMovieDetails(ctx context.Context, id int, originalFilename s
 			}
 			continue
 		}
+		titles[lang] = strings.TrimSpace(d.Title)
+		plots[lang] = strings.TrimSpace(d.Overview)
 
 		if finalInfo == nil {
 			finalInfo = &MovieInfo{
@@ -104,7 +108,7 @@ func (c *Client) getMovieDetails(ctx context.Context, id int, originalFilename s
 		}
 
 		// Якщо зібрали якісні українські дані - можемо переривати цикл
-		if utils.IsGoodUkrainian(finalInfo.TitleUA) {
+		if utils.IsGoodUkrainian(titles["uk-UA"]) && plots["uk-UA"] != "" && utils.IsGoodUkrainian(plots["uk-UA"]) {
 			utils.LoggerWithTrace(ctx).Debug("localization_selected",
 				slog.String("language", lang),
 				slog.String("title", finalInfo.TitleUA),
@@ -117,6 +121,8 @@ func (c *Client) getMovieDetails(ctx context.Context, id int, originalFilename s
 	if finalInfo == nil {
 		return nil, fmt.Errorf("не вдалося отримати деталі фільму %d", id)
 	}
+	finalInfo.TitleUA = preferredLocalizedText(titles["uk-UA"], titles["en-US"], titles["ru-RU"])
+	finalInfo.Plot = preferredLocalizedText(plots["uk-UA"], plots["ru-RU"], plots["en-US"])
 
 	if finalInfo.PosterURL != "" && originalFilename != "" {
 		lp, err := c.DownloadPoster(ctx, finalInfo.PosterURL, fmt.Sprintf("%d_%s", finalInfo.TMDBID, originalFilename))
@@ -136,6 +142,8 @@ func (c *Client) getMovieDetails(ctx context.Context, id int, originalFilename s
 func (c *Client) getTVDetails(ctx context.Context, id int, originalFilename string) (*MovieInfo, error) {
 	langs := []string{"uk-UA", "ru-RU", "en-US"}
 	var finalInfo *MovieInfo
+	titles := make(map[string]string, len(langs))
+	plots := make(map[string]string, len(langs))
 
 	for _, lang := range langs {
 		if err := ctx.Err(); err != nil {
@@ -150,6 +158,8 @@ func (c *Client) getTVDetails(ctx context.Context, id int, originalFilename stri
 			}
 			continue
 		}
+		titles[lang] = strings.TrimSpace(d.Name)
+		plots[lang] = strings.TrimSpace(d.Overview)
 
 		if finalInfo == nil {
 			finalInfo = &MovieInfo{
@@ -181,7 +191,7 @@ func (c *Client) getTVDetails(ctx context.Context, id int, originalFilename stri
 			}
 		}
 
-		if utils.IsGoodUkrainian(finalInfo.TitleUA) {
+		if utils.IsGoodUkrainian(titles["uk-UA"]) && plots["uk-UA"] != "" && utils.IsGoodUkrainian(plots["uk-UA"]) {
 			utils.LoggerWithTrace(ctx).Debug("localization_selected",
 				slog.String("language", lang),
 				slog.String("title", finalInfo.TitleUA),
@@ -194,6 +204,8 @@ func (c *Client) getTVDetails(ctx context.Context, id int, originalFilename stri
 	if finalInfo == nil {
 		return nil, fmt.Errorf("не вдалося отримати деталі серіалу %d", id)
 	}
+	finalInfo.TitleUA = preferredLocalizedText(titles["uk-UA"], titles["en-US"], titles["ru-RU"])
+	finalInfo.Plot = preferredLocalizedText(plots["uk-UA"], plots["ru-RU"], plots["en-US"])
 
 	if finalInfo.PosterURL != "" && originalFilename != "" {
 		lp, err := c.DownloadPoster(ctx, finalInfo.PosterURL, fmt.Sprintf("%d_%s", finalInfo.TMDBID, originalFilename))
@@ -207,6 +219,21 @@ func (c *Client) getTVDetails(ctx context.Context, id int, originalFilename stri
 	}
 
 	return finalInfo, nil
+}
+
+func preferredLocalizedText(ukrainian, firstFallback, secondFallback string) string {
+	if !needsInternetTranslation(ukrainian) {
+		return ukrainian
+	}
+	if firstFallback != "" {
+		return firstFallback
+	}
+	return secondFallback
+}
+
+func needsInternetTranslation(text string) bool {
+	language := utils.DetectTextLanguage(text)
+	return language == utils.LanguageUnknown || language == utils.LanguageEnglish || language == utils.LanguageRussian
 }
 
 // GetDetails — публічний диспетчер: викликає movie або tv залежно від типу.

@@ -71,7 +71,7 @@ func Load() *Config {
 
 	// Єдине джерело істини — змінні оточення або дефолти. Жодної магії в коді!
 	return &Config{
-		AppVersion:         getEnvOrDefault("APP_VERSION", "2.2.0"),
+		AppVersion:         getEnvOrDefault("APP_VERSION", "2.3.0"),
 		GithubName:         getEnvOrDefault("GITHUB_NAME", "shylosa"),
 		GithubURL:          getEnvOrDefault("GITHUB_URL", "https://github.com/shylosa/MovieList2"),
 		GithubPageURL:      getEnvOrDefault("GITHUB_PAGE_URL", "https://shylosa.github.io/MovieList2"),

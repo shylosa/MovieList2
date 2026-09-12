@@ -2,6 +2,14 @@
 
 All notable changes to this project. Dates are approximate (session-based).
 
+## 12 вересня 2026 — runtime corrections Round 25
+
+* Candidate search більше не повторює помилкову назву з БД: без явної підказки використовується filename, а для невдалого або несумісного за роком транслітерату є typed fallback. Поточний TMDB-запис завжди показується першим.
+* Старі дублікати одного movie TMDB ID для різних назв позначаються як сумнівні; automatic ambiguous exact більше не втрачає `NeedsReview`.
+* Назви й описи проходять alphabet-based language validation; джерела перекладу мають окремі EN→RU та RU→EN пріоритети. Виправлено російські рядки на кшталт `Суперкопы 80`.
+* «Моделі ШІ» показує поточний каскад та повний сумісний список Gemini API, дозволяє зберегти checkbox-вибір у SQLite.
+* Кнопку candidate picker перейменовано на стримане `Варіанти`; production log за замовчуванням має INFO-рівень.
+
 ## Вересень 2026 — Audit Round 25
 
 * Додано versioned `ai_resolutions`, recognition provenance та окремий `NeedsReview` стан.

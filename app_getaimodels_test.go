@@ -1,19 +1,93 @@
 package main
 
 import (
+	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"path/filepath"
 	"testing"
 
 	"movielist-app/internal/config"
+	"movielist-app/internal/storage"
 )
 
 type rewriteTransport struct {
 	base   http.RoundTripper
 	scheme string
 	host   string
+}
+
+func TestAIModelCatalogSeparatesAndPersistsSelection(t *testing.T) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"models":[{"name":"models/gemini-2.5-flash","supportedGenerationMethods":["generateContent"]},{"name":"models/gemini-2.5-pro","supportedGenerationMethods":["generateContent"]},{"name":"models/gemini-embedding-001","supportedGenerationMethods":["embedContent"]}]}`)
+	})
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+	u, _ := url.Parse(srv.URL)
+	db, err := storage.New(filepath.Join(t.TempDir(), "models.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.InitSchema(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	app := NewApp()
+	app.ctx, app.db = context.Background(), db
+	app.cfg = &config.Config{GeminiAPIKey: "fake", GeminiModels: []string{"gemini-2.5-flash"}}
+	app.aiModelsHTTPClient = &http.Client{Transport: &rewriteTransport{base: http.DefaultTransport, scheme: u.Scheme, host: u.Host}}
+	catalog, err := app.GetAIModelCatalog()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(catalog.Current) != 1 || catalog.Current[0] != "gemini-2.5-flash" || len(catalog.Available) != 2 {
+		t.Fatalf("catalog=%+v", catalog)
+	}
+	if err := app.SetAIModels([]string{"gemini-2.5-pro"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := app.configuredGeminiModels(); len(got) != 1 || got[0] != "gemini-2.5-pro" {
+		t.Fatalf("persisted=%v", got)
+	}
+}
+
+func TestAIModelCatalogSeparatesCurrentAndAvailableAndPersistsSelection(t *testing.T) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"models":[{"name":"models/gemini-2.5-flash","supportedGenerationMethods":["generateContent"]},{"name":"models/gemini-2.5-pro","supportedGenerationMethods":["generateContent"]},{"name":"models/gemini-embedding-001","supportedGenerationMethods":["embedContent"]}]}`)
+	})
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+	u, _ := url.Parse(srv.URL)
+	db, err := storage.New(filepath.Join(t.TempDir(), "models.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	if err := db.InitSchema(ctx); err != nil {
+		t.Fatal(err)
+	}
+	app := NewApp()
+	app.ctx, app.db = ctx, db
+	app.cfg = &config.Config{GeminiAPIKey: "fake", GeminiModels: []string{"gemini-2.5-flash"}}
+	app.aiModelsHTTPClient = &http.Client{Transport: &rewriteTransport{base: http.DefaultTransport, scheme: u.Scheme, host: u.Host}}
+	catalog, err := app.GetAIModelCatalog()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(catalog.Current) != 1 || catalog.Current[0] != "gemini-2.5-flash" || len(catalog.Available) != 2 {
+		t.Fatalf("catalog=%+v", catalog)
+	}
+	if err := app.SetAIModels([]string{"gemini-2.5-pro"}); err != nil {
+		t.Fatal(err)
+	}
+	if got := app.configuredGeminiModels(); len(got) != 1 || got[0] != "gemini-2.5-pro" {
+		t.Fatalf("persisted=%v", got)
+	}
 }
 
 func (r *rewriteTransport) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -69,7 +143,7 @@ func TestGeminiModelDiscoveryFilteringAndConfiguredOrder(t *testing.T) {
 		want    bool
 	}{
 		{"gemini-2.5-flash", []string{"generateContent"}, true},
-		{"gemini-2.5-pro", []string{"generateContent"}, false},
+		{"gemini-2.5-pro", []string{"generateContent"}, true},
 		{"gemini-3.1-pro-preview", []string{"generateContent"}, false},
 		{"gemini-2.5-flash-preview-tts", []string{"generateContent"}, false},
 		{"gemini-embedding-001", []string{"embedContent"}, false},
@@ -120,7 +194,7 @@ func TestGetAIModelsDiscoveryFailureUsesConfiguredFallback(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(names) != 1 || names[0] != "gemini-2.5-flash" {
+	if len(names) != 2 || names[0] != "gemini-2.5-pro" || names[1] != "gemini-2.5-flash" {
 		t.Fatalf("fallback models = %v", names)
 	}
 }

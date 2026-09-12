@@ -18,7 +18,7 @@ func TestSearchTMDBCandidatesUsesFilenameInsteadOfWrongStoredTitle(t *testing.T)
 	ctx := context.Background()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		if r.URL.Query().Get("query") != "bureau" {
+		if r.URL.Query().Get("query") != "The Bureau" {
 			t.Errorf("query=%q", r.URL.Query().Get("query"))
 		}
 		if r.URL.Path == "/3/search/tv" {
@@ -37,7 +37,7 @@ func TestSearchTMDBCandidatesUsesFilenameInsteadOfWrongStoredTitle(t *testing.T)
 	if err := db.InitSchema(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.SaveMovie(ctx, storage.Movie{Filename: "bureau.mkv", TmdbID: 802663, TitleEN: "The Bureau", MediaType: "movie"}); err != nil {
+	if err := db.SaveMovie(ctx, storage.Movie{Filename: "The.Bureau.2015.mkv", TmdbID: 802663, TitleEN: "Wrong Stored Title", MediaType: "movie"}); err != nil {
 		t.Fatal(err)
 	}
 	cfg := &config.Config{TMDBAPIKey: "test", PostersDir: t.TempDir()}
@@ -47,11 +47,11 @@ func TestSearchTMDBCandidatesUsesFilenameInsteadOfWrongStoredTitle(t *testing.T)
 	app.ctx = ctx
 	app.db = db
 	app.tmdbClient = client
-	got, err := app.SearchTMDBCandidates(CandidateSearchRequest{Filename: "bureau.mkv", MediaType: "auto"})
+	got, err := app.SearchTMDBCandidates(CandidateSearchRequest{Filename: "The.Bureau.2015.mkv", MediaType: "auto"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 1 || got[0].TMDBID != 62476 {
+	if len(got) != 2 || got[0].TMDBID != 802663 || got[1].TMDBID != 62476 {
 		t.Fatalf("candidates=%+v", got)
 	}
 }
@@ -72,6 +72,13 @@ func TestDuplicateMovieIdentitiesNeedReview(t *testing.T) {
 		if !patch.NeedsReview || patch.ReviewReason != "duplicate_tmdb_id" {
 			t.Fatalf("patch=%+v", patch)
 		}
+	}
+}
+
+func TestMovieFromTMDBPreservesAmbiguousReviewState(t *testing.T) {
+	movie := movieFromTMDB("Ambiguous.2024.mkv", &tmdb.MovieInfo{TMDBID: 42, MediaType: tmdb.MediaTypeMovie, AmbiguousExact: true})
+	if !movie.NeedsReview || movie.ReviewReason != "ambiguous_exact" || movie.RecognitionSource != "tmdb" {
+		t.Fatalf("movie=%+v", movie)
 	}
 }
 

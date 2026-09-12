@@ -1,5 +1,19 @@
 export namespace main {
 	
+	export class AIModelCatalog {
+	    current: string[];
+	    available: string[];
+	
+	    static createFrom(source: any = {}) {
+	        return new AIModelCatalog(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.current = source["current"];
+	        this.available = source["available"];
+	    }
+	}
 	export class CandidateConfirmRequest {
 	    filename: string;
 	    tmdb_id: number;

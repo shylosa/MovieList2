@@ -84,6 +84,8 @@ type RecognizedTitle struct {
 	Status            string  `json:"status,omitempty"`
 	Reason            string  `json:"reason,omitempty"`
 	Confidence        float64 `json:"confidence"` // Оцінка впевненості 0.0-1.0, 0 якщо не вказано
+	Provider          string  `json:"-"`
+	Model             string  `json:"-"`
 }
 
 type Client struct {
@@ -174,8 +176,7 @@ func (c *Client) getModels() []string {
 			strings.Contains(mLower, "image") ||
 			strings.Contains(mLower, "preview") ||
 			strings.Contains(mLower, "robotics") ||
-			strings.Contains(mLower, "computer-use") ||
-			mLower == "gemini-2.5-pro" {
+			strings.Contains(mLower, "computer-use") {
 			continue
 		}
 		// Include only flash, pro, and lite
@@ -348,6 +349,10 @@ func (c *Client) requestWithRetry(ctx context.Context, prompt string) ([]Recogni
 		// Робимо запит до поточної моделі
 		result, err := c.makeRequest(ctx, prompt, modelName)
 		if err == nil {
+			for index := range result {
+				result[index].Provider = "gemini"
+				result[index].Model = modelName
+			}
 			// Успіх! Повертаємо результат, не чіпаємо інші моделі
 			if i > 0 {
 				utils.LoggerWithTrace(ctx).Info("gemini_backup_model_success", slog.String("model", modelName))
@@ -678,6 +683,13 @@ func (c *Client) grokRecognizeFallback(ctx context.Context, prompt string) ([]Re
 	result, err := parseRecognizeResponse(raw)
 	if err != nil {
 		return nil, fmt.Errorf("grok recognize parse: %w", err)
+	}
+	for index := range result {
+		result[index].Provider = "grok"
+		result[index].Model = c.cfg.GrokModel
+		if result[index].Model == "" {
+			result[index].Model = "grok-3-mini"
+		}
 	}
 	utils.LoggerWithTrace(ctx).Info("grok_recognize_success", slog.Int("results_count", len(result)))
 	return result, nil

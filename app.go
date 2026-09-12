@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -20,9 +19,9 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-	"unicode"
 
 	"golang.org/x/sync/singleflight"
+	"google.golang.org/genai"
 
 	"movielist-app/internal/ai"
 	"movielist-app/internal/config"
@@ -44,6 +43,7 @@ type App struct {
 	tmdbClient         *tmdb.Client
 	aiClient           *ai.Client
 	aiModelsCache      []string
+	discoveredAIModels []string
 	aiModelsHTTPClient *http.Client
 	modelsMutex        sync.RWMutex
 	modelsGroup        singleflight.Group
@@ -67,6 +67,11 @@ type scanResult struct {
 	needsGemini bool
 }
 
+type AIModelCatalog struct {
+	Current   []string `json:"current"`
+	Available []string `json:"available"`
+}
+
 // aiConfidenceThreshold — єдиний поріг для Gemini, L2-кешу та merge.
 const aiConfidenceThreshold = 0.55
 const recognitionPipelineVersion = 25
@@ -74,7 +79,6 @@ const recognitionPipelineVersion = 25
 // geminiTMDBVerifyMinJW — мінімальна схожість EN-назви Gemini і TMDB після верифікації.
 const geminiTMDBVerifyMinJW = 0.85
 
-var russianMarkersRE = regexp.MustCompile(`(?i)\b(?:из|как|что|это|бы|вот)\b`)
 var groupedEpisodeRE = regexp.MustCompile(`(?i)(?:s\d{1,2}e\d{1,3}|\b(?:season|episode|сезон|серія)\s*\d+\b|(?:^|[. _-])(\d{1,3})(?:[. _-]|$))`)
 
 var (
@@ -468,6 +472,72 @@ func (a *App) GetAIModels() ([]string, error) {
 	return names, err
 }
 
+// GetAIModelCatalog refreshes Gemini's model list and returns configured models
+// separately from every compatible model reported by the API.
+func (a *App) GetAIModelCatalog() (AIModelCatalog, error) {
+	a.modelsMutex.Lock()
+	a.aiModelsCache = nil
+	a.discoveredAIModels = nil
+	a.modelsMutex.Unlock()
+	current, err := a.fetchAIModels(a.ctx)
+	a.modelsMutex.RLock()
+	available := append([]string(nil), a.discoveredAIModels...)
+	a.modelsMutex.RUnlock()
+	return AIModelCatalog{Current: current, Available: available}, err
+}
+
+func (a *App) SetAIModels(names []string) error {
+	if len(names) == 0 {
+		return fmt.Errorf("select at least one Gemini model")
+	}
+	catalog, err := a.GetAIModelCatalog()
+	if err != nil {
+		return err
+	}
+	available := make(map[string]bool, len(catalog.Available))
+	for _, name := range catalog.Available {
+		available[name] = true
+	}
+	selected := make([]string, 0, len(names))
+	seen := make(map[string]bool, len(names))
+	for _, name := range names {
+		name = strings.TrimSpace(name)
+		if !available[name] || seen[name] {
+			continue
+		}
+		seen[name] = true
+		selected = append(selected, name)
+	}
+	if len(selected) == 0 {
+		return fmt.Errorf("selected models are not available for generateContent")
+	}
+	encoded, err := json.Marshal(selected)
+	if err != nil {
+		return err
+	}
+	if err := a.db.SetState(a.ctx, "selected_gemini_models", string(encoded)); err != nil {
+		return err
+	}
+	if a.aiClient != nil {
+		a.aiClient.SetModels(selected)
+	}
+	a.modelsMutex.Lock()
+	a.aiModelsCache = append([]string(nil), selected...)
+	a.modelsMutex.Unlock()
+	slog.Info("ai_models_selection_updated", slog.Int("selected", len(selected)))
+	return nil
+}
+
+func (a *App) configuredGeminiModels() []string {
+	if a.db != nil {
+		var selected []string
+		if raw := a.db.GetState(a.ctx, "selected_gemini_models"); raw != "" && json.Unmarshal([]byte(raw), &selected) == nil && len(selected) > 0 {
+			return selected
+		}
+	}
+	return append([]string(nil), a.cfg.GeminiModels...)
+}
+
 // fetchAIModels is the internal implementation that accepts a context.
 // This allows internal callers (like RunScan warmup) to pass their
 // scan-specific context while keeping the exported signature RPC-friendly.
@@ -492,49 +562,32 @@ func (a *App) fetchAIModels(ctx context.Context) ([]string, error) {
 
 	// safe to ignore: singleflight shared flag is not needed by callers.
 	value, err, _ := a.modelsGroup.Do("ai_models", func() (interface{}, error) {
-		url := "https://generativelanguage.googleapis.com/v1beta/models"
 		client := a.aiModelsHTTPClient
 		if client == nil {
 			client = &http.Client{Timeout: 10 * time.Second}
 		}
-		// Use original context so that scan cancellation immediately aborts the HTTP request.
-		req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+		genClient, err := genai.NewClient(ctx, &genai.ClientConfig{
+			APIKey: a.cfg.GeminiAPIKey, Backend: genai.BackendGeminiAPI, HTTPClient: client,
+		})
 		if err != nil {
 			return nil, err
 		}
-		req.Header.Set("x-goog-api-key", a.cfg.GeminiAPIKey)
-		resp, err := client.Do(req)
-		if err != nil {
-			return nil, err
-		}
-		defer resp.Body.Close()
-
-		if resp.StatusCode != http.StatusOK {
-			body, readErr := io.ReadAll(resp.Body)
-			if readErr != nil {
-				slog.Warn("ai_models_error_body_read_failed", slog.Any("error", readErr))
+		discovered := make(map[string]bool)
+		for model, listErr := range genClient.Models.All(ctx) {
+			if listErr != nil {
+				return nil, listErr
 			}
-			return nil, fmt.Errorf("API request failed with status %d: %s", resp.StatusCode, string(body))
-		}
-
-		var result struct {
-			Models []struct {
-				Name                       string   `json:"name"`
-				SupportedGenerationMethods []string `json:"supportedGenerationMethods"`
-			} `json:"models"`
-		}
-		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-			return nil, err
-		}
-
-		discovered := make(map[string]bool, len(result.Models))
-		for _, m := range result.Models {
-			name := strings.TrimPrefix(m.Name, "models/")
-			if isUsableGeminiModel(name, m.SupportedGenerationMethods) {
+			name := strings.TrimPrefix(model.Name, "models/")
+			if isUsableGeminiModel(name, model.SupportedActions) {
 				discovered[name] = true
 			}
 		}
-		names := selectConfiguredGeminiModels(a.cfg.GeminiModels, discovered)
+		discoveredNames := make([]string, 0, len(discovered))
+		for name := range discovered {
+			discoveredNames = append(discoveredNames, name)
+		}
+		sort.Strings(discoveredNames)
+		names := selectConfiguredGeminiModels(a.configuredGeminiModels(), discovered)
 		if len(names) == 0 {
 			return nil, fmt.Errorf("no configured Gemini generateContent models are available")
 		}
@@ -551,13 +604,15 @@ func (a *App) fetchAIModels(ctx context.Context) ([]string, error) {
 		// Cache includes Grok suffix so all callers see a consistent list.
 		a.modelsMutex.Lock()
 		a.aiModelsCache = append([]string(nil), names...)
+		a.discoveredAIModels = append([]string(nil), discoveredNames...)
 		a.modelsMutex.Unlock()
 
 		return append([]string(nil), names...), nil
 	})
 	if err != nil {
-		fallback := make([]string, 0, len(a.cfg.GeminiModels))
-		for _, name := range a.cfg.GeminiModels {
+		configured := a.configuredGeminiModels()
+		fallback := make([]string, 0, len(configured))
+		for _, name := range configured {
 			if isUsableGeminiModel(name, []string{"generateContent"}) {
 				fallback = append(fallback, name)
 			}
@@ -584,8 +639,7 @@ func isUsableGeminiModel(name string, methods []string) bool {
 	lower := strings.ToLower(name)
 	if !strings.HasPrefix(lower, "gemini-") || strings.Contains(lower, "preview") ||
 		strings.Contains(lower, "embedding") || strings.Contains(lower, "image") ||
-		strings.Contains(lower, "tts") || strings.Contains(lower, "audio") ||
-		lower == "gemini-2.5-pro" {
+		strings.Contains(lower, "tts") || strings.Contains(lower, "audio") {
 		return false
 	}
 	for _, method := range methods {
@@ -838,12 +892,12 @@ func (a *App) backfillMissingRatings(ctx context.Context) error {
 
 func (a *App) cleanOrphanPostersAfterSuccess(ctx context.Context) {
 	utils.LoggerWithTrace(ctx).Info("poster_cleanup_started")
-	deleted, err := a.db.CleanOrphanPosters(ctx, a.cfg.PostersDir)
+	checked, deleted, err := a.db.CleanOrphanPosters(ctx, a.cfg.PostersDir)
 	if err != nil {
 		utils.LoggerWithTrace(ctx).Warn("poster_cleanup_failed", slog.Any("error", err))
 		return
 	}
-	utils.LoggerWithTrace(ctx).Info("poster_cleanup_completed", slog.Int("deleted", deleted))
+	utils.LoggerWithTrace(ctx).Info("poster_cleanup_completed", slog.Int("checked", checked), slog.Int("deleted", deleted))
 }
 
 // StopScan зупиняє поточний процес сканування
@@ -1237,10 +1291,13 @@ func (a *App) processGeminiQueue(ctx context.Context, paths []string, aiClient *
 					MediaType:        rec.MediaType,
 					Confidence:       rec.Confidence,
 					PipelineVersion:  recognitionPipelineVersion,
-					Provider:         "gemini",
+					Provider:         rec.Provider,
+					Model:            rec.Model,
 				}); err != nil {
 					utils.LoggerWithTrace(ctx).Warn("save_ai_resolution_failed",
 						slog.String("file", fname), slog.Any("error", err))
+				} else {
+					utils.LoggerWithTrace(ctx).Info("ai_cache_updated", slog.String("file", fname), slog.Int("pipeline_version", recognitionPipelineVersion))
 				}
 				recognizedFiles = append(recognizedFiles, fname)
 			}
@@ -1423,7 +1480,10 @@ func (a *App) mergeGeminiWithTMDB(ctx context.Context, filePath string, rec ai.R
 	movie.MediaType = string(tmdbInfo.MediaType)
 	movie.VoteAverage = tmdbInfo.VoteAverage
 	movie.VoteCount = tmdbInfo.VoteCount
-	movie.RecognitionSource = "gemini"
+	movie.RecognitionSource = rec.Provider
+	if movie.RecognitionSource == "" {
+		movie.RecognitionSource = "gemini"
+	}
 	movie.RecognitionConfidence = rec.Confidence
 	movie.VerificationScore = strongJW
 	if tmdbInfo.AmbiguousExact || strongJW < tmdb.ReviewVerificationThreshold {
@@ -1698,6 +1758,27 @@ func (a *App) SearchTMDBCandidates(request CandidateSearchRequest) ([]tmdb.TMDBC
 	if err != nil {
 		return nil, err
 	}
+	if current, getErr := a.db.GetMovieByFilename(ctx, request.Filename); getErr != nil {
+		return nil, fmt.Errorf("candidate lookup current movie: %w", getErr)
+	} else if current != nil && current.TmdbID > 0 && (current.MediaType == "movie" || current.MediaType == "tv") {
+		currentYear, _ := strconv.Atoi(current.Year)
+		currentCandidate := tmdb.TMDBCandidate{
+			TMDBID: current.TmdbID, Title: current.TitleUA, OriginalTitle: current.TitleEN,
+			Year: currentYear, MediaType: tmdb.MediaType(current.MediaType), Exact: true,
+		}
+		merged := make([]tmdb.TMDBCandidate, 0, 5)
+		merged = append(merged, currentCandidate)
+		for _, candidate := range candidates {
+			if candidate.TMDBID == currentCandidate.TMDBID && candidate.MediaType == currentCandidate.MediaType {
+				continue
+			}
+			merged = append(merged, candidate)
+			if len(merged) == 5 {
+				break
+			}
+		}
+		candidates = merged
+	}
 	utils.LoggerWithTrace(ctx).Info("candidate_search_completed", slog.String("file", request.Filename), slog.Int("count", len(candidates)))
 	return candidates, nil
 }
@@ -1793,7 +1874,15 @@ func (a *App) ConfirmTMDBCandidate(request CandidateConfirmRequest) error {
 	if err := a.db.SaveMoviesBatch(ctx, []storage.Movie{*existing}); err != nil {
 		return err
 	}
-	return a.db.DeleteAIResolution(ctx, request.Filename)
+	utils.LoggerWithTrace(ctx).Info("candidate_confirmed",
+		slog.String("file", request.Filename), slog.Int("tmdb_id", request.TMDBID), slog.String("media_type", string(mediaType)))
+	if err := a.db.DeleteAIResolution(ctx, request.Filename); err != nil {
+		return err
+	}
+	if a.aiClient != nil && a.movieInfoNeedsTranslation(info) {
+		a.processTranslationQueue(ctx, []string{request.Filename}, a.aiClient)
+	}
+	return nil
 }
 
 func (a *App) GetTMDBCandidateDetails(request CandidateConfirmRequest) (*tmdb.CandidateDetails, error) {
@@ -1806,7 +1895,7 @@ func (a *App) GetTMDBCandidateDetails(request CandidateConfirmRequest) (*tmdb.Ca
 	if err != nil {
 		return nil, err
 	}
-	utils.LoggerWithTrace(ctx).Info("candidate_details_loaded", slog.Int("tmdb_id", request.TMDBID), slog.String("media_type", string(mediaType)))
+	utils.LoggerWithTrace(ctx).Debug("candidate_details_loaded", slog.Int("tmdb_id", request.TMDBID), slog.String("media_type", string(mediaType)))
 	return details, nil
 }
 
@@ -1890,7 +1979,7 @@ func (a *App) FixSelected(selected []FixRequest) {
 			continue
 		}
 		succeeded++
-		if m.TitleUA != "" && m.Plot != "" && utils.HasCyrillic(m.TitleUA) {
+		if m.TitleUA != "" && m.Plot != "" && !needsTranslation(m.TitleUA) && !needsTranslation(m.Plot) {
 			a.logFront(fmt.Sprintf("🎯 [TMDB Істина] Пропуск черги локалізації для '%s' (офіційний переклад та опис вже є)", m.TitleUA))
 			continue
 		}
@@ -2072,10 +2161,13 @@ func (a *App) updateMovieWithMediaType(ctx context.Context, filename, hint, requ
 			MediaType:        rec.MediaType,
 			Confidence:       rec.Confidence,
 			PipelineVersion:  recognitionPipelineVersion,
-			Provider:         "gemini",
+			Provider:         rec.Provider,
+			Model:            rec.Model,
 		}); err != nil {
 			slog.Warn("save_ai_resolution_failed",
 				slog.String("file", filename), slog.Any("error", err))
+		} else {
+			utils.LoggerWithTrace(ctx).Info("ai_cache_updated", slog.String("file", filename), slog.Int("pipeline_version", recognitionPipelineVersion))
 		}
 	}
 
@@ -2128,22 +2220,29 @@ func (a *App) filterUnprocessed(ctx context.Context, diskPaths []string) []strin
 
 // movieFromTMDB — створює storage.Movie з результату TMDB (без Gemini)
 func movieFromTMDB(fname string, info *tmdb.MovieInfo) storage.Movie {
-	return storage.Movie{
-		Filename:          fname,
-		TmdbID:            info.TMDBID,
-		TitleUA:           info.TitleUA,
-		TitleEN:           info.TitleEN,
-		Year:              info.Year,
-		Plot:              info.Plot,
-		Genres:            info.Genres,
-		Cast:              info.Cast,
-		PosterURL:         info.PosterURL,
-		LocalPosterPath:   info.LocalPosterPath,
-		MediaType:         string(info.MediaType),
-		RecognitionSource: "tmdb",
-		VoteAverage:       info.VoteAverage,
-		VoteCount:         info.VoteCount,
+	movie := storage.Movie{
+		Filename:              fname,
+		TmdbID:                info.TMDBID,
+		TitleUA:               info.TitleUA,
+		TitleEN:               info.TitleEN,
+		Year:                  info.Year,
+		Plot:                  info.Plot,
+		Genres:                info.Genres,
+		Cast:                  info.Cast,
+		PosterURL:             info.PosterURL,
+		LocalPosterPath:       info.LocalPosterPath,
+		MediaType:             string(info.MediaType),
+		RecognitionSource:     "tmdb",
+		RecognitionConfidence: 1,
+		VerificationScore:     1,
+		VoteAverage:           info.VoteAverage,
+		VoteCount:             info.VoteCount,
 	}
+	if info.AmbiguousExact {
+		movie.NeedsReview = true
+		movie.ReviewReason = "ambiguous_exact"
+	}
+	return movie
 }
 
 // applyTMDBToMovie — перезаписує поля movie з tmdbInfo (для ручного виправлення)
@@ -2264,53 +2363,8 @@ func (a *App) movieInfoNeedsTranslation(info *tmdb.MovieInfo) bool {
 
 // needsTranslation повертає true, якщо текст треба перекласти (англійська або підозріла кирилиця)
 func needsTranslation(s string) bool {
-	if s == "" {
-		return true // Порожнечу завжди наповнюємо
-	}
-
-	sLower := strings.ToLower(s)
-
-	// 1. ПЕРЕВІРКА НА СЛОВА-МАРКЕРИ (Російські слова, що пишуться спільними літерами)
-	// Використовуємо регулярний вираз з межами слова, щоб уникнути хибних спрацьовувань на підрядках.
-	if russianMarkersRE.MatchString(sLower) {
-		return true
-	}
-
-	foundCyrillic := false
-	foundRussianLetter := false
-	foundUkrainianLetter := false
-
-	for _, r := range s {
-		if unicode.Is(unicode.Cyrillic, r) {
-			foundCyrillic = true
-		}
-		// Яскраві маркери російської (ы, э, ъ, ё)
-		if r == 'ы' || r == 'э' || r == 'ъ' || r == 'ё' || r == 'Ы' || r == 'Э' || r == 'Ъ' || r == 'Ё' {
-			foundRussianLetter = true
-		}
-		// Яскраві маркери української (і, ї, є, ґ)
-		if r == 'і' || r == 'ї' || r == 'є' || r == 'ґ' || r == 'І' || r == 'Ї' || r == 'Є' || r == 'Ґ' {
-			foundUkrainianLetter = true
-		}
-	}
-
-	// 2. Немає кирилиці (англійська) -> перекладаємо
-	if !foundCyrillic {
-		return true
-	}
-	// 3. Є специфічні російські літери -> перекладаємо
-	if foundRussianLetter {
-		return true
-	}
-
-	// 5. СІРА ЗОНА: якщо немає специфічних українських літер (і, ї, є, ґ),
-	// але є кирилиця та немає російських маркерів — скоріш за все OK.
-	// Якщо є російські маркери — вже обробили вище.
-	if !foundUkrainianLetter {
-		return len([]rune(strings.TrimSpace(s))) > 5
-	}
-
-	return false
+	lang := utils.DetectTextLanguage(s)
+	return lang == utils.LanguageUnknown || lang == utils.LanguageEnglish || lang == utils.LanguageRussian
 }
 
 func (a *App) processTranslationQueue(ctx context.Context, filenames []string, aiClient *ai.Client) {

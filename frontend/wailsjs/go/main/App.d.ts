@@ -10,6 +10,8 @@ export function DeleteMovie(arg1:string):Promise<void>;
 
 export function FixSelected(arg1:Array<main.FixRequest>):Promise<void>;
 
+export function GetAIModelCatalog():Promise<main.AIModelCatalog>;
+
 export function GetAIModels():Promise<Array<string>>;
 
 export function GetAppVersion():Promise<string>;
@@ -39,6 +41,8 @@ export function RunScan():Promise<void>;
 export function SearchTMDBCandidates(arg1:main.CandidateSearchRequest):Promise<Array<tmdb.TMDBCandidate>>;
 
 export function SelectMediaFolder():Promise<string>;
+
+export function SetAIModels(arg1:Array<string>):Promise<void>;
 
 export function StopScan():Promise<void>;
 

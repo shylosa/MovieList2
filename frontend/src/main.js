@@ -1,6 +1,6 @@
 import './style.css';
 
-import { GetAppVersion, GetMovies, GetStats, RunScan, StopScan, GetAIModels, OpenLogs, FixSelected, SearchTMDBCandidates, ConfirmTMDBCandidate, GetTMDBCandidateDetails, SyncToCloud, SyncToGitHub, OpenShowcase, OpenSheet, OpenGoogleSheet, OpenGitHubRepo, OpenGitHubPage, OpenURL, DeleteMovie, SelectMediaFolder } from '../wailsjs/go/main/App.js';
+import { GetAppVersion, GetMovies, GetStats, RunScan, StopScan, GetAIModelCatalog, SetAIModels, OpenLogs, FixSelected, SearchTMDBCandidates, ConfirmTMDBCandidate, GetTMDBCandidateDetails, SyncToCloud, SyncToGitHub, OpenShowcase, OpenSheet, OpenGoogleSheet, OpenGitHubRepo, OpenGitHubPage, OpenURL, DeleteMovie, SelectMediaFolder } from '../wailsjs/go/main/App.js';
 import { Quit, WindowMinimise, WindowToggleMaximise, EventsOn } from '../wailsjs/runtime/runtime.js';
 import logoUrl from './assets/images/appicon.png';
 import { candidateConfirmPayload, candidateSearchPayload, fixPayload, reviewReasonLabel, mediaTypeLabel, candidateTMDBURL, formatRuntime, formatTMDBRating } from './editor-state.js';
@@ -261,15 +261,32 @@ document.getElementById('btn-select-folder').onclick = async () => {
 
 document.getElementById('btn-models').onclick = async () => {
     switchTab('overview', 'Моделі ШІ');
-    consoleBody.innerHTML = "";
+	consoleBody.replaceChildren();
     document.getElementById('console-status').innerText = "Запит до API...";
-    logToConsole("Отримання списку моделей...");
+	const loading = document.createElement('div'); loading.textContent = 'Отримання списку моделей Gemini…'; consoleBody.appendChild(loading);
     try {
-        const models = await GetAIModels();
-        logToConsole("✅ Доступні моделі:\n" + models.join("\n"), "log-success");
+		const catalog = await GetAIModelCatalog();
+		consoleBody.replaceChildren();
+		const currentTitle = document.createElement('h3'); currentTitle.textContent = 'Поточні моделі';
+		const currentList = document.createElement('div'); currentList.className = 'model-current-list';
+		for (const name of catalog.current || []) { const item = document.createElement('div'); item.textContent = name; currentList.appendChild(item); }
+		const availableTitle = document.createElement('h3'); availableTitle.textContent = 'Доступні через Gemini API';
+		const form = document.createElement('div'); form.className = 'model-picker';
+		const current = new Set((catalog.current || []).filter(name => !name.includes(' (fallback)')));
+		for (const name of catalog.available || []) {
+			const label = document.createElement('label');
+			const checkbox = document.createElement('input'); checkbox.type = 'checkbox'; checkbox.value = name; checkbox.checked = current.has(name);
+			const text = document.createElement('span'); text.textContent = name;
+			label.append(checkbox, text); form.appendChild(label);
+		}
+		const save = document.createElement('button'); save.type = 'button'; save.textContent = 'Зберегти вибір'; save.className = 'model-save';
+		save.onclick = async () => {
+			const selected = Array.from(form.querySelectorAll('input:checked'), input => input.value);
+			try { await SetAIModels(selected); document.getElementById('console-status').innerText = 'Вибір збережено'; }
+			catch (error) { document.getElementById('console-status').innerText = `Помилка: ${error}`; }
+		};
+		consoleBody.append(currentTitle, currentList, availableTitle, form, save);
         document.getElementById('console-status').innerText = "Готово";
-
-        consoleBody.scrollTop = 0;
     } catch (e) {
         logToConsole("❌ Помилка: " + e, "log-warn");
         document.getElementById('console-status').innerText = "Помилка";
@@ -506,8 +523,7 @@ function renderMovies(movies) {
 		candidatesButton.type = 'button';
 		candidatesButton.className = 'btn-candidates';
 		candidatesButton.dataset.filename = m.filename;
-		candidatesButton.dataset.title = m.title_en || m.title_ua || '';
-		candidatesButton.textContent = 'Знайти варіанти';
+		candidatesButton.textContent = 'Варіанти';
 		hintCol.appendChild(candidatesButton);
 
 		row.append(checkboxCol, fileCol, arrowCol, yearCol, titleCol, mediaTypeCol, hintCol);
