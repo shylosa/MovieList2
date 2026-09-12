@@ -11,8 +11,10 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode"
 
@@ -88,7 +90,12 @@ type Client struct {
 	altTitlesCache sync.Map
 
 	// searchCache — кеш результатів пошуку (query+year+type)
-	searchCache sync.Map
+	searchCache           sync.Map
+	detailsCache          sync.Map
+	candidateDetailsCache sync.Map
+	searchCalls           atomic.Int64
+	detailsCalls          atomic.Int64
+	cacheHits             atomic.Int64
 }
 
 func NewClient(cfg *config.Config) *Client {
@@ -138,7 +145,18 @@ func (c *Client) ClearCaches() {
 		c.altTitlesCache.Delete(key)
 		return true
 	})
+	c.detailsCache.Range(func(key, value any) bool { c.detailsCache.Delete(key); return true })
+	c.candidateDetailsCache.Range(func(key, value any) bool { c.candidateDetailsCache.Delete(key); return true })
+	c.searchCalls.Store(0)
+	c.detailsCalls.Store(0)
+	c.cacheHits.Store(0)
 	slog.Info("tmdb_caches_cleared")
+}
+
+type RequestMetrics struct{ SearchCalls, DetailsCalls, CacheHits int64 }
+
+func (c *Client) RequestMetrics() RequestMetrics {
+	return RequestMetrics{c.searchCalls.Load(), c.detailsCalls.Load(), c.cacheHits.Load()}
 }
 
 func (c *Client) waitForRateLimit(ctx context.Context) error {
@@ -192,6 +210,13 @@ func (c *Client) FetchFromFilename(ctx context.Context, filename string) (*Movie
 		return nil, err
 	}
 	parsed := ParseFilename(filename)
+	return c.FetchFromParsed(ctx, parsed, filename)
+}
+
+func (c *Client) FetchFromParsed(ctx context.Context, parsed ParsedFile, filename string) (*MovieInfo, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 
 	// 🟢 ДОДАНО: Очищуємо омогліфи одразу після парсингу
 	parsed.CleanTitle = resolveHomoglyphs(parsed.CleanTitle)
@@ -602,6 +627,12 @@ func (c *Client) doRequest(ctx context.Context, url string, target any) error {
 	if err != nil {
 		return fmt.Errorf("doRequest: %w", err)
 	}
+	path := req.URL.Path
+	if strings.HasSuffix(path, "/search/movie") || strings.HasSuffix(path, "/search/tv") {
+		c.searchCalls.Add(1)
+	} else if isDetailsRequestPath(path) {
+		c.detailsCalls.Add(1)
+	}
 
 	resp, err := c.client.Do(req)
 	if err != nil {
@@ -624,6 +655,15 @@ func (c *Client) doRequest(ctx context.Context, url string, target any) error {
 		return err
 	}
 	return nil
+}
+
+func isDetailsRequestPath(path string) bool {
+	parts := strings.Split(strings.Trim(path, "/"), "/")
+	if len(parts) != 3 || parts[0] != "3" || (parts[1] != "movie" && parts[1] != "tv") {
+		return false
+	}
+	_, err := strconv.Atoi(parts[2])
+	return err == nil
 }
 
 func (c *Client) DownloadPoster(ctx context.Context, posterURL, filename string) (string, error) {

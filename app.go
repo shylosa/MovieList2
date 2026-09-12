@@ -69,11 +69,13 @@ type scanResult struct {
 
 // aiConfidenceThreshold — єдиний поріг для Gemini, L2-кешу та merge.
 const aiConfidenceThreshold = 0.55
+const recognitionPipelineVersion = 25
 
 // geminiTMDBVerifyMinJW — мінімальна схожість EN-назви Gemini і TMDB після верифікації.
 const geminiTMDBVerifyMinJW = 0.85
 
 var russianMarkersRE = regexp.MustCompile(`(?i)\b(?:из|как|что|это|бы|вот)\b`)
+var groupedEpisodeRE = regexp.MustCompile(`(?i)(?:s\d{1,2}e\d{1,3}|\b(?:season|episode|сезон|серія)\s*\d+\b|(?:^|[. _-])(\d{1,3})(?:[. _-]|$))`)
 
 var (
 	reTMDBURL  = regexp.MustCompile(`themoviedb\.org/(movie|tv)/(\d+)`)
@@ -122,6 +124,9 @@ func (a *App) startup(ctx context.Context) {
 	if err := a.db.InitSchema(ctx); err != nil {
 		slog.Error("db_schema_init_error", slog.Any("error", err))
 		os.Exit(1)
+	}
+	if err := a.auditDuplicateMovieIdentities(ctx); err != nil {
+		slog.Warn("duplicate_identity_audit_failed", slog.Any("error", err))
 	}
 }
 
@@ -195,7 +200,7 @@ func (a *App) GetMovies() ([]storage.Movie, error) {
 }
 
 func (a *App) GetStats() map[string]interface{} {
-	total, unrec, err := a.db.GetStatsCounts(a.ctx)
+	total, unrec, suspicious, err := a.db.GetStatsCounts(a.ctx)
 	if err != nil {
 		return map[string]interface{}{"total": 0, "unrec": 0, "last": "Помилка"}
 	}
@@ -205,9 +210,10 @@ func (a *App) GetStats() map[string]interface{} {
 		lastScan = val
 	}
 	return map[string]interface{}{
-		"total": total,
-		"unrec": unrec,
-		"last":  lastScan,
+		"total":      total,
+		"unrec":      unrec,
+		"suspicious": suspicious,
+		"last":       lastScan,
 	}
 }
 
@@ -652,17 +658,26 @@ func (a *App) RunScan() {
 			if a.aiClient != nil {
 				metrics = a.aiClient.CallMetrics()
 			}
+			tmdbMetrics := tmdb.RequestMetrics{}
+			if a.tmdbClient != nil {
+				tmdbMetrics = a.tmdbClient.RequestMetrics()
+			}
+			_, _, suspicious, _ := a.db.GetStatsCounts(scanCtx)
 			utils.LoggerWithTrace(scanCtx).Info("scan_completed",
 				slog.Duration("duration", time.Since(scanStartedAt)),
 				slog.Int("disk_total", diskTotal),
 				slog.Int("processed_total", processedTotal),
 				slog.Int("tmdb_accepted", tmdbAccepted),
 				slog.Int("ai_accepted", aiAccepted),
-				slog.Int("needs_review", unresolved),
+				slog.Int("needs_review", unresolved+suspicious),
+				slog.Int("suspicious", suspicious),
 				slog.Int("unresolved", unresolved),
 				slog.Int64("gemini_batch_calls", metrics.RecognitionBatch),
 				slog.Int64("gemini_retry_calls", metrics.RecognitionRetry),
 				slog.Int64("gemini_disambiguation_calls", metrics.Disambiguation),
+				slog.Int64("tmdb_search_calls", tmdbMetrics.SearchCalls),
+				slog.Int64("tmdb_details_calls", tmdbMetrics.DetailsCalls),
+				slog.Int64("tmdb_cache_hits", tmdbMetrics.CacheHits),
 				slog.Bool("cancelled", stoppedByUser),
 			)
 			if stoppedByUser {
@@ -730,19 +745,18 @@ func (a *App) RunScan() {
 			utils.LoggerWithTrace(scanCtx).Info("missing_movies_cleaned", slog.Int("count", deletedCount))
 			a.logFront(fmt.Sprintf("🗑 Вичищено з бази відсутніх файлів: %d", deletedCount))
 		}
-
-		orphanCount, err := a.db.CleanOrphanPosters(scanCtx, a.cfg.PostersDir)
-		if err != nil {
-			utils.LoggerWithTrace(scanCtx).Warn("clean_orphan_posters_failed", slog.Any("error", err))
-		} else if orphanCount > 0 {
-			utils.LoggerWithTrace(scanCtx).Info("orphan_posters_cleaned", slog.Int("count", orphanCount))
-			a.logFront(fmt.Sprintf("🖼 Видалено застарілих файлів постерів: %d", orphanCount))
+		if err := a.backfillMissingRatings(scanCtx); err != nil {
+			if errors.Is(err, context.Canceled) {
+				return
+			}
+			utils.LoggerWithTrace(scanCtx).Warn("rating_backfill_failed", slog.Any("error", err))
 		}
 
 		// Визначаємо що треба обробити (нові + нерозпізнані)
 		filesToProcess := a.filterUnprocessed(scanCtx, diskPaths)
 		processedTotal = len(filesToProcess)
 		if len(filesToProcess) == 0 {
+			a.cleanOrphanPostersAfterSuccess(scanCtx)
 			a.finalizeScan("Змін не знайдено.", true)
 			scanFinished = true
 			return
@@ -778,7 +792,58 @@ func (a *App) RunScan() {
 		if len(translationQueue) > 0 {
 			a.processTranslationQueue(scanCtx, translationQueue, a.aiClient)
 		}
+		if scanCtx.Err() == nil {
+			a.cleanOrphanPostersAfterSuccess(scanCtx)
+		}
 	}()
+}
+
+func (a *App) backfillMissingRatings(ctx context.Context) error {
+	movies, err := a.db.GetAllMovies(ctx)
+	if err != nil {
+		return err
+	}
+	patches := make([]storage.Movie, 0)
+	for _, movie := range movies {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if movie.TmdbID <= 0 || movie.VoteCount > 0 {
+			continue
+		}
+		mediaType := tmdb.MediaType(movie.MediaType)
+		if mediaType != tmdb.MediaTypeMovie && mediaType != tmdb.MediaTypeTV {
+			continue
+		}
+		details, err := a.tmdbClient.GetCandidateDetails(ctx, mediaType, movie.TmdbID)
+		if err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			utils.LoggerWithTrace(ctx).Debug("rating_backfill_item_failed", slog.String("file", movie.Filename), slog.Any("error", err))
+			continue
+		}
+		movie.VoteAverage, movie.VoteCount = details.VoteAverage, details.VoteCount
+		patches = append(patches, movie)
+	}
+	if len(patches) == 0 {
+		return nil
+	}
+	if err := a.db.SaveMoviesBatch(ctx, patches); err != nil {
+		return err
+	}
+	utils.LoggerWithTrace(ctx).Info("rating_backfill_completed", slog.Int("updated", len(patches)))
+	return nil
+}
+
+func (a *App) cleanOrphanPostersAfterSuccess(ctx context.Context) {
+	utils.LoggerWithTrace(ctx).Info("poster_cleanup_started")
+	deleted, err := a.db.CleanOrphanPosters(ctx, a.cfg.PostersDir)
+	if err != nil {
+		utils.LoggerWithTrace(ctx).Warn("poster_cleanup_failed", slog.Any("error", err))
+		return
+	}
+	utils.LoggerWithTrace(ctx).Info("poster_cleanup_completed", slog.Int("deleted", deleted))
 }
 
 // StopScan зупиняє поточний процес сканування
@@ -802,6 +867,7 @@ func (a *App) runTMDBScan(ctx context.Context, paths []string) <-chan scanResult
 	sem := make(chan struct{}, 10) // Ліміт у 10 одночасних запитів до TMDB (rate-limit safe)
 	var wg sync.WaitGroup
 	var processedCount int32
+	groupTV := detectGroupedTV(ctx, paths)
 
 	for _, path := range paths {
 		if ctx.Err() != nil {
@@ -849,7 +915,19 @@ func (a *App) runTMDBScan(ctx context.Context, paths []string) <-chan scanResult
 				slog.String("stage", "init"),
 			)
 
-			info, err := a.tmdbClient.FetchFromFilename(fileCtx, path)
+			parsed := tmdb.ParseFilename(path)
+			if groupTV[filepath.Dir(path)] {
+				parsed.MediaType = tmdb.MediaTypeTV
+				if parent := filepath.Base(filepath.Dir(path)); parent != "." && parent != "" {
+					parentParsed := tmdb.ParseFilename(parent)
+					if parentParsed.CleanTitle != "" {
+						parsed.CleanTitle = parentParsed.CleanTitle
+					} else {
+						parsed.CleanTitle = parent
+					}
+				}
+			}
+			info, err := a.tmdbClient.FetchFromParsed(fileCtx, parsed, path)
 			if err != nil {
 				if errors.Is(err, context.Canceled) || ctx.Err() != nil {
 					return
@@ -882,6 +960,60 @@ func (a *App) runTMDBScan(ctx context.Context, paths []string) <-chan scanResult
 	return resultsChan
 }
 
+func detectGroupedTV(ctx context.Context, paths []string) map[string]bool {
+	type group struct {
+		episodes map[int]bool
+		markers  int
+	}
+	groups := make(map[string]*group)
+	for _, path := range paths {
+		if ctx.Err() != nil {
+			return map[string]bool{}
+		}
+		base := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+		matches := groupedEpisodeRE.FindAllStringSubmatch(base, -1)
+		if len(matches) == 0 {
+			continue
+		}
+		dir := filepath.Dir(path)
+		g := groups[dir]
+		if g == nil {
+			g = &group{episodes: make(map[int]bool)}
+			groups[dir] = g
+		}
+		g.markers++
+		for _, match := range matches {
+			if len(match) < 2 || match[1] == "" {
+				continue
+			}
+			n, _ := strconv.Atoi(match[1])
+			if n > 0 && n < 1000 && n != 264 && n != 265 && n != 720 {
+				g.episodes[n] = true
+			}
+		}
+	}
+	result := make(map[string]bool)
+	for dir, g := range groups {
+		if g.markers >= 2 || len(g.episodes) == 1 {
+			if len(g.episodes) == 1 {
+				result[dir] = true
+				continue
+			}
+			if len(g.episodes) == 0 {
+				result[dir] = true
+				continue
+			}
+			for n := range g.episodes {
+				if g.episodes[n+1] || g.episodes[n-1] {
+					result[dir] = true
+					break
+				}
+			}
+		}
+	}
+	return result
+}
+
 func (a *App) processScanResults(ctx context.Context, results <-chan scanResult) (toSave []storage.Movie, geminiQueue []string, translationQueue []string) {
 	for res := range results {
 		if ctx.Err() != nil {
@@ -900,12 +1032,15 @@ func (a *App) processScanResults(ctx context.Context, results <-chan scanResult)
 			}
 		} else {
 			// 🟢 ПЕРЕВІРКА L2 КЕШУ: Чи не розпізнавали ми цей файл раніше через ШІ?
-			cached, err := a.db.GetAIResolution(ctx, res.fname)
+			cached, stale, err := a.db.GetAIResolution(ctx, res.fname, recognitionPipelineVersion)
 			if err != nil {
 				utils.LoggerWithTrace(ctx).Warn("get_ai_resolution_failed", slog.String("file", res.fname), slog.Any("error", err))
 			}
+			if stale {
+				utils.LoggerWithTrace(ctx).Info("ai_cache_stale", slog.String("file", res.fname), slog.Int("pipeline_version", recognitionPipelineVersion))
+			}
 			if cached != nil && cached.Confidence >= aiConfidenceThreshold {
-				utils.LoggerWithTrace(ctx).Info("gemini_l2_cache_hit", slog.String("file", res.fname), slog.String("resolved", cached.ResolvedTitle))
+				utils.LoggerWithTrace(ctx).Info("ai_cache_hit", slog.String("file", res.fname), slog.String("resolved", cached.ResolvedTitle), slog.Int("pipeline_version", cached.PipelineVersion))
 
 				// Використовуємо кешовану назву для пошуку в TMDB
 				info, err := a.tmdbClient.FetchByCleanTitle(ctx, cached.ResolvedTitle, strconv.Itoa(cached.Year), tmdb.MediaType(cached.MediaType))
@@ -943,11 +1078,13 @@ func buildUnresolvedMovie(fname, path string) storage.Movie {
 		yearStr = strconv.Itoa(parsed.Year)
 	}
 	return storage.Movie{
-		Filename: fname,
-		TitleEN:  "Unresolved: " + fname,
-		TitleUA:  fname,
-		Year:     yearStr,
-		TmdbID:   0,
+		Filename:     fname,
+		TitleEN:      "Unresolved: " + fname,
+		TitleUA:      fname,
+		Year:         yearStr,
+		TmdbID:       0,
+		NeedsReview:  true,
+		ReviewReason: "unresolved",
 	}
 }
 
@@ -1099,6 +1236,8 @@ func (a *App) processGeminiQueue(ctx context.Context, paths []string, aiClient *
 					Year:             yearVal,
 					MediaType:        rec.MediaType,
 					Confidence:       rec.Confidence,
+					PipelineVersion:  recognitionPipelineVersion,
+					Provider:         "gemini",
 				}); err != nil {
 					utils.LoggerWithTrace(ctx).Warn("save_ai_resolution_failed",
 						slog.String("file", fname), slog.Any("error", err))
@@ -1282,6 +1421,20 @@ func (a *App) mergeGeminiWithTMDB(ctx context.Context, filePath string, rec ai.R
 	movie.Genres = tmdbInfo.Genres
 	movie.Cast = tmdbInfo.Cast
 	movie.MediaType = string(tmdbInfo.MediaType)
+	movie.VoteAverage = tmdbInfo.VoteAverage
+	movie.VoteCount = tmdbInfo.VoteCount
+	movie.RecognitionSource = "gemini"
+	movie.RecognitionConfidence = rec.Confidence
+	movie.VerificationScore = strongJW
+	if tmdbInfo.AmbiguousExact || strongJW < tmdb.ReviewVerificationThreshold {
+		movie.NeedsReview = true
+		if tmdbInfo.AmbiguousExact {
+			movie.ReviewReason = "ambiguous_exact"
+		} else {
+			movie.ReviewReason = "low_verification_score"
+		}
+		logger.Info("recognition_needs_review", slog.String("reason", movie.ReviewReason))
+	}
 
 	return movie
 }
@@ -1515,6 +1668,148 @@ type FixRequest struct {
 	MediaType string `json:"media_type,omitempty"`
 }
 
+type CandidateSearchRequest struct {
+	Filename  string `json:"filename"`
+	Title     string `json:"title"`
+	MediaType string `json:"media_type"`
+}
+
+type CandidateConfirmRequest struct {
+	Filename  string `json:"filename"`
+	TMDBID    int    `json:"tmdb_id"`
+	MediaType string `json:"media_type"`
+}
+
+func (a *App) SearchTMDBCandidates(request CandidateSearchRequest) ([]tmdb.TMDBCandidate, error) {
+	ctx := utils.EnsureTrace(a.ctx)
+	if strings.TrimSpace(request.Filename) == "" {
+		return nil, fmt.Errorf("filename required")
+	}
+	title := candidateSearchTitle(request.Title, request.Filename)
+	if title == "" {
+		title = tmdb.ParseFilename(request.Filename).CleanTitle
+	}
+	parsed := tmdb.ParseFilename(request.Filename)
+	if title == "" {
+		title = parsed.CleanTitle
+	}
+	utils.LoggerWithTrace(ctx).Info("candidate_search_started", slog.String("file", request.Filename), slog.String("title", title), slog.String("media_type", request.MediaType))
+	candidates, err := a.tmdbClient.SearchCandidates(ctx, title, parsed.Year, request.MediaType)
+	if err != nil {
+		return nil, err
+	}
+	utils.LoggerWithTrace(ctx).Info("candidate_search_completed", slog.String("file", request.Filename), slog.Int("count", len(candidates)))
+	return candidates, nil
+}
+
+func (a *App) auditDuplicateMovieIdentities(ctx context.Context) error {
+	movies, err := a.db.GetAllMovies(ctx)
+	if err != nil {
+		return err
+	}
+	patches := duplicateMovieIdentitiesForReview(movies)
+	if len(patches) == 0 {
+		return nil
+	}
+	if err := a.db.SaveMoviesBatch(ctx, patches); err != nil {
+		return err
+	}
+	utils.LoggerWithTrace(ctx).Info("duplicate_identity_audit_completed", slog.Int("flagged", len(patches)))
+	return nil
+}
+
+func duplicateMovieIdentitiesForReview(movies []storage.Movie) []storage.Movie {
+	groups := make(map[int][]int)
+	for i := range movies {
+		if movies[i].TmdbID > 0 && movies[i].MediaType != "tv" {
+			groups[movies[i].TmdbID] = append(groups[movies[i].TmdbID], i)
+		}
+	}
+	patches := make([]storage.Movie, 0)
+	for _, indexes := range groups {
+		if len(indexes) < 2 {
+			continue
+		}
+		titles := make(map[string]struct{})
+		for _, index := range indexes {
+			title := strings.ToLower(strings.TrimSpace(tmdb.ParseFilename(movies[index].Filename).CleanTitle))
+			if title != "" {
+				titles[title] = struct{}{}
+			}
+		}
+		if len(titles) < 2 {
+			continue
+		}
+		for _, index := range indexes {
+			movie := movies[index]
+			switch movie.RecognitionSource {
+			case "manual_id", "manual_title", "imdb":
+				continue
+			}
+			if movie.NeedsReview && movie.ReviewReason != "" {
+				continue
+			}
+			movie.NeedsReview = true
+			movie.ReviewReason = "duplicate_tmdb_id"
+			patches = append(patches, movie)
+		}
+	}
+	return patches
+}
+
+func candidateSearchTitle(title, filename string) string {
+	title = strings.TrimSpace(title)
+	if strings.HasPrefix(strings.ToLower(title), "unresolved:") || filepath.ToSlash(title) == filepath.ToSlash(filename) {
+		return ""
+	}
+	return title
+}
+
+func (a *App) ConfirmTMDBCandidate(request CandidateConfirmRequest) error {
+	ctx := utils.EnsureTrace(a.ctx)
+	if strings.TrimSpace(request.Filename) == "" || request.TMDBID <= 0 {
+		return fmt.Errorf("valid filename and tmdb_id required")
+	}
+	mediaType := tmdb.MediaType(strings.ToLower(strings.TrimSpace(request.MediaType)))
+	if mediaType != tmdb.MediaTypeMovie && mediaType != tmdb.MediaTypeTV {
+		return fmt.Errorf("media_type must be movie or tv")
+	}
+	info, err := a.tmdbClient.GetDetails(ctx, mediaType, request.TMDBID, request.Filename)
+	if err != nil {
+		return err
+	}
+	if info == nil || info.TMDBID <= 0 {
+		return fmt.Errorf("TMDB %s/%d not found", mediaType, request.TMDBID)
+	}
+	existing, err := a.db.GetMovieByFilename(ctx, request.Filename)
+	if err != nil {
+		return err
+	}
+	if existing == nil {
+		existing = &storage.Movie{Filename: request.Filename}
+	}
+	applyTMDBToMovie(existing, info)
+	existing.RecognitionSource = "manual_id"
+	if err := a.db.SaveMoviesBatch(ctx, []storage.Movie{*existing}); err != nil {
+		return err
+	}
+	return a.db.DeleteAIResolution(ctx, request.Filename)
+}
+
+func (a *App) GetTMDBCandidateDetails(request CandidateConfirmRequest) (*tmdb.CandidateDetails, error) {
+	ctx := utils.EnsureTrace(a.ctx)
+	mediaType := tmdb.MediaType(strings.ToLower(strings.TrimSpace(request.MediaType)))
+	if request.TMDBID <= 0 || (mediaType != tmdb.MediaTypeMovie && mediaType != tmdb.MediaTypeTV) {
+		return nil, fmt.Errorf("valid tmdb_id and media_type required")
+	}
+	details, err := a.tmdbClient.GetCandidateDetails(ctx, mediaType, request.TMDBID)
+	if err != nil {
+		return nil, err
+	}
+	utils.LoggerWithTrace(ctx).Info("candidate_details_loaded", slog.Int("tmdb_id", request.TMDBID), slog.String("media_type", string(mediaType)))
+	return details, nil
+}
+
 // FixSelected — виправлення вибраних записів.
 // hint може бути: TMDB URL/ID, назва фільму, рік, або порожнє (→ Gemini)
 func (a *App) FixSelected(selected []FixRequest) {
@@ -1669,9 +1964,11 @@ func (a *App) updateMovieWithMediaType(ctx context.Context, filename, hint, requ
 			return fmt.Errorf("IMDb %s не знайдено в TMDB", imdbID)
 		}
 		applyTMDBToMovie(existing, info)
+		existing.RecognitionSource = "imdb"
 		if err := a.db.SaveMovie(ctx, *existing); err != nil {
 			return err
 		}
+		_ = a.db.DeleteAIResolution(ctx, filename)
 		logger.Info("imdb_hint_resolved",
 			slog.Int("tmdb_id", info.TMDBID),
 			slog.String("media_type", string(info.MediaType)),
@@ -1689,14 +1986,21 @@ func (a *App) updateMovieWithMediaType(ctx context.Context, filename, hint, requ
 			return err
 		}
 		if info != nil {
+			existing.RecognitionSource = "manual_id"
 			if info.TitleUA != "" && utils.HasCyrillic(info.TitleUA) {
 				applyTMDBToMovie(existing, info)
 				a.logFront(fmt.Sprintf("🎯 [TMDB Істина] Знайдено офіційний переклад '%s', пропуск Gemini", info.TitleUA))
-				return a.db.SaveMovie(ctx, *existing)
+				if err := a.db.SaveMovie(ctx, *existing); err != nil {
+					return err
+				}
+				return a.db.DeleteAIResolution(ctx, filename)
 			}
 			applyTMDBToMovie(existing, info)
 
-			return a.db.SaveMovie(ctx, *existing)
+			if err := a.db.SaveMovie(ctx, *existing); err != nil {
+				return err
+			}
+			return a.db.DeleteAIResolution(ctx, filename)
 		}
 		return fmt.Errorf("TMDB ID %d не знайдено", tmdbID)
 	}
@@ -1728,9 +2032,11 @@ func (a *App) updateMovieWithMediaType(ctx context.Context, filename, hint, requ
 			return fmt.Errorf("точну назву %q не знайдено в TMDB", searchTitle)
 		}
 		applyTMDBToMovie(existing, info)
+		existing.RecognitionSource = "manual_title"
 		if err := a.db.SaveMovie(ctx, *existing); err != nil {
 			return err
 		}
+		_ = a.db.DeleteAIResolution(ctx, filename)
 		logger.Info("manual_title_resolved", slog.Int("tmdb_id", info.TMDBID), slog.String("media_type", string(info.MediaType)), slog.String("title", info.TitleEN))
 		return nil
 	}
@@ -1765,6 +2071,8 @@ func (a *App) updateMovieWithMediaType(ctx context.Context, filename, hint, requ
 			Year:             yearVal,
 			MediaType:        rec.MediaType,
 			Confidence:       rec.Confidence,
+			PipelineVersion:  recognitionPipelineVersion,
+			Provider:         "gemini",
 		}); err != nil {
 			slog.Warn("save_ai_resolution_failed",
 				slog.String("file", filename), slog.Any("error", err))
@@ -1821,23 +2129,30 @@ func (a *App) filterUnprocessed(ctx context.Context, diskPaths []string) []strin
 // movieFromTMDB — створює storage.Movie з результату TMDB (без Gemini)
 func movieFromTMDB(fname string, info *tmdb.MovieInfo) storage.Movie {
 	return storage.Movie{
-		Filename:        fname,
-		TmdbID:          info.TMDBID,
-		TitleUA:         info.TitleUA,
-		TitleEN:         info.TitleEN,
-		Year:            info.Year,
-		Plot:            info.Plot,
-		Genres:          info.Genres,
-		Cast:            info.Cast,
-		PosterURL:       info.PosterURL,
-		LocalPosterPath: info.LocalPosterPath,
-		MediaType:       string(info.MediaType),
+		Filename:          fname,
+		TmdbID:            info.TMDBID,
+		TitleUA:           info.TitleUA,
+		TitleEN:           info.TitleEN,
+		Year:              info.Year,
+		Plot:              info.Plot,
+		Genres:            info.Genres,
+		Cast:              info.Cast,
+		PosterURL:         info.PosterURL,
+		LocalPosterPath:   info.LocalPosterPath,
+		MediaType:         string(info.MediaType),
+		RecognitionSource: "tmdb",
+		VoteAverage:       info.VoteAverage,
+		VoteCount:         info.VoteCount,
 	}
 }
 
 // applyTMDBToMovie — перезаписує поля movie з tmdbInfo (для ручного виправлення)
 func applyTMDBToMovie(movie *storage.Movie, info *tmdb.MovieInfo) {
 	movie.TmdbID = info.TMDBID
+	movie.VoteAverage = info.VoteAverage
+	movie.VoteCount = info.VoteCount
+	movie.NeedsReview = false
+	movie.ReviewReason = ""
 	movie.TitleEN = info.TitleEN
 	movie.Year = info.Year
 	movie.PosterURL = info.PosterURL

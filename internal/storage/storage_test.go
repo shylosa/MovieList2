@@ -2,8 +2,12 @@ package storage
 
 import (
 	"context"
+	"database/sql"
 	"path/filepath"
 	"testing"
+	"time"
+
+	_ "modernc.org/sqlite"
 )
 
 func TestCleanMissingMoviesKeepsRelativePathKeys(t *testing.T) {
@@ -48,6 +52,76 @@ func TestCleanMissingMoviesKeepsRelativePathKeys(t *testing.T) {
 	}
 	if removed != nil {
 		t.Fatalf("stale movie was not deleted: %+v", removed)
+	}
+}
+
+func TestRecognitionFieldsAndVersionedAICache(t *testing.T) {
+	ctx := context.Background()
+	db, err := New(filepath.Join(t.TempDir(), "movies.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.InitSchema(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	want := Movie{Filename: "The Bureau/01.mkv", TmdbID: 62476, MediaType: "tv", RecognitionSource: "gemini", RecognitionConfidence: .91, VerificationScore: .88, NeedsReview: true, ReviewReason: "ambiguous_exact", VoteAverage: 8.2, VoteCount: 450}
+	if err := db.SaveMovie(ctx, want); err != nil {
+		t.Fatal(err)
+	}
+	got, err := db.GetMovieByFilename(ctx, want.Filename)
+	if err != nil || got == nil {
+		t.Fatalf("lookup: %+v, %v", got, err)
+	}
+	if got.RecognitionSource != want.RecognitionSource || !got.NeedsReview || got.ReviewReason != want.ReviewReason || got.VoteAverage != want.VoteAverage || got.VoteCount != want.VoteCount {
+		t.Fatalf("recognition fields lost: %+v", got)
+	}
+
+	updated := time.Date(2026, 9, 12, 10, 0, 0, 0, time.UTC)
+	cache := AIResolution{OriginalFilename: want.Filename, ResolvedTitle: "The Bureau", MediaType: "tv", Confidence: .9, PipelineVersion: 25, Provider: "gemini", Model: "gemini-2.5-flash", UpdatedAt: updated}
+	if err := db.SaveAIResolution(ctx, cache); err != nil {
+		t.Fatal(err)
+	}
+	hit, stale, err := db.GetAIResolution(ctx, want.Filename, 25)
+	if err != nil || stale || hit == nil || hit.Provider != "gemini" || !hit.UpdatedAt.Equal(updated) {
+		t.Fatalf("current cache = %+v stale=%v err=%v", hit, stale, err)
+	}
+	hit, stale, err = db.GetAIResolution(ctx, want.Filename, 26)
+	if err != nil || !stale || hit != nil {
+		t.Fatalf("stale cache = %+v stale=%v err=%v", hit, stale, err)
+	}
+}
+
+func TestInitSchemaUpgradesRound24Database(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "old.db")
+	raw, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = raw.Exec(`CREATE TABLE movies (filename TEXT PRIMARY KEY, tmdb_id INTEGER, title_ua TEXT, title_en TEXT, year TEXT, genres TEXT, cast TEXT, plot TEXT, poster_url TEXT, local_poster_path TEXT, media_type TEXT); CREATE TABLE ai_resolutions (original_filename TEXT PRIMARY KEY, resolved_title TEXT, year INTEGER, media_type TEXT, confidence REAL); INSERT INTO movies VALUES('old.mkv',7,'','Old','','','','','','','movie'); INSERT INTO ai_resolutions VALUES('old.mkv','Old',2003,'movie',0.9);`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err := New(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.InitSchema(ctx); err != nil {
+		t.Fatal(err)
+	}
+	m, err := db.GetMovieByFilename(ctx, "old.mkv")
+	if err != nil || m == nil || m.TmdbID != 7 || m.TitleEN != "Old" {
+		t.Fatalf("old movie lost: %+v %v", m, err)
+	}
+	hit, stale, err := db.GetAIResolution(ctx, "old.mkv", 25)
+	if err != nil || hit != nil || !stale {
+		t.Fatalf("old cache must be stale: %+v stale=%v err=%v", hit, stale, err)
 	}
 }
 

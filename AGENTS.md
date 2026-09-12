@@ -198,6 +198,28 @@ GITHUB_PAGES_BRANCH=main
 
 ---
 
+## Active Work — Audit Round 25 (implementation underway; runtime verification pending)
+
+The active implementation specification is `CHECKLIST.md` (gitignored by design). Work must proceed in dependency order rather than treating its 143 checkboxes as independent tasks:
+
+1. recognition provenance/review-state contracts and versioned AI cache;
+2. TMDB candidate search/confirmation backend;
+3. lightweight candidate-picker UI without posters;
+4. safe poster cleanup, TMDB details cache and exact-query optimization;
+5. grouped TV detection;
+6. frontend tests, quieter logs and documentation.
+
+Round 25 exclusions: migration framework, database backup/restore, file fingerprints/rename tracking and SQLite FTS. Do not expand scope into these items.
+
+Important delivery rules:
+
+* Preserve all Critical Invariants and Stable Interfaces in this file.
+* `CHECKLIST.md` checkboxes may be marked complete only after implementation and proportional automated verification.
+* Implement schema additions as idempotent lazy column additions; a general migration framework was explicitly declined.
+* Candidate previews contain no posters and must not trigger details, credits, alternative-title or poster requests.
+* Keep candidate UI compact and return at most five deterministic results.
+* Do not claim runtime checks complete until the user runs the production build on the real media library and provides the log.
+
 ## Changelog
 
 ### Audit Round 24 — Вересень 2026 (automatic exact disambiguation)
@@ -368,7 +390,7 @@ shutdown) — рівно один app_closed в кінці сесії. FIX-17 (f
 
 ---
 
-## Current State Summary (станом на 2026-09-09)
+## Current State Summary (станом на 2026-09-12)
 
 | Area | Status |
 |------|--------|
@@ -382,6 +404,10 @@ shutdown) — рівно один app_closed в кінці сесії. FIX-17 (f
 | Trace IDs | ✅ `EnsureTrace` in `FixSelected` and `UpdateMovie`. |
 | Warmup goroutine | ✅ `fetchAIModels` tracked in `a.wg`; safe shutdown guaranteed. |
 | StopScan race fix | ✅ `ctx/cancel` created before goroutine; `StopScan` guards with `scanMutex`. |
-| Tests | ✅ `go test ./... -count=10`, `go vet ./...`, `go build ./...` pass (last verified 2026-09-09). |
+| Manual title correction | ✅ Authoritative exact title with `Авто / Фільм / Серіал`; strict mode limits typed endpoint. |
+| Automatic ambiguity | ✅ Exact movie+TV disambiguation before fuzzy Gemini merge; `The Bureau` regression selects TV 62476. |
+| Scan metrics | ✅ `processed_total` is distinct from complete collection `disk_total`. |
+| Active Round 25 | ⏳ Planned in `CHECKLIST.md`; no Round 25 implementation has started. |
+| Tests | ✅ `go test ./... -count=10`, `go vet ./...`, `go build ./...`, `wails build` passed for Round 24 (verified 2026-09-11). |
 
 > For full change history see [CHANGELOG.md](./CHANGELOG.md).

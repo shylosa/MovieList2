@@ -105,13 +105,15 @@ func (c *Client) SyncMovies(ctx context.Context, movies []storage.Movie) error {
 
 func movieValues(movies []storage.Movie) [][]interface{} {
 	values := make([][]interface{}, 0, len(movies)+1)
-	values = append(values, []interface{}{"File", "Title (UA)", "Title (EN)", "Year", "Genre", "Cast", "Plot", "Poster URL"})
+	values = append(values, []interface{}{"File", "Title (UA)", "Title (EN)", "Year", "TMDB Rating", "TMDB Votes", "Genre", "Cast", "Plot", "Poster URL"})
 	for _, m := range movies {
 		values = append(values, []interface{}{
 			utils.DisplayFileLabel(m.Filename),
 			m.TitleUA,
 			m.TitleEN,
 			m.Year,
+			m.VoteAverage,
+			m.VoteCount,
 			m.Genres,
 			m.Cast,
 			m.Plot,

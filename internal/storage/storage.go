@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"movielist-app/internal/utils"
 
@@ -16,19 +17,26 @@ import (
 
 // Movie describes the movie record structure in the database (unified)
 type Movie struct {
-	ID              int    `json:"id"`
-	Filename        string `json:"filename"`
-	FileLabel       string `json:"file_label,omitempty"` // computed for UI; not stored in SQLite
-	TmdbID          int    `json:"tmdb_id"`
-	TitleUA         string `json:"title_ua"`
-	TitleEN         string `json:"title_en"`
-	Year            string `json:"year"`
-	Plot            string `json:"plot"`
-	Genres          string `json:"genres"`
-	Cast            string `json:"cast"`
-	PosterURL       string `json:"poster_url"`
-	LocalPosterPath string `json:"local_poster_path"`
-	MediaType       string `json:"media_type"`
+	ID                    int     `json:"id"`
+	Filename              string  `json:"filename"`
+	FileLabel             string  `json:"file_label,omitempty"` // computed for UI; not stored in SQLite
+	TmdbID                int     `json:"tmdb_id"`
+	TitleUA               string  `json:"title_ua"`
+	TitleEN               string  `json:"title_en"`
+	Year                  string  `json:"year"`
+	Plot                  string  `json:"plot"`
+	Genres                string  `json:"genres"`
+	Cast                  string  `json:"cast"`
+	PosterURL             string  `json:"poster_url"`
+	LocalPosterPath       string  `json:"local_poster_path"`
+	MediaType             string  `json:"media_type"`
+	RecognitionSource     string  `json:"recognition_source"`
+	RecognitionConfidence float64 `json:"recognition_confidence"`
+	VerificationScore     float64 `json:"verification_score"`
+	NeedsReview           bool    `json:"needs_review"`
+	ReviewReason          string  `json:"review_reason,omitempty"`
+	VoteAverage           float64 `json:"vote_average"`
+	VoteCount             int     `json:"vote_count"`
 }
 
 // AIResolution is the Gemini recognition cache entry (L2 Cache)
@@ -38,6 +46,10 @@ type AIResolution struct {
 	Year             int
 	MediaType        string
 	Confidence       float64
+	PipelineVersion  int
+	Provider         string
+	Model            string
+	UpdatedAt        time.Time
 }
 
 type DB struct {
@@ -50,8 +62,9 @@ const filenameChunkSize = 500
 // Avoids INSERT OR REPLACE, which deletes the old row and wipes metadata when partial structs are saved.
 const movieUpsertQuery = `
 	INSERT INTO movies
-		(filename, tmdb_id, title_ua, title_en, year, genres, "cast", plot, poster_url, local_poster_path, media_type)
-	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		(filename, tmdb_id, title_ua, title_en, year, genres, "cast", plot, poster_url, local_poster_path, media_type,
+		 recognition_source, recognition_confidence, verification_score, needs_review, review_reason, vote_average, vote_count)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	ON CONFLICT(filename) DO UPDATE SET
 		tmdb_id = CASE WHEN excluded.tmdb_id != 0 THEN excluded.tmdb_id ELSE movies.tmdb_id END,
 		title_ua = CASE
@@ -71,7 +84,17 @@ const movieUpsertQuery = `
 		plot = COALESCE(NULLIF(excluded.plot, ''), movies.plot),
 		poster_url = COALESCE(NULLIF(excluded.poster_url, ''), movies.poster_url),
 		local_poster_path = COALESCE(NULLIF(excluded.local_poster_path, ''), movies.local_poster_path),
-		media_type = COALESCE(NULLIF(excluded.media_type, ''), movies.media_type)
+		media_type = COALESCE(NULLIF(excluded.media_type, ''), movies.media_type),
+		recognition_source = CASE
+			WHEN excluded.tmdb_id = 0 AND movies.tmdb_id > 0 THEN movies.recognition_source
+			ELSE COALESCE(NULLIF(excluded.recognition_source, ''), movies.recognition_source)
+		END,
+		recognition_confidence = CASE WHEN excluded.tmdb_id = 0 AND movies.tmdb_id > 0 THEN movies.recognition_confidence ELSE excluded.recognition_confidence END,
+		verification_score = CASE WHEN excluded.tmdb_id = 0 AND movies.tmdb_id > 0 THEN movies.verification_score ELSE excluded.verification_score END,
+		needs_review = CASE WHEN excluded.tmdb_id = 0 AND movies.tmdb_id > 0 THEN movies.needs_review ELSE excluded.needs_review END,
+		review_reason = CASE WHEN excluded.tmdb_id = 0 AND movies.tmdb_id > 0 THEN movies.review_reason ELSE excluded.review_reason END,
+		vote_average = CASE WHEN excluded.vote_average > 0 THEN excluded.vote_average ELSE movies.vote_average END,
+		vote_count = CASE WHEN excluded.vote_count > 0 THEN excluded.vote_count ELSE movies.vote_count END
 `
 
 func New(dbPath string) (*DB, error) {
@@ -126,6 +149,13 @@ func (db *DB) InitSchema(ctx context.Context) error {
 		poster_url TEXT,
 		local_poster_path TEXT,
 		media_type TEXT
+		, recognition_source TEXT NOT NULL DEFAULT ''
+		, recognition_confidence REAL NOT NULL DEFAULT 0
+		, verification_score REAL NOT NULL DEFAULT 0
+		, needs_review INTEGER NOT NULL DEFAULT 0
+		, review_reason TEXT NOT NULL DEFAULT ''
+		, vote_average REAL NOT NULL DEFAULT 0
+		, vote_count INTEGER NOT NULL DEFAULT 0
 	);
 	CREATE INDEX IF NOT EXISTS idx_tmdb_id ON movies(tmdb_id);
 	CREATE INDEX IF NOT EXISTS idx_title_en ON movies(title_en);
@@ -134,7 +164,11 @@ func (db *DB) InitSchema(ctx context.Context) error {
 		resolved_title TEXT,
 		year INTEGER,
 		media_type TEXT,
-		confidence REAL
+		confidence REAL,
+		pipeline_version INTEGER NOT NULL DEFAULT 0,
+		provider TEXT NOT NULL DEFAULT '',
+		model TEXT NOT NULL DEFAULT '',
+		updated_at TEXT NOT NULL DEFAULT ''
 	);
 	`
 	_, err := db.db.ExecContext(ctx, query)
@@ -173,12 +207,23 @@ func (db *DB) InitSchema(ctx context.Context) error {
 	// We intentionally ignore errors here: if the column exists, SQLite returns "duplicate column name", which is OK.
 	_, _ = db.db.ExecContext(ctx, `ALTER TABLE movies ADD COLUMN tmdb_id INTEGER;`)
 	_, _ = db.db.ExecContext(ctx, `ALTER TABLE movies ADD COLUMN media_type TEXT;`)
+	_, _ = db.db.ExecContext(ctx, `ALTER TABLE movies ADD COLUMN recognition_source TEXT NOT NULL DEFAULT '';`)
+	_, _ = db.db.ExecContext(ctx, `ALTER TABLE movies ADD COLUMN recognition_confidence REAL NOT NULL DEFAULT 0;`)
+	_, _ = db.db.ExecContext(ctx, `ALTER TABLE movies ADD COLUMN verification_score REAL NOT NULL DEFAULT 0;`)
+	_, _ = db.db.ExecContext(ctx, `ALTER TABLE movies ADD COLUMN needs_review INTEGER NOT NULL DEFAULT 0;`)
+	_, _ = db.db.ExecContext(ctx, `ALTER TABLE movies ADD COLUMN review_reason TEXT NOT NULL DEFAULT '';`)
+	_, _ = db.db.ExecContext(ctx, `ALTER TABLE movies ADD COLUMN vote_average REAL NOT NULL DEFAULT 0;`)
+	_, _ = db.db.ExecContext(ctx, `ALTER TABLE movies ADD COLUMN vote_count INTEGER NOT NULL DEFAULT 0;`)
+	_, _ = db.db.ExecContext(ctx, `ALTER TABLE ai_resolutions ADD COLUMN pipeline_version INTEGER NOT NULL DEFAULT 0;`)
+	_, _ = db.db.ExecContext(ctx, `ALTER TABLE ai_resolutions ADD COLUMN provider TEXT NOT NULL DEFAULT '';`)
+	_, _ = db.db.ExecContext(ctx, `ALTER TABLE ai_resolutions ADD COLUMN model TEXT NOT NULL DEFAULT '';`)
+	_, _ = db.db.ExecContext(ctx, `ALTER TABLE ai_resolutions ADD COLUMN updated_at TEXT NOT NULL DEFAULT '';`)
 
 	return nil
 }
 
 func (db *DB) GetAllMovies(ctx context.Context) ([]Movie, error) {
-	query := `SELECT rowid, filename, COALESCE(tmdb_id, 0), title_ua, title_en, year, genres, "cast", plot, poster_url, local_poster_path, COALESCE(media_type, '') FROM movies ORDER BY rowid ASC`
+	query := `SELECT rowid, filename, COALESCE(tmdb_id, 0), title_ua, title_en, year, genres, "cast", plot, poster_url, local_poster_path, COALESCE(media_type, ''), COALESCE(recognition_source, ''), COALESCE(recognition_confidence, 0), COALESCE(verification_score, 0), COALESCE(needs_review, 0), COALESCE(review_reason, ''), COALESCE(vote_average, 0), COALESCE(vote_count, 0) FROM movies ORDER BY rowid ASC`
 	rows, err := db.db.QueryContext(ctx, query)
 	if err != nil {
 		return nil, fmt.Errorf("GetAllMovies query failed: %w", err)
@@ -191,6 +236,8 @@ func (db *DB) GetAllMovies(ctx context.Context) ([]Movie, error) {
 		err := rows.Scan(
 			&m.ID, &m.Filename, &m.TmdbID, &m.TitleUA, &m.TitleEN, &m.Year,
 			&m.Genres, &m.Cast, &m.Plot, &m.PosterURL, &m.LocalPosterPath, &m.MediaType,
+			&m.RecognitionSource, &m.RecognitionConfidence, &m.VerificationScore, &m.NeedsReview, &m.ReviewReason,
+			&m.VoteAverage, &m.VoteCount,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("GetAllMovies scan failed: %w", err)
@@ -210,6 +257,8 @@ func (db *DB) SaveMovie(ctx context.Context, m Movie) error {
 	_, err := db.db.ExecContext(ctx, movieUpsertQuery,
 		m.Filename, m.TmdbID, m.TitleUA, m.TitleEN, m.Year,
 		m.Genres, m.Cast, m.Plot, m.PosterURL, m.LocalPosterPath, m.MediaType,
+		m.RecognitionSource, m.RecognitionConfidence, m.VerificationScore, normalizedNeedsReview(m), m.ReviewReason,
+		m.VoteAverage, m.VoteCount,
 	)
 	return err
 }
@@ -263,8 +312,31 @@ func mergeMoviePatch(base, patch Movie) Movie {
 	if patch.MediaType != "" {
 		out.MediaType = patch.MediaType
 	}
+	if patch.RecognitionSource != "" {
+		out.RecognitionSource = patch.RecognitionSource
+	}
+	if patch.RecognitionConfidence != 0 {
+		out.RecognitionConfidence = patch.RecognitionConfidence
+	}
+	if patch.VerificationScore != 0 {
+		out.VerificationScore = patch.VerificationScore
+	}
+	if patch.NeedsReview {
+		out.NeedsReview = true
+	}
+	if patch.ReviewReason != "" {
+		out.ReviewReason = patch.ReviewReason
+	}
+	if patch.VoteAverage > 0 {
+		out.VoteAverage = patch.VoteAverage
+	}
+	if patch.VoteCount > 0 {
+		out.VoteCount = patch.VoteCount
+	}
 	return out
 }
+
+func normalizedNeedsReview(m Movie) bool { return m.TmdbID == 0 || m.NeedsReview }
 
 // SaveMoviesBatch — масовий запис через єдину транзакцію
 func (db *DB) SaveMoviesBatch(ctx context.Context, movies []Movie) error {
@@ -295,6 +367,8 @@ func (db *DB) SaveMoviesBatch(ctx context.Context, movies []Movie) error {
 		_, err := stmt.ExecContext(ctx,
 			m.Filename, m.TmdbID, m.TitleUA, m.TitleEN, m.Year,
 			m.Genres, m.Cast, m.Plot, m.PosterURL, m.LocalPosterPath, m.MediaType,
+			m.RecognitionSource, m.RecognitionConfidence, m.VerificationScore, normalizedNeedsReview(m), m.ReviewReason,
+			m.VoteAverage, m.VoteCount,
 		)
 		if err != nil {
 			return fmt.Errorf("batch insert %q: %w", m.Filename, err)
@@ -308,13 +382,15 @@ func (db *DB) SaveMoviesBatch(ctx context.Context, movies []Movie) error {
 }
 
 func (db *DB) GetMovieByFilename(ctx context.Context, filename string) (*Movie, error) {
-	query := `SELECT rowid, filename, COALESCE(tmdb_id, 0), title_ua, title_en, year, genres, "cast", plot, poster_url, local_poster_path, COALESCE(media_type, '')
+	query := `SELECT rowid, filename, COALESCE(tmdb_id, 0), title_ua, title_en, year, genres, "cast", plot, poster_url, local_poster_path, COALESCE(media_type, ''), COALESCE(recognition_source, ''), COALESCE(recognition_confidence, 0), COALESCE(verification_score, 0), COALESCE(needs_review, 0), COALESCE(review_reason, ''), COALESCE(vote_average, 0), COALESCE(vote_count, 0)
 			  FROM movies WHERE filename = ?`
 	row := db.db.QueryRowContext(ctx, query, filename)
 	var m Movie
 	err := row.Scan(
 		&m.ID, &m.Filename, &m.TmdbID, &m.TitleUA, &m.TitleEN, &m.Year,
 		&m.Genres, &m.Cast, &m.Plot, &m.PosterURL, &m.LocalPosterPath, &m.MediaType,
+		&m.RecognitionSource, &m.RecognitionConfidence, &m.VerificationScore, &m.NeedsReview, &m.ReviewReason,
+		&m.VoteAverage, &m.VoteCount,
 	)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -423,41 +499,53 @@ func (db *DB) DeleteMovieByFilename(ctx context.Context, filename string) error 
 	return err
 }
 
-func (db *DB) GetAIResolution(ctx context.Context, filename string) (*AIResolution, error) {
-	query := `SELECT original_filename, resolved_title, year, media_type, confidence FROM ai_resolutions WHERE original_filename = ?`
+func (db *DB) GetAIResolution(ctx context.Context, filename string, pipelineVersion int) (*AIResolution, bool, error) {
+	query := `SELECT original_filename, resolved_title, year, media_type, confidence, pipeline_version, provider, model, updated_at FROM ai_resolutions WHERE original_filename = ?`
 	row := db.db.QueryRowContext(ctx, query, filename)
 	var r AIResolution
-	err := row.Scan(&r.OriginalFilename, &r.ResolvedTitle, &r.Year, &r.MediaType, &r.Confidence)
+	var updated string
+	err := row.Scan(&r.OriginalFilename, &r.ResolvedTitle, &r.Year, &r.MediaType, &r.Confidence, &r.PipelineVersion, &r.Provider, &r.Model, &updated)
 	if err != nil {
 		if err == sql.ErrNoRows {
-			return nil, nil
+			return nil, false, nil
 		}
-		return nil, err
+		return nil, false, err
 	}
-	return &r, nil
+	r.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updated)
+	if r.PipelineVersion != pipelineVersion {
+		return nil, true, nil
+	}
+	return &r, false, nil
 }
 
 func (db *DB) SaveAIResolution(ctx context.Context, r AIResolution) error {
-	query := `INSERT OR REPLACE INTO ai_resolutions (original_filename, resolved_title, year, media_type, confidence) VALUES (?, ?, ?, ?, ?)`
-	_, err := db.db.ExecContext(ctx, query, r.OriginalFilename, r.ResolvedTitle, r.Year, r.MediaType, r.Confidence)
+	query := `INSERT INTO ai_resolutions (original_filename, resolved_title, year, media_type, confidence, pipeline_version, provider, model, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+	ON CONFLICT(original_filename) DO UPDATE SET resolved_title=excluded.resolved_title, year=excluded.year, media_type=excluded.media_type, confidence=excluded.confidence, pipeline_version=excluded.pipeline_version, provider=excluded.provider, model=excluded.model, updated_at=excluded.updated_at`
+	if r.UpdatedAt.IsZero() {
+		r.UpdatedAt = time.Now().UTC()
+	}
+	_, err := db.db.ExecContext(ctx, query, r.OriginalFilename, r.ResolvedTitle, r.Year, r.MediaType, r.Confidence, r.PipelineVersion, r.Provider, r.Model, r.UpdatedAt.Format(time.RFC3339Nano))
 	return err
 }
 
 // GetStatsCounts returns the total number of movies and the number of unrecognized movies.
-func (db *DB) GetStatsCounts(ctx context.Context) (total, unrec int, err error) {
+func (db *DB) GetStatsCounts(ctx context.Context) (total, unrec, suspicious int, err error) {
 	// Total count
 	err = db.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM movies").Scan(&total)
 	if err != nil {
-		return 0, 0, fmt.Errorf("failed to get total count: %w", err)
+		return 0, 0, 0, fmt.Errorf("failed to get total count: %w", err)
 	}
 
 	// Unrecognized count (tmdb_id = 0)
 	err = db.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM movies WHERE tmdb_id = 0").Scan(&unrec)
 	if err != nil {
-		return 0, 0, fmt.Errorf("failed to get unrecognized count: %w", err)
+		return 0, 0, 0, fmt.Errorf("failed to get unrecognized count: %w", err)
 	}
-
-	return total, unrec, nil
+	err = db.db.QueryRowContext(ctx, "SELECT COUNT(*) FROM movies WHERE tmdb_id > 0 AND needs_review != 0").Scan(&suspicious)
+	if err != nil {
+		return 0, 0, 0, fmt.Errorf("failed to get suspicious count: %w", err)
+	}
+	return total, unrec, suspicious, nil
 }
 
 // GetMoviesByFilenames returns a map of movies keyed by filename
@@ -486,7 +574,7 @@ func (db *DB) GetMoviesByFilenames(ctx context.Context, filenames []string) (map
 		}
 
 		query := fmt.Sprintf(
-			`SELECT rowid, filename, COALESCE(tmdb_id, 0), title_ua, title_en, year, genres, "cast", plot, poster_url, local_poster_path, COALESCE(media_type, '')
+			`SELECT rowid, filename, COALESCE(tmdb_id, 0), title_ua, title_en, year, genres, "cast", plot, poster_url, local_poster_path, COALESCE(media_type, ''), COALESCE(recognition_source, ''), COALESCE(recognition_confidence, 0), COALESCE(verification_score, 0), COALESCE(needs_review, 0), COALESCE(review_reason, ''), COALESCE(vote_average, 0), COALESCE(vote_count, 0)
 			 FROM movies WHERE filename IN (%s)`,
 			strings.Join(placeholders, ","))
 
@@ -502,6 +590,8 @@ func (db *DB) GetMoviesByFilenames(ctx context.Context, filenames []string) (map
 				err := rows.Scan(
 					&m.ID, &m.Filename, &m.TmdbID, &m.TitleUA, &m.TitleEN, &m.Year,
 					&m.Genres, &m.Cast, &m.Plot, &m.PosterURL, &m.LocalPosterPath, &m.MediaType,
+					&m.RecognitionSource, &m.RecognitionConfidence, &m.VerificationScore, &m.NeedsReview, &m.ReviewReason,
+					&m.VoteAverage, &m.VoteCount,
 				)
 				if err != nil {
 					slog.Error("storage_scan_error", slog.Any("error", err))

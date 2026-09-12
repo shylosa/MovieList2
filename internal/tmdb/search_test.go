@@ -2,6 +2,7 @@ package tmdb
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -145,6 +146,68 @@ func TestSearchExactTitleStrictTVSkipsMovieEndpoint(t *testing.T) {
 	}
 	if movieCalled || info == nil || info.TMDBID != 62476 || info.MediaType != MediaTypeTV {
 		t.Fatalf("movieCalled=%v info=%+v", movieCalled, info)
+	}
+}
+
+func TestSearchCandidatesAutoTypedRankedAndLimited(t *testing.T) {
+	var detailsCalls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/search/movie"):
+			w.Write([]byte(`{"results":[{"id":802663,"title":"The Bureau","original_title":"The Bureau","release_date":"2015-01-01","popularity":1},{"id":802663,"title":"The Bureau","release_date":"2015-01-01"},{"id":3,"title":"Bureau 3"},{"id":4,"title":"Bureau 4"},{"id":5,"title":"Bureau 5"}]}`))
+		case strings.HasSuffix(r.URL.Path, "/search/tv"):
+			w.Write([]byte(`{"results":[{"id":62476,"name":"The Bureau","original_name":"Le Bureau des légendes","first_air_date":"2015-04-27","popularity":35},{"id":6,"name":"Bureau 6"}]}`))
+		default:
+			detailsCalls++
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	c := &Client{client: &http.Client{Transport: &searchRewriteTransport{serverURL: server.URL}}, rateLimiter: rate.NewLimiter(rate.Inf, 1)}
+	got, err := c.SearchCandidates(context.Background(), "The Bureau", 2015, "auto")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 5 || got[0].TMDBID != 62476 || got[0].MediaType != MediaTypeTV {
+		t.Fatalf("candidates=%+v", got)
+	}
+	if detailsCalls != 0 {
+		t.Fatalf("preview made %d details calls", detailsCalls)
+	}
+	seen := map[string]bool{}
+	for _, item := range got {
+		key := fmt.Sprintf("%s:%d", item.MediaType, item.TMDBID)
+		if seen[key] {
+			t.Fatalf("duplicate %s", key)
+		}
+		seen[key] = true
+	}
+}
+
+func TestSearchCandidatesRetriesTransliteratedFilenameWhenDirectSearchIsEmpty(t *testing.T) {
+	queries := make([]string, 0, 4)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		query := r.URL.Query().Get("query")
+		queries = append(queries, query)
+		if query == latinToCyrillic("Ebigejl") && strings.HasSuffix(r.URL.Path, "/search/movie") {
+			w.Write([]byte(`{"results":[{"id":1111873,"title":"Ебіґейл","original_title":"Abigail","release_date":"2024-04-18","popularity":50}]}`))
+			return
+		}
+		w.Write([]byte(`{"results":[]}`))
+	}))
+	defer server.Close()
+	c := &Client{client: &http.Client{Transport: &searchRewriteTransport{serverURL: server.URL}}, rateLimiter: rate.NewLimiter(rate.Inf, 1)}
+	got, err := c.SearchCandidates(context.Background(), "Ebigejl", 2024, "auto")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].TMDBID != 1111873 {
+		t.Fatalf("candidates=%+v queries=%v", got, queries)
+	}
+	if len(queries) != 4 || queries[0] != "Ebigejl" || queries[2] != latinToCyrillic("Ebigejl") {
+		t.Fatalf("queries=%v", queries)
 	}
 }
 

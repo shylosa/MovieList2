@@ -1,0 +1,22 @@
+import assert from 'assert';
+import { readFileSync } from 'fs';
+import { candidateConfirmPayload, candidateSearchPayload, fixPayload, reviewCounts, reviewReasonLabel, mediaTypeLabel, candidateTMDBURL, formatRuntime, formatTMDBRating } from './editor-state.js';
+
+assert.deepStrictEqual(candidateSearchPayload('a.mkv', {'a.mkv': 'The Bureau'}, {'a.mkv': 'tv'}), {filename: 'a.mkv', title: 'The Bureau', media_type: 'tv'});
+assert.deepStrictEqual(candidateConfirmPayload('a.mkv', {tmdb_id: 62476, media_type: 'tv'}), {filename: 'a.mkv', tmdb_id: 62476, media_type: 'tv'});
+assert.deepStrictEqual(candidateSearchPayload('a.mkv', {}, {}, 'The Bureau'), {filename: 'a.mkv', title: '', media_type: 'auto'});
+assert.deepStrictEqual(candidateSearchPayload('Ebigejl.2024.mkv', {}, {}, 'Любимые фильмы'), {filename: 'Ebigejl.2024.mkv', title: '', media_type: 'auto'});
+assert.strictEqual(reviewReasonLabel('ambiguous_exact'), 'кілька близьких точних збігів');
+assert.strictEqual(reviewReasonLabel('duplicate_tmdb_id'), 'один TMDB ID у різних фільмів');
+assert.strictEqual(mediaTypeLabel('tv'), 'Серіал');
+assert.strictEqual(candidateTMDBURL({media_type: 'tv', tmdb_id: 62476}), 'https://www.themoviedb.org/tv/62476');
+assert.strictEqual(candidateTMDBURL({media_type: 'invalid', tmdb_id: 1}), '');
+assert.strictEqual(formatRuntime(104), '1 год 44 хв');
+assert.strictEqual(formatRuntime(14), '14 хв');
+assert.match(formatTMDBRating(7.12, 250), /★ 7\.1/);
+assert.deepStrictEqual(fixPayload(new Set(['a']), {a: 'Hint'}, {a: 'movie'}), [{filename: 'a', hint: 'Hint', media_type: 'movie'}]);
+assert.deepStrictEqual(reviewCounts([{tmdb_id: 0, needs_review: true}, {tmdb_id: 2, needs_review: true}, {tmdb_id: 3}]), {unresolved: 1, suspicious: 1});
+const editorCSS = readFileSync(new URL('./style.css', import.meta.url), 'utf8');
+assert.match(editorCSS, /\.candidate-item\s*\{[^}]*grid-template-columns:\s*minmax\(0, 1fr\) 96px 64px/);
+assert.match(editorCSS, /\.btn-refine-candidate\s*\{[^}]*width:\s*96px/);
+console.log('frontend state tests passed');

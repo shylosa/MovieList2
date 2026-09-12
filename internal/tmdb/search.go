@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"unicode"
@@ -15,6 +16,92 @@ import (
 
 	"github.com/xrash/smetrics"
 )
+
+// SearchCandidates returns at most five deterministic lightweight candidates.
+func (c *Client) SearchCandidates(ctx context.Context, title string, year int, requestedType string) ([]TMDBCandidate, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	title = strings.TrimSpace(title)
+	if title == "" {
+		return []TMDBCandidate{}, nil
+	}
+	types := []MediaType{MediaTypeMovie, MediaTypeTV}
+	switch strings.ToLower(strings.TrimSpace(requestedType)) {
+	case "movie":
+		types = types[:1]
+	case "tv":
+		types = types[1:]
+	case "", "auto":
+	default:
+		return nil, fmt.Errorf("invalid media_type %q", requestedType)
+	}
+	norm := normalizeForCompare(title)
+	seen := make(map[string]bool)
+	out := make([]TMDBCandidate, 0, 10)
+	search := func(query, language string) error {
+		for _, mediaType := range types {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			searchURL := fmt.Sprintf("%s/search/%s?api_key=%s&query=%s&language=%s", baseURL, mediaType, c.apiKey, url.QueryEscape(query), language)
+			var resp tmdbSearchResponse
+			if err := c.doRequestWithRetry(ctx, searchURL, &resp); err != nil {
+				return err
+			}
+			for _, result := range resp.Results {
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+				key := fmt.Sprintf("%s:%d", mediaType, result.ID)
+				if result.ID <= 0 || seen[key] {
+					continue
+				}
+				seen[key] = true
+				display, original := coalesce(result.Title, result.Name), coalesce(result.OriginalTitle, result.OriginalName)
+				resultYear := 0
+				date := coalesce(result.ReleaseDate, result.FirstAirDate)
+				if len(date) >= 4 {
+					resultYear, _ = strconv.Atoi(date[:4])
+				}
+				out = append(out, TMDBCandidate{TMDBID: result.ID, Title: display, OriginalTitle: original, Year: resultYear, MediaType: mediaType, Popularity: result.Popularity, Exact: normalizeForCompare(display) == norm || normalizeForCompare(original) == norm})
+			}
+		}
+		return nil
+	}
+	if err := search(title, "en-US"); err != nil {
+		return nil, err
+	}
+	if len(out) == 0 {
+		transliterated := strings.TrimSpace(latinToCyrillic(title))
+		if transliterated != "" && !strings.EqualFold(transliterated, title) {
+			if err := search(transliterated, "uk-UA"); err != nil {
+				return nil, err
+			}
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		a, b := out[i], out[j]
+		if a.Exact != b.Exact {
+			return a.Exact
+		}
+		ady, bdy := abs(a.Year-year), abs(b.Year-year)
+		if year > 0 && ady != bdy {
+			return ady < bdy
+		}
+		if a.Popularity != b.Popularity {
+			return a.Popularity > b.Popularity
+		}
+		if a.MediaType != b.MediaType {
+			return a.MediaType == MediaTypeTV
+		}
+		return a.TMDBID < b.TMDBID
+	})
+	if len(out) > 5 {
+		out = out[:5]
+	}
+	return out, nil
+}
 
 // tmdbSearchResult — один результат з /search/multi
 type tmdbSearchResult struct {
@@ -56,6 +143,7 @@ func (c *Client) SearchExactTitle(ctx context.Context, title string, year int, p
 	}
 	norm := normalizeForCompare(title)
 	var best *scoredResult
+	var exactCandidates []*scoredResult
 	endpoints := []struct {
 		name      string
 		typeValue MediaType
@@ -100,6 +188,7 @@ func (c *Client) SearchExactTitle(ctx context.Context, title string, year int, p
 				continue
 			}
 			candidate := &scoredResult{result: result, score: score, year: resultYear, matchedAlias: matchedAlias}
+			exactCandidates = append(exactCandidates, candidate)
 			if best == nil || candidate.score > best.score || (candidate.score == best.score && candidate.result.ID < best.result.ID) {
 				best = candidate
 			}
@@ -113,6 +202,13 @@ func (c *Client) SearchExactTitle(ctx context.Context, title string, year int, p
 	if err == nil && info != nil {
 		info.SearchTitle = title
 		info.MatchedAlias = best.matchedAlias
+		sort.Slice(exactCandidates, func(i, j int) bool {
+			if exactCandidates[i].score != exactCandidates[j].score {
+				return exactCandidates[i].score > exactCandidates[j].score
+			}
+			return exactCandidates[i].result.ID < exactCandidates[j].result.ID
+		})
+		info.AmbiguousExact = len(exactCandidates) > 1 && exactCandidates[0].result.ID != exactCandidates[1].result.ID && exactCandidates[0].score-exactCandidates[1].score <= 10
 	}
 	return info, err
 }

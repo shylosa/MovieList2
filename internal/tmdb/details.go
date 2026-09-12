@@ -25,6 +25,9 @@ type tmdbMovieDetails struct {
 	Overview      string          `json:"overview"`
 	PosterPath    string          `json:"poster_path"`
 	Genres        []tmdbNamedItem `json:"genres"`
+	VoteAverage   float64         `json:"vote_average"`
+	VoteCount     int             `json:"vote_count"`
+	Runtime       int             `json:"runtime"`
 	Credits       struct {
 		Cast []tmdbNamedItem `json:"cast"`
 	} `json:"credits"`
@@ -32,14 +35,17 @@ type tmdbMovieDetails struct {
 
 // tmdbTVDetails — відповідь TMDB для /tv/{id}
 type tmdbTVDetails struct {
-	ID           int             `json:"id"`
-	Name         string          `json:"name"`
-	OriginalName string          `json:"original_name"`
-	FirstAirDate string          `json:"first_air_date"`
-	Overview     string          `json:"overview"`
-	PosterPath   string          `json:"poster_path"`
-	Genres       []tmdbNamedItem `json:"genres"`
-	Credits      struct {
+	ID             int             `json:"id"`
+	Name           string          `json:"name"`
+	OriginalName   string          `json:"original_name"`
+	FirstAirDate   string          `json:"first_air_date"`
+	Overview       string          `json:"overview"`
+	PosterPath     string          `json:"poster_path"`
+	Genres         []tmdbNamedItem `json:"genres"`
+	VoteAverage    float64         `json:"vote_average"`
+	VoteCount      int             `json:"vote_count"`
+	EpisodeRuntime []int           `json:"episode_run_time"`
+	Credits        struct {
 		Cast []tmdbNamedItem `json:"cast"`
 	} `json:"credits"`
 }
@@ -65,14 +71,16 @@ func (c *Client) getMovieDetails(ctx context.Context, id int, originalFilename s
 
 		if finalInfo == nil {
 			finalInfo = &MovieInfo{
-				TMDBID:    d.ID,
-				TitleUA:   d.Title,
-				TitleEN:   d.OriginalTitle,
-				Year:      extractYearFromDate(d.ReleaseDate),
-				Plot:      d.Overview,
-				Genres:    joinGenres(d.Genres),
-				Cast:      joinCast(d.Credits.Cast),
-				MediaType: MediaTypeMovie,
+				TMDBID:      d.ID,
+				TitleUA:     d.Title,
+				TitleEN:     d.OriginalTitle,
+				Year:        extractYearFromDate(d.ReleaseDate),
+				Plot:        d.Overview,
+				Genres:      joinGenres(d.Genres),
+				Cast:        joinCast(d.Credits.Cast),
+				MediaType:   MediaTypeMovie,
+				VoteAverage: d.VoteAverage,
+				VoteCount:   d.VoteCount,
 			}
 			if d.PosterPath != "" {
 				finalInfo.PosterURL = imageBaseURL + d.PosterPath
@@ -145,14 +153,16 @@ func (c *Client) getTVDetails(ctx context.Context, id int, originalFilename stri
 
 		if finalInfo == nil {
 			finalInfo = &MovieInfo{
-				TMDBID:    d.ID,
-				TitleUA:   d.Name,
-				TitleEN:   d.OriginalName,
-				Year:      extractYearFromDate(d.FirstAirDate),
-				Plot:      d.Overview,
-				Genres:    joinGenres(d.Genres),
-				Cast:      joinCast(d.Credits.Cast),
-				MediaType: MediaTypeTV,
+				TMDBID:      d.ID,
+				TitleUA:     d.Name,
+				TitleEN:     d.OriginalName,
+				Year:        extractYearFromDate(d.FirstAirDate),
+				Plot:        d.Overview,
+				Genres:      joinGenres(d.Genres),
+				Cast:        joinCast(d.Credits.Cast),
+				MediaType:   MediaTypeTV,
+				VoteAverage: d.VoteAverage,
+				VoteCount:   d.VoteCount,
 			}
 			if d.PosterPath != "" {
 				finalInfo.PosterURL = imageBaseURL + d.PosterPath
@@ -202,13 +212,96 @@ func (c *Client) getTVDetails(ctx context.Context, id int, originalFilename stri
 // GetDetails — публічний диспетчер: викликає movie або tv залежно від типу.
 // originalFilename використовується тільки для іменування файлу постера.
 func (c *Client) GetDetails(ctx context.Context, mediaType MediaType, id int, originalFilename string) (*MovieInfo, error) {
-	switch mediaType {
-	case MediaTypeTV:
-		return c.getTVDetails(ctx, id, originalFilename)
-	default:
-		// Невідомий тип → вважаємо фільмом (безпечний дефолт)
-		return c.getMovieDetails(ctx, id, originalFilename)
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
+	if mediaType != MediaTypeTV {
+		mediaType = MediaTypeMovie
+	}
+	key := fmt.Sprintf("%s:%d", mediaType, id)
+	var info *MovieInfo
+	if cached, ok := c.detailsCache.Load(key); ok {
+		copy := *(cached.(*MovieInfo))
+		info = &copy
+		c.cacheHits.Add(1)
+	} else {
+		var err error
+		if mediaType == MediaTypeTV {
+			info, err = c.getTVDetails(ctx, id, "")
+		} else {
+			info, err = c.getMovieDetails(ctx, id, "")
+		}
+		if err != nil || info == nil {
+			return info, err
+		}
+		copy := *info
+		copy.LocalPosterPath = ""
+		c.detailsCache.Store(key, &copy)
+	}
+	if info.PosterURL != "" && originalFilename != "" {
+		lp, err := c.DownloadPoster(ctx, info.PosterURL, fmt.Sprintf("%d_%s", info.TMDBID, originalFilename))
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			utils.LoggerWithTrace(ctx).Warn("poster_download_failed", slog.Int("tmdb_id", info.TMDBID), slog.Any("error", err))
+		}
+		info.LocalPosterPath = lp
+	}
+	return info, nil
+}
+
+// GetCandidateDetails returns on-demand preview data without credits, aliases,
+// or a local poster download.
+func (c *Client) GetCandidateDetails(ctx context.Context, mediaType MediaType, id int) (*CandidateDetails, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if id <= 0 || (mediaType != MediaTypeMovie && mediaType != MediaTypeTV) {
+		return nil, fmt.Errorf("invalid candidate identity")
+	}
+	key := fmt.Sprintf("candidate:%s:%d", mediaType, id)
+	if cached, ok := c.candidateDetailsCache.Load(key); ok {
+		copy := *(cached.(*CandidateDetails))
+		c.cacheHits.Add(1)
+		return &copy, nil
+	}
+	requestURL := fmt.Sprintf("%s/%s/%d?api_key=%s&language=uk-UA", baseURL, mediaType, id, c.apiKey)
+	result := &CandidateDetails{TMDBID: id, MediaType: mediaType}
+	if mediaType == MediaTypeMovie {
+		var d tmdbMovieDetails
+		if err := c.doRequestWithRetry(ctx, requestURL, &d); err != nil {
+			return nil, err
+		}
+		if d.ID <= 0 {
+			return nil, ErrNotFound
+		}
+		result.Title, result.OriginalTitle, result.ReleaseDate, result.Runtime = d.Title, d.OriginalTitle, d.ReleaseDate, d.Runtime
+		result.Genres, result.Overview, result.VoteAverage, result.VoteCount = joinGenres(d.Genres), d.Overview, d.VoteAverage, d.VoteCount
+		if d.PosterPath != "" {
+			result.PosterURL = imageBaseURL + d.PosterPath
+		}
+		result.ShortFilm = result.Runtime > 0 && result.Runtime <= 40
+	} else {
+		var d tmdbTVDetails
+		if err := c.doRequestWithRetry(ctx, requestURL, &d); err != nil {
+			return nil, err
+		}
+		if d.ID <= 0 {
+			return nil, ErrNotFound
+		}
+		result.Title, result.OriginalTitle, result.ReleaseDate = d.Name, d.OriginalName, d.FirstAirDate
+		if len(d.EpisodeRuntime) > 0 {
+			result.Runtime = d.EpisodeRuntime[0]
+		}
+		result.Genres, result.Overview, result.VoteAverage, result.VoteCount = joinGenres(d.Genres), d.Overview, d.VoteAverage, d.VoteCount
+		if d.PosterPath != "" {
+			result.PosterURL = imageBaseURL + d.PosterPath
+		}
+	}
+	copy := *result
+	c.candidateDetailsCache.Store(key, &copy)
+	return result, nil
 }
 
 // --- helpers ---

@@ -10,12 +10,12 @@ import (
 func TestMovieValues(t *testing.T) {
 	values := movieValues([]storage.Movie{{
 		Filename: "Series/Season 1/Episode.mkv", TitleUA: "Назва", TitleEN: "Title", Year: "2026",
-		Genres: "Drama", Cast: "Actor", Plot: "Plot", PosterURL: "https://example/poster.jpg",
+		VoteAverage: 7.4, VoteCount: 120, Genres: "Drama", Cast: "Actor", Plot: "Plot", PosterURL: "https://example/poster.jpg",
 	}})
-	if len(values) != 2 || len(values[0]) != 8 {
+	if len(values) != 2 || len(values[0]) != 10 {
 		t.Fatalf("dimensions = %dx%d", len(values), len(values[0]))
 	}
-	want := []interface{}{"Series", "Назва", "Title", "2026", "Drama", "Actor", "Plot", "https://example/poster.jpg"}
+	want := []interface{}{"Series", "Назва", "Title", "2026", 7.4, 120, "Drama", "Actor", "Plot", "https://example/poster.jpg"}
 	if !reflect.DeepEqual(values[1], want) {
 		t.Fatalf("row = %#v; want %#v", values[1], want)
 	}

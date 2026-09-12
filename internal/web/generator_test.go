@@ -16,6 +16,8 @@ func TestGeneratePosterSourcesAndStableIDs(t *testing.T) {
 		TitleEN:         "Enemy",
 		PosterURL:       "https://image.tmdb.org/t/p/w500/remote.jpg",
 		LocalPosterPath: `posters\local.jpg`,
+		VoteAverage:     7.4,
+		VoteCount:       120,
 	}
 	for _, tc := range []struct {
 		name     string
@@ -43,6 +45,12 @@ func TestGeneratePosterSourcesAndStableIDs(t *testing.T) {
 				if !strings.Contains(html, id) {
 					t.Fatalf("missing stable HTML %s", id)
 				}
+			}
+			if !strings.Contains(html, "★ 7.4") || !strings.Contains(html, "120 оцінок TMDB") {
+				t.Fatal("TMDB rating missing from showcase")
+			}
+			if !strings.Contains(html, ".movie-list.list-mode .rating { justify-self: start; }") || !strings.Contains(html, "width: max-content") {
+				t.Fatal("TMDB rating must remain compact in list mode")
 			}
 		})
 	}

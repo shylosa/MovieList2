@@ -1,5 +1,37 @@
 export namespace main {
 	
+	export class CandidateConfirmRequest {
+	    filename: string;
+	    tmdb_id: number;
+	    media_type: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new CandidateConfirmRequest(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.filename = source["filename"];
+	        this.tmdb_id = source["tmdb_id"];
+	        this.media_type = source["media_type"];
+	    }
+	}
+	export class CandidateSearchRequest {
+	    filename: string;
+	    title: string;
+	    media_type: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new CandidateSearchRequest(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.filename = source["filename"];
+	        this.title = source["title"];
+	        this.media_type = source["media_type"];
+	    }
+	}
 	export class FixRequest {
 	    filename: string;
 	    hint: string;
@@ -35,6 +67,13 @@ export namespace storage {
 	    poster_url: string;
 	    local_poster_path: string;
 	    media_type: string;
+	    recognition_source: string;
+	    recognition_confidence: number;
+	    verification_score: number;
+	    needs_review: boolean;
+	    review_reason?: string;
+	    vote_average: number;
+	    vote_count: number;
 	
 	    static createFrom(source: any = {}) {
 	        return new Movie(source);
@@ -55,6 +94,74 @@ export namespace storage {
 	        this.poster_url = source["poster_url"];
 	        this.local_poster_path = source["local_poster_path"];
 	        this.media_type = source["media_type"];
+	        this.recognition_source = source["recognition_source"];
+	        this.recognition_confidence = source["recognition_confidence"];
+	        this.verification_score = source["verification_score"];
+	        this.needs_review = source["needs_review"];
+	        this.review_reason = source["review_reason"];
+	        this.vote_average = source["vote_average"];
+	        this.vote_count = source["vote_count"];
+	    }
+	}
+
+}
+
+export namespace tmdb {
+	
+	export class CandidateDetails {
+	    tmdb_id: number;
+	    media_type: string;
+	    title: string;
+	    original_title: string;
+	    release_date: string;
+	    runtime: number;
+	    genres: string;
+	    overview: string;
+	    poster_url: string;
+	    vote_average: number;
+	    vote_count: number;
+	    short_film: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new CandidateDetails(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.tmdb_id = source["tmdb_id"];
+	        this.media_type = source["media_type"];
+	        this.title = source["title"];
+	        this.original_title = source["original_title"];
+	        this.release_date = source["release_date"];
+	        this.runtime = source["runtime"];
+	        this.genres = source["genres"];
+	        this.overview = source["overview"];
+	        this.poster_url = source["poster_url"];
+	        this.vote_average = source["vote_average"];
+	        this.vote_count = source["vote_count"];
+	        this.short_film = source["short_film"];
+	    }
+	}
+	export class TMDBCandidate {
+	    tmdb_id: number;
+	    title: string;
+	    original_title: string;
+	    year: number;
+	    media_type: string;
+	    popularity: number;
+	
+	    static createFrom(source: any = {}) {
+	        return new TMDBCandidate(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.tmdb_id = source["tmdb_id"];
+	        this.title = source["title"];
+	        this.original_title = source["original_title"];
+	        this.year = source["year"];
+	        this.media_type = source["media_type"];
+	        this.popularity = source["popularity"];
 	    }
 	}
 

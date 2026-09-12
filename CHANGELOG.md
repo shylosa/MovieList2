@@ -2,6 +2,15 @@
 
 All notable changes to this project. Dates are approximate (session-based).
 
+## Вересень 2026 — Audit Round 25
+
+* Додано versioned `ai_resolutions`, recognition provenance та окремий `NeedsReview` стан.
+* Редактор має lightweight TMDB candidate picker без poster/details запитів до підтвердження.
+* TMDB details кешуються на сесію окремо від filename-specific постерів; orphan cleanup виконується лише після успішного scan.
+* Додано grouped-TV preference, TMDB request metrics, frontend unit tests і окремі unresolved/suspicious counters.
+* Candidate picker отримав on-demand `Уточнити`: кешований popover із runtime, short-film marker, CDN-постером, жанрами, описом і рейтингом без credits або локального poster download.
+* Рейтинг і кількість голосів TMDB зберігаються в SQLite, показуються в редакторі/Вітрині/Sheets і lazily дозаповнюються для старих записів.
+
 ## Вересень 2026 — Audit Round 24 Fix Patch
 
 * Automatic Gemini→TMDB merge тепер спочатку виконує exact dual-type lookup; Gemini media type є tie-breaker, а не жорстким endpoint lock.

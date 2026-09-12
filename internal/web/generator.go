@@ -114,6 +114,7 @@ const htmlLayout = `<!DOCTYPE html>
         .title-meta-group { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin-bottom: 5px; }
         .title-ua { width: 100%; font-size: 1.6em; font-weight: bold; margin: 0; color: #ffffff; }
         .year { background: #e50914; color: #fff; padding: 3px 8px; border-radius: 4px; font-size: 0.85em; }
+		.rating { background: #5a4510; color: #ffd76a; padding: 3px 8px; border-radius: 4px; font-size: 0.85em; white-space: nowrap; width: max-content; }
         .genre { color: #e50914; font-size: 0.9em; font-weight: bold; }
         .title-en { font-size: 1em; color: #888; margin: 0 0 15px 0; font-style: italic; }
         .plot { margin-top: 10px; font-size: 0.95em; color: #ccc; flex-grow: 1; }
@@ -128,6 +129,7 @@ const htmlLayout = `<!DOCTYPE html>
         .movie-list.list-mode .title-meta-group { grid-column: 1; grid-row: 1; display: grid; grid-template-columns: 240px 50px 1fr; gap: 12px; align-items: start; width: 100%; }
         .movie-list.list-mode .title-ua { width: auto; margin: 0; font-size: 1.25em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; line-height: 1.2; }
         .movie-list.list-mode .year { text-align: center; padding: 2px 5px; font-size: 0.8em; line-height: 1.2; }
+		.movie-list.list-mode .rating { justify-self: start; }
         .movie-list.list-mode .genre { margin: 0; font-size: 0.85em; line-height: 1.2; }
         .movie-list.list-mode .title-en { grid-column: 1; grid-row: 2; font-size: 0.85em; margin-bottom: 5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
         .movie-list.list-mode .details { grid-column: 1; grid-row: 3 / 5; font-size: 0.85em; margin: 0; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
@@ -468,6 +470,7 @@ const htmlLayout = `<!DOCTYPE html>
                             </a>
                         </h2>
                         <span class="year">{{if .Year}}{{.Year}}{{else}}—{{end}}</span>
+						{{if gt .VoteCount 0}}<span class="rating" title="{{.VoteCount}} оцінок TMDB">★ {{printf "%.1f" .VoteAverage}}</span>{{end}}
                         <span class="genre">{{.Genres}}</span>
                     </div>
                     <h3 class="title-en">{{.TitleEN}}</h3>

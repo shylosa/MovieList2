@@ -1,8 +1,9 @@
 import './style.css';
 
-import { GetAppVersion, GetMovies, GetStats, RunScan, StopScan, GetAIModels, OpenLogs, FixSelected, SyncToCloud, SyncToGitHub, OpenShowcase, OpenSheet, OpenGoogleSheet, OpenGitHubRepo, OpenGitHubPage, OpenURL, DeleteMovie, SelectMediaFolder } from '../wailsjs/go/main/App.js';
+import { GetAppVersion, GetMovies, GetStats, RunScan, StopScan, GetAIModels, OpenLogs, FixSelected, SearchTMDBCandidates, ConfirmTMDBCandidate, GetTMDBCandidateDetails, SyncToCloud, SyncToGitHub, OpenShowcase, OpenSheet, OpenGoogleSheet, OpenGitHubRepo, OpenGitHubPage, OpenURL, DeleteMovie, SelectMediaFolder } from '../wailsjs/go/main/App.js';
 import { Quit, WindowMinimise, WindowToggleMaximise, EventsOn } from '../wailsjs/runtime/runtime.js';
 import logoUrl from './assets/images/appicon.png';
+import { candidateConfirmPayload, candidateSearchPayload, fixPayload, reviewReasonLabel, mediaTypeLabel, candidateTMDBURL, formatRuntime, formatTMDBRating } from './editor-state.js';
 
 document.querySelector('#app').innerHTML = `
   <div class="titlebar">
@@ -104,6 +105,7 @@ document.querySelector('#app').innerHTML = `
         <div id="panel-editor" class="panel">
             <div class="editor-toolbar">
                 <input type="text" id="search-input" placeholder="Пошук..." />
+                <label><input type="checkbox" id="review-only" /> Потребують перевірки</label>
                 <div style="display: flex; gap: 10px;">
                     <button id="btn-fix" style="cursor: pointer;">✨ Виправити вибрані</button>
                     <button id="btn-delete-selected" class="btn-danger">🗑 Видалити вибрані</button>
@@ -382,7 +384,7 @@ async function loadStats() {
         else if (stats.unrec > 0) {
             document.getElementById('val-unrec').innerText = `⚠ ${stats.unrec}`;
             document.getElementById('val-unrec').style.color = "var(--warn-yellow)";
-            document.getElementById('sub-unrec').innerText = "Потребує уваги";
+            document.getElementById('sub-unrec').innerText = `Нерозпізнані: ${stats.unrec}; сумнівні: ${stats.suspicious || 0}`;
         }
         // Якщо файли є і всі розпізнані успішно
         else {
@@ -402,13 +404,20 @@ let allMovies = []; // Зберігаємо список глобально дл
 let hintsCache = {}; // 👈 ФІКС: Кеш для текстових підказок
 let mediaTypesCache = {}; // auto | movie | tv для ручного уточнення
 let checkedCache = new Set(); // 👈 ФІКС: Кеш для вибраних чекбоксів
+const candidateSearches = new Set();
 
-async function loadMovies() {
+async function loadMovies(focusFilename = '') {
     const list = document.getElementById('movie-list');
     list.innerHTML = "Завантаження...";
     try {
         allMovies = await GetMovies();
-        renderMovies(allMovies);
+		renderFilteredMovies();
+		if (focusFilename) {
+			requestAnimationFrame(() => {
+				const row = Array.from(document.querySelectorAll('.movie-row')).find(item => item.dataset.filename === focusFilename);
+				if (row) { row.scrollIntoView({block: 'center'}); row.classList.add('movie-row-focused'); setTimeout(() => row.classList.remove('movie-row-focused'), 1600); }
+			});
+		}
     } catch (e) { console.error(e); }
 }
 
@@ -431,6 +440,7 @@ function renderMovies(movies) {
 
 		const row = document.createElement('div');
 		row.className = 'movie-row';
+		row.dataset.filename = m.filename;
 
 		const checkboxCol = document.createElement('div');
 		checkboxCol.className = 'col-cb';
@@ -465,6 +475,10 @@ function renderMovies(movies) {
 		link.style.fontWeight = '500';
 		link.textContent = title;
 		titleCol.appendChild(link);
+		if (m.vote_count > 0) { const rating = document.createElement('span'); rating.className = 'movie-rating'; rating.textContent = `★ ${Number(m.vote_average).toFixed(1)}`; rating.title = `${m.vote_count} оцінок TMDB`; titleCol.appendChild(rating); }
+		if (m.needs_review && m.tmdb_id) {
+			const badge = document.createElement('span'); badge.className = 'review-badge'; badge.textContent = `Сумнівний: ${reviewReasonLabel(m.review_reason)}`; titleCol.appendChild(badge);
+		}
 
 		const mediaTypeCol = document.createElement('div');
 		mediaTypeCol.className = 'col-media-type';
@@ -488,9 +502,21 @@ function renderMovies(movies) {
 		hintInput.dataset.filename = m.filename;
 		hintInput.value = hintVal;
 		hintCol.appendChild(hintInput);
+		const candidatesButton = document.createElement('button');
+		candidatesButton.type = 'button';
+		candidatesButton.className = 'btn-candidates';
+		candidatesButton.dataset.filename = m.filename;
+		candidatesButton.dataset.title = m.title_en || m.title_ua || '';
+		candidatesButton.textContent = 'Знайти варіанти';
+		hintCol.appendChild(candidatesButton);
 
 		row.append(checkboxCol, fileCol, arrowCol, yearCol, titleCol, mediaTypeCol, hintCol);
 		list.appendChild(row);
+		const candidatePanel = document.createElement('div');
+		candidatePanel.className = 'candidate-panel';
+		candidatePanel.dataset.filename = m.filename;
+		candidatePanel.hidden = true;
+		list.appendChild(candidatePanel);
     });
 
     document.querySelectorAll('.tmdb-link').forEach(el => {
@@ -529,17 +555,61 @@ document.getElementById('movie-list').addEventListener('change', (e) => {
 });
 
 // Пошук по списку (без звернення до бази)
-document.getElementById('search-input').addEventListener('input', (e) => {
-    const q = e.target.value.toLowerCase();
+function renderFilteredMovies() {
+	const q = document.getElementById('search-input').value.toLowerCase();
+	const reviewOnly = document.getElementById('review-only').checked;
     const filtered = allMovies.filter(m => {
         const title = (m.title_ua || m.title_en || "").toLowerCase();
         const label = (m.file_label || m.filename || "").toLowerCase();
-        return m.filename.toLowerCase().includes(q) || title.includes(q) || label.includes(q);
+		return (!reviewOnly || m.needs_review) && (m.filename.toLowerCase().includes(q) || title.includes(q) || label.includes(q));
     });
     renderMovies(filtered);
-});
+}
+document.getElementById('search-input').addEventListener('input', renderFilteredMovies);
+document.getElementById('review-only').addEventListener('change', () => document.getElementById('search-input').dispatchEvent(new Event('input')));
 
 document.getElementById('movie-list').addEventListener('click', async (e) => {
+	if (e.target.classList.contains('btn-candidates')) {
+		const filename = e.target.dataset.filename;
+		if (candidateSearches.has(filename)) return;
+		candidateSearches.add(filename);
+		e.target.disabled = true;
+		const panel = document.querySelector(`.candidate-panel[data-filename="${CSS.escape(filename)}"]`);
+		panel.hidden = false;
+		panel.replaceChildren(document.createTextNode('Пошук…'));
+		try {
+			const candidates = await SearchTMDBCandidates(candidateSearchPayload(filename, hintsCache, mediaTypesCache));
+			panel.replaceChildren();
+			if (!candidates || candidates.length === 0) panel.textContent = 'Нічого не знайдено';
+			for (const candidate of candidates || []) {
+				const item = document.createElement('div'); item.className = 'candidate-item';
+				const label = document.createElement('span'); label.className = 'candidate-label';
+				label.appendChild(document.createTextNode(`${candidate.title} · ${candidate.original_title || '—'} · ${candidate.year || '—'} · ${mediaTypeLabel(candidate.media_type)} · `));
+				const tmdbLink = document.createElement('a');
+				tmdbLink.className = 'candidate-tmdb-link'; tmdbLink.textContent = `TMDB ${candidate.tmdb_id}`; tmdbLink.href = candidateTMDBURL(candidate);
+				tmdbLink.onclick = (event) => { event.preventDefault(); const url = candidateTMDBURL(candidate); if (url) OpenURL(url); };
+				label.appendChild(tmdbLink);
+				const choose = document.createElement('button'); choose.type = 'button'; choose.textContent = 'Обрати'; choose.className = 'btn-choose-candidate';
+				choose.onclick = async () => { await ConfirmTMDBCandidate(candidateConfirmPayload(filename, candidate)); await loadMovies(filename); await loadStats(); };
+				const refine = document.createElement('button'); refine.type = 'button'; refine.textContent = 'Уточнити'; refine.className = 'btn-refine-candidate';
+				const popover = document.createElement('div'); popover.className = 'candidate-popover'; popover.hidden = true;
+				refine.onclick = async () => {
+					if (refine.dataset.loaded === 'true') { popover.hidden = !popover.hidden; return; }
+					refine.disabled = true; refine.textContent = 'Завантаження…';
+					try { const details = await GetTMDBCandidateDetails(candidateConfirmPayload(filename, candidate)); renderCandidatePopover(popover, details); refine.dataset.loaded = 'true'; refine.textContent = 'Деталі ✓'; popover.hidden = false; }
+					catch (err) { refine.textContent = 'Повторити'; popover.textContent = `Не вдалося завантажити деталі: ${err}`; }
+					finally { refine.disabled = false; }
+				};
+				refine.onmouseenter = () => { if (refine.dataset.loaded === 'true') popover.hidden = false; };
+				item.onmouseleave = () => { if (refine.dataset.loaded === 'true') popover.hidden = true; };
+				item.append(label, refine, choose, popover); panel.appendChild(item);
+			}
+			const cancel = document.createElement('button'); cancel.type = 'button'; cancel.textContent = 'Скасувати'; cancel.onclick = () => { panel.hidden = true; };
+			panel.appendChild(cancel);
+		} catch (err) { panel.textContent = `Помилка пошуку: ${err}`; }
+		finally { candidateSearches.delete(filename); e.target.disabled = false; }
+		return;
+	}
     // Якщо клікнули по іконці видалення
     if (e.target.classList.contains('btn-del')) {
         const filename = e.target.getAttribute('data-filename');
@@ -570,16 +640,22 @@ document.getElementById('movie-list').addEventListener('click', async (e) => {
     }
 });
 
+function renderCandidatePopover(popover, details) {
+	popover.replaceChildren();
+	if (details.poster_url) { const img = document.createElement('img'); img.src = details.poster_url; img.alt = ''; img.className = 'candidate-popover-poster'; popover.appendChild(img); }
+	const body = document.createElement('div'); body.className = 'candidate-popover-body';
+	const heading = document.createElement('strong'); heading.textContent = details.title || details.original_title || 'Без назви';
+	const meta = document.createElement('div'); meta.textContent = `${details.release_date || 'дата невідома'} · ${formatRuntime(details.runtime)}${details.short_film ? ' · Короткометражний' : ''}`;
+	const rating = document.createElement('div'); rating.className = 'candidate-rating'; rating.textContent = formatTMDBRating(details.vote_average, details.vote_count);
+	const genres = document.createElement('div'); genres.textContent = details.genres || 'Жанри не вказані';
+	const overview = document.createElement('p'); overview.textContent = details.overview || 'Опис відсутній';
+	body.append(heading, meta, rating, genres, overview); popover.appendChild(body);
+}
+
 // Кнопка "Виправити вибрані"
 document.getElementById('btn-fix').onclick = () => {
-    const selected = [];
+	const selected = fixPayload(checkedCache, hintsCache, mediaTypesCache);
     // 👈 ФІКС: Беремо дані з кешу, а не з DOM, бо елементи можуть бути відфільтровані
-	checkedCache.forEach(filename => {
-		const hint = hintsCache[filename] || '';
-		const media_type = mediaTypesCache[filename] || 'auto';
-		selected.push({ filename, hint, media_type });
-    });
-
     if (selected.length === 0) return;
 
     // Очищаємо кеш після відправки

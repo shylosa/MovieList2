@@ -46,6 +46,36 @@ type MovieInfo struct {
 	PosterURL       string
 	LocalPosterPath string
 	MediaType       MediaType
+	AmbiguousExact  bool
+	VoteAverage     float64
+	VoteCount       int
+}
+
+type CandidateDetails struct {
+	TMDBID        int       `json:"tmdb_id"`
+	MediaType     MediaType `json:"media_type"`
+	Title         string    `json:"title"`
+	OriginalTitle string    `json:"original_title"`
+	ReleaseDate   string    `json:"release_date"`
+	Runtime       int       `json:"runtime"`
+	Genres        string    `json:"genres"`
+	Overview      string    `json:"overview"`
+	PosterURL     string    `json:"poster_url"`
+	VoteAverage   float64   `json:"vote_average"`
+	VoteCount     int       `json:"vote_count"`
+	ShortFilm     bool      `json:"short_film"`
+}
+
+// TMDBCandidate is a lightweight search preview. It deliberately contains no
+// poster or details payload, so displaying choices costs only typed searches.
+type TMDBCandidate struct {
+	TMDBID        int       `json:"tmdb_id"`
+	Title         string    `json:"title"`
+	OriginalTitle string    `json:"original_title"`
+	Year          int       `json:"year"`
+	MediaType     MediaType `json:"media_type"`
+	Popularity    float64   `json:"popularity"`
+	Exact         bool      `json:"-"`
 }
 
 // Scoring — ваги для ранжування результатів пошуку
@@ -64,5 +94,6 @@ const (
 	ScorePopularityLimit = 50 // max бонус від popularity
 
 	// Мінімальний поріг для прийняття результату
-	ScoreThreshold = 200
+	ScoreThreshold              = 200
+	ReviewVerificationThreshold = 0.90
 )
