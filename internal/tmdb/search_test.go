@@ -1,8 +1,10 @@
 package tmdb
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -12,6 +14,26 @@ import (
 
 	"golang.org/x/time/rate"
 )
+
+func TestRankResultsInfoLogHasSummaryWithoutCandidateDebugSpam(t *testing.T) {
+	var output bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&output, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	defer slog.SetDefault(previous)
+	c := &Client{}
+	results := []tmdbSearchResult{
+		{ID: 1, Title: "Dune", OriginalTitle: "Dune", ReleaseDate: "2021-01-01", MediaType: "movie"},
+		{ID: 2, Title: "Dune", OriginalTitle: "Dune", ReleaseDate: "2024-01-01", MediaType: "movie"},
+	}
+	best := c.rankResults(context.Background(), results, "Dune", 2021, MediaTypeMovie)
+	if best == nil {
+		t.Fatal("expected winner")
+	}
+	logText := output.String()
+	if strings.Contains(logText, "candidate_evaluated") || strings.Contains(logText, "best_candidate_rejected") {
+		t.Fatalf("DEBUG candidate noise leaked at INFO: %s", logText)
+	}
+}
 
 func TestMatchScore(t *testing.T) {
 	tests := []struct {

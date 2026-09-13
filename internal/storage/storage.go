@@ -525,7 +525,9 @@ func (db *DB) GetAIResolution(ctx context.Context, filename string, pipelineVers
 
 func (db *DB) SaveAIResolution(ctx context.Context, r AIResolution) error {
 	query := `INSERT INTO ai_resolutions (original_filename, resolved_title, year, media_type, confidence, pipeline_version, provider, model, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-	ON CONFLICT(original_filename) DO UPDATE SET resolved_title=excluded.resolved_title, year=excluded.year, media_type=excluded.media_type, confidence=excluded.confidence, pipeline_version=excluded.pipeline_version, provider=excluded.provider, model=excluded.model, updated_at=excluded.updated_at`
+	ON CONFLICT(original_filename) DO UPDATE SET resolved_title=excluded.resolved_title, year=excluded.year, media_type=excluded.media_type, confidence=excluded.confidence, pipeline_version=excluded.pipeline_version, provider=excluded.provider, model=excluded.model, updated_at=excluded.updated_at
+	WHERE excluded.pipeline_version > ai_resolutions.pipeline_version
+	   OR (excluded.pipeline_version = ai_resolutions.pipeline_version AND excluded.updated_at >= ai_resolutions.updated_at)`
 	if r.UpdatedAt.IsZero() {
 		r.UpdatedAt = time.Now().UTC()
 	}

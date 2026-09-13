@@ -1,5 +1,7 @@
 # MovieList Improvement Implementation Plan
 
+> **Архівний план попередніх раундів.** Описані нижче зміни вже реалізовані або замінені новішою архітектурою. Актуальними джерелами є `AGENTS.md`, `CHECKLIST.md`, `README.md` і `CHANGELOG.md`.
+
 This plan addresses all 5 phases of improvements specified in [CHECKLIST.md](file:///d:/movielist2/movielist-app/CHECKLIST.md) to optimize TMDB searching, error handling, scoring, localization logic, and trace ID propagation.
 
 ## Proposed Changes

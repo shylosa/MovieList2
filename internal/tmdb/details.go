@@ -252,18 +252,36 @@ func (c *Client) GetDetails(ctx context.Context, mediaType MediaType, id int, or
 		info = &copy
 		c.cacheHits.Add(1)
 	} else {
-		var err error
-		if mediaType == MediaTypeTV {
-			info, err = c.getTVDetails(ctx, id, "")
-		} else {
-			info, err = c.getMovieDetails(ctx, id, "")
+		result := c.detailsGroup.DoChan(key, func() (any, error) {
+			if cached, ok := c.detailsCache.Load(key); ok {
+				c.cacheHits.Add(1)
+				return cached, nil
+			}
+			var loaded *MovieInfo
+			var err error
+			if mediaType == MediaTypeTV {
+				loaded, err = c.getTVDetails(ctx, id, "")
+			} else {
+				loaded, err = c.getMovieDetails(ctx, id, "")
+			}
+			if err != nil || loaded == nil {
+				return loaded, err
+			}
+			copy := *loaded
+			copy.LocalPosterPath = ""
+			c.detailsCache.Store(key, &copy)
+			return &copy, nil
+		})
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case loaded := <-result:
+			if loaded.Err != nil || loaded.Val == nil {
+				return nil, loaded.Err
+			}
+			copy := *(loaded.Val.(*MovieInfo))
+			info = &copy
 		}
-		if err != nil || info == nil {
-			return info, err
-		}
-		copy := *info
-		copy.LocalPosterPath = ""
-		c.detailsCache.Store(key, &copy)
 	}
 	if info.PosterURL != "" && originalFilename != "" {
 		lp, err := c.DownloadPoster(ctx, info.PosterURL, fmt.Sprintf("%d_%s", info.TMDBID, originalFilename))

@@ -47,7 +47,7 @@ MovieList App — desktop application for cataloging local movie/TV collections.
 5. Parent directory fallback
 6. TMDB scoring and verification
 7. Metadata waterfall (`uk-UA → ru-RU → en-US`)
-8. Merge TMDB + Gemini (bypass Gemini if TMDB has valid Cyrillic `TitleUA`)
+8. Merge TMDB + Gemini (bypass Gemini only when TMDB title and plot are valid Ukrainian)
 9. SQLite batch save
 10. Gemini fallback queue
 11. Translation queue
@@ -68,7 +68,7 @@ MovieList App — desktop application for cataloging local movie/TV collections.
 * **Trust:** Gemini-generated IDs are **never** trusted directly.
 * **Language Cascade:** Always preserve: `uk-UA → ru-RU → en-US`.
 * **TMDB Search:** Use `/search/movie` or `/search/tv`. **Never** use `/search/multi`.
-* **Translation Queue:** Only verified entries may be translated. If TMDB provides an official Cyrillic title, **bypass Gemini completely**.
+* **Translation Queue:** Only verified entries may be translated. Bypass Gemini only for text validated as Ukrainian; Russian markers such as `ы`, `э`, `ъ`, `ё` require Ukrainian localization.
 * **Batch Persistence:** Always use transactional `SaveMoviesBatch()`. Never replace with N individual saves.
 * **Cancellation:** Always check `ctx.Err()` before network requests and at loop boundaries.
 * **Primary Key:** `movies.filename` is the primary key (full relative path). Never use rowid as identifier externally.
@@ -165,7 +165,7 @@ Examples: `Vrag` → `Враг`, `Nochnoj Rejs` → `Ночной Рейс`.
 
 **Do not rename without explicit migration:**
 
-* **Wails events:** `scan-started`, `scan-progress`, `scan-finished`, `log-message`, `github-sync-started`, `github-sync-finished`.
+* **Wails events:** `scan-started`, `scan-progress`, `scan-finished`, `log-message`, `github-sync-started`, `github-sync-finished`, `movie-updated`.
 * **HTML element IDs:** `id="noResults"`, `id="filteredCount"`, `id="filteredNum"`.
 * **Public methods:** `RunScan()`, `StopScan()`, `FixSelected()`, `GetMovies()`, `UpdateMovie()`, `SyncToCloud()`, `SyncToGitHub()`, `OpenGoogleSheet()`, `OpenGitHubRepo()`, `OpenGitHubPage()`.
 * **DB primary key:** `movies.filename` (relative path). Never replace with rowid externally.
@@ -182,7 +182,7 @@ Examples: `Vrag` → `Враг`, `Nochnoj Rejs` → `Ночной Рейс`.
 ## Environment Configuration
 
 ```env
-APP_VERSION=2.0
+APP_VERSION=2.4.0
 GEMINI_API_KEY=
 GEMINI_MODELS=gemini-2.5-flash,gemini-flash-lite-latest
 GROK_API_KEY=
@@ -198,18 +198,17 @@ GITHUB_PAGES_BRANCH=main
 
 ---
 
-## Active Work — Audit Round 25 (implementation underway; runtime verification pending)
+## Active Work — Round 26 (grouped TV safety; runtime verification pending)
 
-The active implementation specification is `CHECKLIST.md` (gitignored by design). Work must proceed in dependency order rather than treating its 143 checkboxes as independent tasks:
+The active implementation specification is `CHECKLIST.md` (gitignored by design). Round 26 corrects grouped-TV false positives such as `Superkopy.80.2026`: strong episode markers are authoritative preferences, while bare episode numbers require an adjacent pair with the same series signature.
 
-1. recognition provenance/review-state contracts and versioned AI cache;
-2. TMDB candidate search/confirmation backend;
-3. lightweight candidate-picker UI without posters;
-4. safe poster cleanup, TMDB details cache and exact-query optimization;
-5. grouped TV detection;
-6. frontend tests, quieter logs and documentation.
+1. distinguish strong episode markers from weak bare numbers;
+2. apply weak grouped-TV preference only to adjacent episodes with the same signature;
+3. protect parsed titles from generic parent directories;
+4. preserve review state for type/year/verification conflicts;
+5. finish explicit Round 25 test backlog and production runtime verification.
 
-Round 25 exclusions: migration framework, database backup/restore, file fingerprints/rename tracking and SQLite FTS. Do not expand scope into these items.
+Round 26 exclusions: migration framework, database backup/restore, file fingerprints/rename tracking and SQLite FTS. Do not expand scope into these items.
 
 Important delivery rules:
 
@@ -407,7 +406,8 @@ shutdown) — рівно один app_closed в кінці сесії. FIX-17 (f
 | Manual title correction | ✅ Authoritative exact title with `Авто / Фільм / Серіал`; strict mode limits typed endpoint. |
 | Automatic ambiguity | ✅ Exact movie+TV disambiguation before fuzzy Gemini merge; `The Bureau` regression selects TV 62476. |
 | Scan metrics | ✅ `processed_total` is distinct from complete collection `disk_total`. |
-| Active Round 25 | 🧪 Implemented; production runtime verification and a small set of explicit checklist follow-ups remain. |
-| Tests | ✅ Round 25 automated verification is maintained in `CHECKLIST.md`; runtime-only checks require a fresh production log. |
+| Active Round 26 | 🧪 Grouped-TV safety implemented; production runtime verification remains. |
+| Candidate confirmation | ✅ TMDB selection saves in foreground; poster/localization finish in a guarded `App.wg` task and emit `movie-updated`. |
+| Tests | ✅ Automated Round 26 verification is maintained in `CHECKLIST.md`; runtime-only checks require a fresh production log. |
 
 > For full change history see [CHANGELOG.md](./CHANGELOG.md).

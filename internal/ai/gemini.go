@@ -96,6 +96,8 @@ type Client struct {
 	recognitionBatchCalls atomic.Int64
 	recognitionRetryCalls atomic.Int64
 	disambiguationCalls   atomic.Int64
+	geminiGenerateCalls   atomic.Int64
+	grokCalls             atomic.Int64
 	// 🟢 ДОДАНО: Динамічний каскад та м'ютекс для його захисту
 	activeModels      []string
 	modelsMu          sync.RWMutex
@@ -110,12 +112,16 @@ type CallMetrics struct {
 	RecognitionBatch int64
 	RecognitionRetry int64
 	Disambiguation   int64
+	GeminiGenerate   int64
+	Grok             int64
 }
 
 func (c *Client) ResetCallMetrics() {
 	c.recognitionBatchCalls.Store(0)
 	c.recognitionRetryCalls.Store(0)
 	c.disambiguationCalls.Store(0)
+	c.geminiGenerateCalls.Store(0)
+	c.grokCalls.Store(0)
 }
 
 func (c *Client) CallMetrics() CallMetrics {
@@ -123,6 +129,8 @@ func (c *Client) CallMetrics() CallMetrics {
 		RecognitionBatch: c.recognitionBatchCalls.Load(),
 		RecognitionRetry: c.recognitionRetryCalls.Load(),
 		Disambiguation:   c.disambiguationCalls.Load(),
+		GeminiGenerate:   c.geminiGenerateCalls.Load(),
+		Grok:             c.grokCalls.Load(),
 	}
 }
 
@@ -410,6 +418,7 @@ func (c *Client) makeRequest(ctx context.Context, prompt, modelName string) ([]R
 		ResponseSchema:   buildGenAISchema(),
 	}
 
+	c.geminiGenerateCalls.Add(1)
 	resp, err := client.Models.GenerateContent(ctx, modelName, genai.Text(prompt), config)
 	if err != nil {
 		if isQuotaExhaustedError(err) {
@@ -624,6 +633,7 @@ Return ONLY a raw JSON array.`, string(inputJSON))
 			ResponseSchema:   buildBulkTranslateSchema(),
 		}
 
+		c.geminiGenerateCalls.Add(1)
 		resp, err := client.Models.GenerateContent(ctx, modelName, genai.Text(prompt), config)
 		if err != nil {
 			if isQuotaExhaustedError(err) {
@@ -676,6 +686,7 @@ func (c *Client) grokRecognizeFallback(ctx context.Context, prompt string) ([]Re
 		return nil, fmt.Errorf("grok: not configured")
 	}
 	utils.LoggerWithTrace(ctx).Info("grok_recognize_fallback")
+	c.grokCalls.Add(1)
 	raw, err := c.callGrok(ctx, prompt)
 	if err != nil {
 		return nil, fmt.Errorf("grok recognize: %w", err)
@@ -701,6 +712,7 @@ func (c *Client) grokTranslateFallback(ctx context.Context, prompt string) ([]Bu
 		return nil, fmt.Errorf("grok: not configured")
 	}
 	utils.LoggerWithTrace(ctx).Info("grok_translate_fallback")
+	c.grokCalls.Add(1)
 	raw, err := c.callGrok(ctx, prompt)
 	if err != nil {
 		return nil, fmt.Errorf("grok translate: %w", err)

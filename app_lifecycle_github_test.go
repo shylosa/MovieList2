@@ -1,8 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +14,7 @@ import (
 
 	"movielist-app/internal/config"
 	"movielist-app/internal/storage"
+	"movielist-app/internal/tmdb"
 )
 
 func newTestAppDB(t *testing.T, movies []storage.Movie) (*App, string) {
@@ -66,6 +70,69 @@ func TestFinalizeScanAlwaysUsesLifecycleContext(t *testing.T) {
 	a.finalizeScan("success", true)
 	if got := a.db.GetState(context.Background(), "last_scan_at"); got == "" {
 		t.Fatal("successful finalize did not set last_scan_at")
+	}
+}
+
+func TestRunScanPersistsNewMovieBeforePosterCleanup(t *testing.T) {
+	a, dir := newTestAppDB(t, nil)
+	mediaDir := filepath.Join(dir, "media")
+	postersDir := filepath.Join(dir, "posters")
+	if err := os.MkdirAll(mediaDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(mediaDir, "Dune.2021.mkv")
+	if err := os.WriteFile(path, []byte("video"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	a.cfg.MediaFolderPath = mediaDir
+	a.cfg.PostersDir = postersDir
+	a.diskFileScanner = func(context.Context) ([]string, error) { return []string{path}, nil }
+	client := tmdb.NewClient(a.cfg)
+	defer client.Close()
+	client.SetTransport(roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		body := `{"page":1,"results":[]}`
+		contentType := "application/json"
+		switch {
+		case r.URL.Host == "image.tmdb.org":
+			body, contentType = "poster", "image/jpeg"
+		case strings.Contains(r.URL.Path, "/search/movie"):
+			body = `{"page":1,"results":[{"id":438631,"title":"Дюна","original_title":"Dune","release_date":"2021-09-15","original_language":"en","popularity":100}]}`
+		case strings.Contains(r.URL.Path, "/movie/438631"):
+			body = `{"id":438631,"title":"Дюна","original_title":"Dune","release_date":"2021-09-15","overview":"Український опис","poster_path":"/dune.jpg","genres":[],"credits":{"cast":[]}}`
+		}
+		return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{contentType}}, Body: io.NopCloser(bytes.NewBufferString(body)), Request: r}, nil
+	}))
+	a.tmdbClient = client
+	a.RunScan()
+	a.wg.Wait()
+	movie, err := a.db.GetMovieByFilename(context.Background(), "Dune.2021.mkv")
+	if err != nil || movie == nil || movie.TmdbID != 438631 {
+		t.Fatalf("movie not persisted before cleanup: movie=%+v err=%v", movie, err)
+	}
+	if movie.LocalPosterPath == "" {
+		t.Fatal("poster path was not persisted")
+	}
+	if _, err := os.Stat(movie.LocalPosterPath); err != nil {
+		t.Fatalf("poster removed by cleanup: %v", err)
+	}
+}
+
+func TestRunScanDiskErrorDoesNotCleanPosters(t *testing.T) {
+	a, dir := newTestAppDB(t, nil)
+	postersDir := filepath.Join(dir, "posters")
+	if err := os.MkdirAll(postersDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	poster := filepath.Join(postersDir, "keep.jpg")
+	if err := os.WriteFile(poster, []byte("poster"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	a.cfg.PostersDir = postersDir
+	a.diskFileScanner = func(context.Context) ([]string, error) { return nil, errors.New("disk unavailable") }
+	a.RunScan()
+	a.wg.Wait()
+	if _, err := os.Stat(poster); err != nil {
+		t.Fatalf("disk error triggered poster cleanup: %v", err)
 	}
 }
 

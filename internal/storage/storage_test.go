@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -346,5 +347,58 @@ func TestCleanOrphanPostersReportsCheckedAndPreservesDatabasePaths(t *testing.T)
 	}
 	if _, err := os.Stat(orphan); !os.IsNotExist(err) {
 		t.Fatalf("orphan still exists: %v", err)
+	}
+}
+
+func TestStaleAIResolutionCannotOverwriteNewPipeline(t *testing.T) {
+	ctx := context.Background()
+	db, err := New(filepath.Join(t.TempDir(), "movies.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.InitSchema(ctx); err != nil {
+		t.Fatal(err)
+	}
+	newer := AIResolution{OriginalFilename: "Film.mkv", ResolvedTitle: "Correct", PipelineVersion: 26, UpdatedAt: time.Now().UTC()}
+	if err := db.SaveAIResolution(ctx, newer); err != nil {
+		t.Fatal(err)
+	}
+	stale := AIResolution{OriginalFilename: "Film.mkv", ResolvedTitle: "Old wrong value", PipelineVersion: 25, UpdatedAt: newer.UpdatedAt.Add(time.Hour)}
+	if err := db.SaveAIResolution(ctx, stale); err != nil {
+		t.Fatal(err)
+	}
+	got, isStale, err := db.GetAIResolution(ctx, "Film.mkv", 26)
+	if err != nil || isStale || got == nil || got.ResolvedTitle != "Correct" {
+		t.Fatalf("new pipeline overwritten: got=%+v stale=%v err=%v", got, isStale, err)
+	}
+}
+
+func TestCleanOrphanPostersHonorsCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	dir := t.TempDir()
+	db, err := New(filepath.Join(dir, "movies.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.InitSchema(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	posters := filepath.Join(dir, "posters")
+	if err := os.Mkdir(posters, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	orphan := filepath.Join(posters, "orphan.jpg")
+	if err := os.WriteFile(orphan, []byte("data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	checked, deleted, err := db.CleanOrphanPosters(ctx, posters)
+	if !errors.Is(err, context.Canceled) || checked != 0 || deleted != 0 {
+		t.Fatalf("checked=%d deleted=%d err=%v", checked, deleted, err)
+	}
+	if _, err := os.Stat(orphan); err != nil {
+		t.Fatalf("cancelled cleanup removed poster: %v", err)
 	}
 }

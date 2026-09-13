@@ -124,7 +124,7 @@ type tmdbSearchResult struct {
 	OriginalLanguage string  `json:"original_language"`
 }
 
-// tmdbSearchResponse — відповідь /search/multi
+// tmdbSearchResponse is shared by typed /search/movie and /search/tv responses.
 type tmdbSearchResponse struct {
 	Results []tmdbSearchResult `json:"results"`
 }
@@ -136,6 +136,7 @@ type scoredResult struct {
 	identityScore int
 	year          int
 	matchedAlias  string
+	alternatives  []string
 }
 
 // SearchExactTitle resolves an authoritative title supplied by the user.
@@ -207,6 +208,14 @@ func (c *Client) SearchExactTitle(ctx context.Context, title string, year int, p
 	detailType := MediaType(best.result.MediaType)
 	info, err := c.GetDetails(ctx, detailType, best.result.ID, originalFilename)
 	if err == nil && info != nil {
+		info.VerificationScore = deterministicVerificationScore(best.score)
+		if detailType != preferredType {
+			info.NeedsReview, info.ReviewReason = true, "media_type_conflict"
+		} else if year > 0 && best.year > 0 && abs(best.year-year) > 1 {
+			info.NeedsReview, info.ReviewReason = true, "year_conflict"
+		} else if info.VerificationScore < ReviewVerificationThreshold {
+			info.NeedsReview, info.ReviewReason = true, "low_verification_score"
+		}
 		info.SearchTitle = title
 		info.MatchedAlias = best.matchedAlias
 		sort.Slice(exactCandidates, func(i, j int) bool {
@@ -584,9 +593,10 @@ LANG_LOOP:
 		return nil, nil
 	}
 
-	logger.Info("dual_search_winner",
+	logger.Info("candidate_ranking_summary",
 		slog.String("title", coalesce(bestGlobal.result.Title, bestGlobal.result.Name)),
 		slog.Int("score", bestGlobal.score),
+		slog.Any("alternatives", bestGlobal.alternatives),
 	)
 
 	// Визначаємо фінальний MediaType для запиту деталей
@@ -598,6 +608,14 @@ LANG_LOOP:
 	info, err := c.GetDetails(ctx, detailType, bestGlobal.result.ID, originalFilename)
 
 	if err == nil && info != nil {
+		info.VerificationScore = deterministicVerificationScore(bestGlobal.score)
+		if detailType != preferredType {
+			info.NeedsReview, info.ReviewReason = true, "media_type_conflict"
+		} else if targetYear > 0 && bestGlobal.year > 0 && abs(bestGlobal.year-targetYear) > 1 {
+			info.NeedsReview, info.ReviewReason = true, "year_conflict"
+		} else if info.VerificationScore < ReviewVerificationThreshold {
+			info.NeedsReview, info.ReviewReason = true, "low_verification_score"
+		}
 		if !hasCyrillicChars(query) {
 			info.SearchTitle = coalesce(bestGlobal.result.Title, bestGlobal.result.Name)
 		}
@@ -621,6 +639,7 @@ func (c *Client) rankResults(
 	normQuery := normalizeForCompare(query)
 
 	var best *scoredResult
+	var ranked []scoredResult
 
 	for i, res := range results {
 		if ctx.Err() != nil {
@@ -632,6 +651,9 @@ func (c *Client) rankResults(
 		}
 
 		scored := c.scoreResult(ctx, res, i, normQuery, targetYear, preferredType)
+		if scored.score > -1000 {
+			ranked = append(ranked, scored)
+		}
 		if ctx.Err() != nil {
 			return nil
 		}
@@ -646,9 +668,8 @@ func (c *Client) rankResults(
 
 		// Мова та популярність є лише tie-breaker: вони не можуть перекрити
 		// суттєво кращий збіг назви, року й типу.
-		const identityTieWindow = 30
-		if best == nil || scored.identityScore > best.identityScore+identityTieWindow ||
-			(abs(scored.identityScore-best.identityScore) <= identityTieWindow && scored.score > best.score) {
+		if best == nil || scored.identityScore > best.identityScore+IdentityTieWindow ||
+			(abs(scored.identityScore-best.identityScore) <= IdentityTieWindow && scored.score > best.score) {
 			best = &scored
 		}
 	}
@@ -658,31 +679,56 @@ func (c *Client) rankResults(
 	}
 
 	// Динамічний поріг: пом'якшуємо вимоги, особливо для транслітерації
-	threshold := ScoreThreshold - 30 // Даємо трохи більше свободи базовому пошуку
+	threshold := SearchThresholdDefault
 
 	if targetYear > 0 {
 		if best.year == targetYear {
 			// Якщо рік ідеально збігається, ми можемо довіряти fuzzy-збігу назви
-			threshold = ScoreThreshold - 50
+			threshold = SearchThresholdExactYear
 		} else if abs(best.year-targetYear) == 1 {
 			// Рік відрізняється на 1 (норма для релізів) - толерантний поріг
-			threshold = ScoreThreshold - 10
+			threshold = SearchThresholdAdjacentYear
 		} else {
 			// Рік не збігається серйозно, але був у запиті — будьмо обережніші
-			threshold = ScoreThreshold + 20
+			threshold = SearchThresholdConflictYear
 		}
 	}
 
 	if best.score < threshold {
-		utils.LoggerWithTrace(ctx).Warn("best_candidate_rejected",
+		utils.LoggerWithTrace(ctx).Debug("best_candidate_rejected",
 			slog.String("title", coalesce(best.result.Title, best.result.Name)),
 			slog.Int("score", best.score),
 			slog.Int("threshold", threshold),
 		)
 		return nil
 	}
+	sort.SliceStable(ranked, func(i, j int) bool {
+		if ranked[i].score != ranked[j].score {
+			return ranked[i].score > ranked[j].score
+		}
+		return ranked[i].result.ID < ranked[j].result.ID
+	})
+	for _, candidate := range ranked {
+		if candidate.result.ID == best.result.ID {
+			continue
+		}
+		best.alternatives = append(best.alternatives, coalesce(candidate.result.Title, candidate.result.Name))
+		if len(best.alternatives) == 2 {
+			break
+		}
+	}
 
 	return best
+}
+
+func deterministicVerificationScore(score int) float64 {
+	if score <= 0 {
+		return 0
+	}
+	if score >= ScoreThreshold {
+		return 1
+	}
+	return float64(score) / float64(ScoreThreshold)
 }
 
 // scoreResult підраховує бал для одного результату пошуку

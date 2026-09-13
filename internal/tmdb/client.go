@@ -21,6 +21,7 @@ import (
 	"movielist-app/internal/config"
 	"movielist-app/internal/utils"
 
+	"golang.org/x/sync/singleflight"
 	"golang.org/x/time/rate"
 )
 
@@ -93,6 +94,7 @@ type Client struct {
 	searchCache           sync.Map
 	detailsCache          sync.Map
 	candidateDetailsCache sync.Map
+	detailsGroup          singleflight.Group
 	searchCalls           atomic.Int64
 	detailsCalls          atomic.Int64
 	cacheHits             atomic.Int64

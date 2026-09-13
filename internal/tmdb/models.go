@@ -34,21 +34,24 @@ type ParsedFile struct {
 
 // MovieInfo — фінальний результат після верифікації через TMDB
 type MovieInfo struct {
-	TMDBID          int
-	TitleUA         string
-	TitleEN         string // Це насправді OriginalTitle (за базою)
-	SearchTitle     string // Знайдена локалізована назва (для TitleSimilarity)
-	MatchedAlias    string // Назва-аліас, яка дала найкращий бал при пошуку
-	Year            string
-	Genres          string
-	Plot            string
-	Cast            string
-	PosterURL       string
-	LocalPosterPath string
-	MediaType       MediaType
-	AmbiguousExact  bool
-	VoteAverage     float64
-	VoteCount       int
+	TMDBID            int
+	TitleUA           string
+	TitleEN           string // Це насправді OriginalTitle (за базою)
+	SearchTitle       string // Знайдена локалізована назва (для TitleSimilarity)
+	MatchedAlias      string // Назва-аліас, яка дала найкращий бал при пошуку
+	Year              string
+	Genres            string
+	Plot              string
+	Cast              string
+	PosterURL         string
+	LocalPosterPath   string
+	MediaType         MediaType
+	AmbiguousExact    bool
+	VerificationScore float64
+	NeedsReview       bool
+	ReviewReason      string
+	VoteAverage       float64
+	VoteCount         int
 }
 
 type CandidateDetails struct {
@@ -93,7 +96,13 @@ const (
 
 	ScorePopularityLimit = 50 // max бонус від popularity
 
-	// Мінімальний поріг для прийняття результату
+	// ScoreThreshold is the normal automatic acceptance boundary. Contextual
+	// search may accept a lower score, but such a result requires review.
 	ScoreThreshold              = 200
 	ReviewVerificationThreshold = 0.90
+	IdentityTieWindow           = 30
+	SearchThresholdDefault      = ScoreThreshold - 30
+	SearchThresholdExactYear    = ScoreThreshold - 50
+	SearchThresholdAdjacentYear = ScoreThreshold - 10
+	SearchThresholdConflictYear = ScoreThreshold + 20
 )

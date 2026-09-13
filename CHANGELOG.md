@@ -2,9 +2,21 @@
 
 All notable changes to this project. Dates are approximate (session-based).
 
+## 13 вересня 2026 — Round 26 grouped TV safety
+
+* Версію документації та `.env.example` синхронізовано з default `APP_VERSION=2.4.0`; застарілі handoff/implementation plan позначено архівними.
+* Сильні episode-маркери відокремлено від слабких голих номерів; одиночне число більше не робить каталог серіальним.
+* Слабкий TV preference потребує двох сусідніх номерів з однаковою серіальною основою й застосовується лише до відповідних файлів, а не до всього mixed-каталогу.
+* Службові каталоги (`Фильмы`, `Фільми`, `Movies`, `Video`, `Media`) не замінюють parsed filename title.
+* Конфлікт grouped-TV з movie parsing отримує `NeedsReview`; контекстно прийняті результати з конфліктом року/type або низькою verification score також не вважаються надійними.
+* TMDB details waterfall захищено `singleflight`; stale AI cache не може перезаписати новішу pipeline version.
+* INFO-лог містить компактний winner/alternatives summary та повні Gemini/Grok session counters без candidate DEBUG spam.
+* Розпізнана назва в редакторі отримала кешований TMDB details preview при hover/focus. Floating overlay автоматично відкривається над елементом біля нижньої межі й не обрізається scroll-контейнером; поточний TMDB-запис більше не дублюється у `Варіантах`.
+* Підтвердження кандидата стало двофазним: ID і TMDB metadata зберігаються у foreground, а poster download та Gemini localization працюють у tracked background task. `movie-updated` освіжає UI, а TMDB-ID guard відкидає запізнілий результат для вже заміненого кандидата.
+
 ## 12 вересня 2026 — runtime corrections Round 25
 
-* Candidate search більше не повторює помилкову назву з БД: без явної підказки використовується filename, а для невдалого або несумісного за роком транслітерату є typed fallback. Поточний TMDB-запис завжди показується першим.
+* Candidate search більше не повторює помилкову назву з БД: без явної підказки використовується filename, а для невдалого або несумісного за роком транслітерату є typed fallback. На той момент поточний TMDB-запис показувався першим; у Round 26 його preview перенесено на розпізнану назву.
 * Старі дублікати одного movie TMDB ID для різних назв позначаються як сумнівні; automatic ambiguous exact більше не втрачає `NeedsReview`.
 * Назви й описи проходять alphabet-based language validation; джерела перекладу мають окремі EN→RU та RU→EN пріоритети. Виправлено російські рядки на кшталт `Суперкопы 80`.
 * «Моделі ШІ» показує поточний каскад та повний сумісний список Gemini API, дозволяє зберегти checkbox-вибір у SQLite.

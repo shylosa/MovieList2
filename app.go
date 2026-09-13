@@ -37,34 +37,37 @@ import (
 )
 
 type App struct {
-	ctx                context.Context
-	cfg                *config.Config
-	db                 *storage.DB
-	tmdbClient         *tmdb.Client
-	aiClient           *ai.Client
-	aiModelsCache      []string
-	discoveredAIModels []string
-	aiModelsHTTPClient *http.Client
-	modelsMutex        sync.RWMutex
-	modelsGroup        singleflight.Group
-	scanCancel         context.CancelFunc
-	isScanning         bool
-	scanMutex          sync.Mutex
-	isGitHubSyncing    bool
-	githubSyncMutex    sync.Mutex
-	isCloudSyncing     bool
-	cloudSyncMutex     sync.Mutex
-	wg                 sync.WaitGroup
-	gitRunner          func(context.Context, string, string, ...string) ([]byte, error)
-	eventEmitter       func(context.Context, string, ...interface{})
-	diskFileScanner    func(context.Context) ([]string, error)
+	ctx                        context.Context
+	cfg                        *config.Config
+	db                         *storage.DB
+	tmdbClient                 *tmdb.Client
+	aiClient                   *ai.Client
+	aiModelsCache              []string
+	discoveredAIModels         []string
+	aiModelsHTTPClient         *http.Client
+	modelsMutex                sync.RWMutex
+	modelsGroup                singleflight.Group
+	scanCancel                 context.CancelFunc
+	isScanning                 bool
+	scanMutex                  sync.Mutex
+	isGitHubSyncing            bool
+	githubSyncMutex            sync.Mutex
+	isCloudSyncing             bool
+	cloudSyncMutex             sync.Mutex
+	wg                         sync.WaitGroup
+	gitRunner                  func(context.Context, string, string, ...string) ([]byte, error)
+	eventEmitter               func(context.Context, string, ...interface{})
+	diskFileScanner            func(context.Context) ([]string, error)
+	candidateTranslationRunner func(context.Context, []string, map[string]int)
 }
 
 type scanResult struct {
-	path        string
-	fname       string
-	info        *tmdb.MovieInfo
-	needsGemini bool
+	path         string
+	fname        string
+	info         *tmdb.MovieInfo
+	needsGemini  bool
+	needsReview  bool
+	reviewReason string
 }
 
 type AIModelCatalog struct {
@@ -79,7 +82,18 @@ const recognitionPipelineVersion = 25
 // geminiTMDBVerifyMinJW — мінімальна схожість EN-назви Gemini і TMDB після верифікації.
 const geminiTMDBVerifyMinJW = 0.85
 
-var groupedEpisodeRE = regexp.MustCompile(`(?i)(?:s\d{1,2}e\d{1,3}|\b(?:season|episode|сезон|серія)\s*\d+\b|(?:^|[. _-])(\d{1,3})(?:[. _-]|$))`)
+var (
+	groupedStrongEpisodeRE = regexp.MustCompile(`(?i)(?:^|[. _-])(?:s\d{1,2}e\d{1,3}|(?:season|episode|сезон|серія)\s*\d+)(?:$|[. _-])`)
+	groupedWeakEpisodeRE   = regexp.MustCompile(`(?:^|[. _-])(\d{1,3})(?:[. _-]|$)`)
+	groupedSpaceRE         = regexp.MustCompile(`\s+`)
+)
+
+const groupedTVReviewReason = "grouped_tv_type_conflict"
+
+type groupedTVDecision struct {
+	useParentTitle bool
+	reason         string
+}
 
 var (
 	reTMDBURL  = regexp.MustCompile(`themoviedb\.org/(movie|tv)/(\d+)`)
@@ -726,9 +740,12 @@ func (a *App) RunScan() {
 				slog.Int("needs_review", unresolved+suspicious),
 				slog.Int("suspicious", suspicious),
 				slog.Int("unresolved", unresolved),
+				slog.Int("resolved", tmdbAccepted+aiAccepted),
 				slog.Int64("gemini_batch_calls", metrics.RecognitionBatch),
 				slog.Int64("gemini_retry_calls", metrics.RecognitionRetry),
 				slog.Int64("gemini_disambiguation_calls", metrics.Disambiguation),
+				slog.Int64("gemini_generate_calls", metrics.GeminiGenerate),
+				slog.Int64("grok_calls", metrics.Grok),
 				slog.Int64("tmdb_search_calls", tmdbMetrics.SearchCalls),
 				slog.Int64("tmdb_details_calls", tmdbMetrics.DetailsCalls),
 				slog.Int64("tmdb_cache_hits", tmdbMetrics.CacheHits),
@@ -844,7 +861,7 @@ func (a *App) RunScan() {
 		}
 
 		if len(translationQueue) > 0 {
-			a.processTranslationQueue(scanCtx, translationQueue, a.aiClient)
+			a.processTranslationQueue(scanCtx, translationQueue, a.aiClient, nil)
 		}
 		if scanCtx.Err() == nil {
 			a.cleanOrphanPostersAfterSuccess(scanCtx)
@@ -970,16 +987,17 @@ func (a *App) runTMDBScan(ctx context.Context, paths []string) <-chan scanResult
 			)
 
 			parsed := tmdb.ParseFilename(path)
-			if groupTV[filepath.Dir(path)] {
+			originalMediaType := parsed.MediaType
+			groupDecision, grouped := groupTV[path]
+			if grouped {
 				parsed.MediaType = tmdb.MediaTypeTV
-				if parent := filepath.Base(filepath.Dir(path)); parent != "." && parent != "" {
+				if parent := filepath.Base(filepath.Dir(path)); groupDecision.useParentTitle && isMeaningfulSeriesParent(parent) {
 					parentParsed := tmdb.ParseFilename(parent)
 					if parentParsed.CleanTitle != "" {
 						parsed.CleanTitle = parentParsed.CleanTitle
-					} else {
-						parsed.CleanTitle = parent
 					}
 				}
+				logger.Info("grouped_tv_applied", slog.String("reason", groupDecision.reason), slog.String("title", parsed.CleanTitle))
 			}
 			info, err := a.tmdbClient.FetchFromParsed(fileCtx, parsed, path)
 			if err != nil {
@@ -994,6 +1012,10 @@ func (a *App) runTMDBScan(ctx context.Context, paths []string) <-chan scanResult
 			}
 
 			result := scanResult{path: path, fname: fname, info: info, needsGemini: true}
+			if grouped && originalMediaType == tmdb.MediaTypeMovie {
+				result.needsReview = true
+				result.reviewReason = groupedTVReviewReason
+			}
 			if info != nil && info.TMDBID > 0 {
 				result.needsGemini = false
 			}
@@ -1014,58 +1036,96 @@ func (a *App) runTMDBScan(ctx context.Context, paths []string) <-chan scanResult
 	return resultsChan
 }
 
-func detectGroupedTV(ctx context.Context, paths []string) map[string]bool {
+func detectGroupedTV(ctx context.Context, paths []string) map[string]groupedTVDecision {
 	type group struct {
-		episodes map[int]bool
-		markers  int
+		episodes map[int][]string
 	}
 	groups := make(map[string]*group)
+	result := make(map[string]groupedTVDecision)
 	for _, path := range paths {
 		if ctx.Err() != nil {
-			return map[string]bool{}
+			return map[string]groupedTVDecision{}
 		}
 		base := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
-		matches := groupedEpisodeRE.FindAllStringSubmatch(base, -1)
-		if len(matches) == 0 {
+		if groupedStrongEpisodeRE.MatchString(base) {
+			result[path] = groupedTVDecision{useParentTitle: true, reason: "strong_episode_marker"}
 			continue
 		}
-		dir := filepath.Dir(path)
-		g := groups[dir]
-		if g == nil {
-			g = &group{episodes: make(map[int]bool)}
-			groups[dir] = g
-		}
-		g.markers++
+		matches := groupedWeakEpisodeRE.FindAllStringSubmatchIndex(base, -1)
 		for _, match := range matches {
-			if len(match) < 2 || match[1] == "" {
+			if len(match) < 4 || match[2] < 0 {
 				continue
 			}
-			n, _ := strconv.Atoi(match[1])
-			if n > 0 && n < 1000 && n != 264 && n != 265 && n != 720 {
-				g.episodes[n] = true
+			n, _ := strconv.Atoi(base[match[2]:match[3]])
+			if !isPlausibleWeakEpisode(base, match[2], match[3], n) {
+				continue
 			}
+			signature := weakEpisodeSignature(base, match[2], match[3])
+			key := filepath.Clean(filepath.Dir(path)) + "\x00" + signature
+			g := groups[key]
+			if g == nil {
+				g = &group{episodes: make(map[int][]string)}
+				groups[key] = g
+			}
+			g.episodes[n] = append(g.episodes[n], path)
+			break
 		}
 	}
-	result := make(map[string]bool)
-	for dir, g := range groups {
-		if g.markers >= 2 || len(g.episodes) == 1 {
-			if len(g.episodes) == 1 {
-				result[dir] = true
+	for _, g := range groups {
+		for n, currentPaths := range g.episodes {
+			nextPaths, adjacent := g.episodes[n+1]
+			if !adjacent {
 				continue
 			}
-			if len(g.episodes) == 0 {
-				result[dir] = true
-				continue
-			}
-			for n := range g.episodes {
-				if g.episodes[n+1] || g.episodes[n-1] {
-					result[dir] = true
-					break
-				}
+			for _, path := range append(currentPaths, nextPaths...) {
+				result[path] = groupedTVDecision{useParentTitle: true, reason: "adjacent_episode_numbers"}
 			}
 		}
 	}
 	return result
+}
+
+func isPlausibleWeakEpisode(base string, start, end, number int) bool {
+	if number <= 0 || number >= 1000 || number == 264 || number == 265 || number == 720 {
+		return false
+	}
+	lower := strings.ToLower(base)
+	prefix := strings.TrimRight(lower[:start], ". _-")
+	lastToken := prefix
+	if i := strings.LastIndexAny(prefix, ". _-"); i >= 0 {
+		lastToken = prefix[i+1:]
+	}
+	if lastToken == "part" || lastToken == "pt" || lastToken == "частина" || lastToken == "часть" || lastToken == "x" || lastToken == "h" {
+		return false
+	}
+	// Decimal audio layouts such as 5.1 and 7.1 are technical metadata. Do not
+	// reject an episode followed by a multi-digit year or resolution token.
+	if number < 10 && start > 0 && end+1 < len(base) && base[start-1] == '.' && base[end] == '.' && base[end+1] >= '0' && base[end+1] <= '9' {
+		nextEnd := end + 1
+		for nextEnd < len(base) && base[nextEnd] >= '0' && base[nextEnd] <= '9' {
+			nextEnd++
+		}
+		if nextEnd == end+2 {
+			return false
+		}
+	}
+	return true
+}
+
+func weakEpisodeSignature(base string, start, end int) string {
+	signature := strings.ToLower(base[:start] + " " + base[end:])
+	signature = strings.NewReplacer(".", " ", "_", " ", "-", " ").Replace(signature)
+	return strings.TrimSpace(groupedSpaceRE.ReplaceAllString(signature, " "))
+}
+
+func isMeaningfulSeriesParent(parent string) bool {
+	parent = strings.ToLower(strings.TrimSpace(parent))
+	switch parent {
+	case "", ".", "films", "film", "movies", "movie", "video", "videos", "media", "фільми", "фільм", "фильмы", "фильм", "відео", "видео":
+		return false
+	default:
+		return true
+	}
 }
 
 func (a *App) processScanResults(ctx context.Context, results <-chan scanResult) (toSave []storage.Movie, geminiQueue []string, translationQueue []string) {
@@ -1079,6 +1139,10 @@ func (a *App) processScanResults(ctx context.Context, results <-chan scanResult)
 		}
 		if !res.needsGemini {
 			movie := movieFromTMDB(res.fname, res.info)
+			if res.needsReview {
+				movie.NeedsReview = true
+				movie.ReviewReason = res.reviewReason
+			}
 			toSave = append(toSave, movie)
 			a.logFront(fmt.Sprintf("✅ TMDB: '%s' → '%s'", res.fname, res.info.TitleUA))
 			if a.movieInfoNeedsTranslation(res.info) {
@@ -1486,6 +1550,10 @@ func (a *App) mergeGeminiWithTMDB(ctx context.Context, filePath string, rec ai.R
 	}
 	movie.RecognitionConfidence = rec.Confidence
 	movie.VerificationScore = strongJW
+	if tmdbInfo.NeedsReview {
+		movie.NeedsReview = true
+		movie.ReviewReason = tmdbInfo.ReviewReason
+	}
 	if tmdbInfo.AmbiguousExact || strongJW < tmdb.ReviewVerificationThreshold {
 		movie.NeedsReview = true
 		if tmdbInfo.AmbiguousExact {
@@ -1758,29 +1826,27 @@ func (a *App) SearchTMDBCandidates(request CandidateSearchRequest) ([]tmdb.TMDBC
 	if err != nil {
 		return nil, err
 	}
-	if current, getErr := a.db.GetMovieByFilename(ctx, request.Filename); getErr != nil {
+	current, getErr := a.db.GetMovieByFilename(ctx, request.Filename)
+	if getErr != nil {
 		return nil, fmt.Errorf("candidate lookup current movie: %w", getErr)
-	} else if current != nil && current.TmdbID > 0 && (current.MediaType == "movie" || current.MediaType == "tv") {
-		currentYear, _ := strconv.Atoi(current.Year)
-		currentCandidate := tmdb.TMDBCandidate{
-			TMDBID: current.TmdbID, Title: current.TitleUA, OriginalTitle: current.TitleEN,
-			Year: currentYear, MediaType: tmdb.MediaType(current.MediaType), Exact: true,
-		}
-		merged := make([]tmdb.TMDBCandidate, 0, 5)
-		merged = append(merged, currentCandidate)
-		for _, candidate := range candidates {
-			if candidate.TMDBID == currentCandidate.TMDBID && candidate.MediaType == currentCandidate.MediaType {
-				continue
-			}
-			merged = append(merged, candidate)
-			if len(merged) == 5 {
-				break
-			}
-		}
-		candidates = merged
 	}
+	candidates = excludeCurrentCandidate(candidates, current)
 	utils.LoggerWithTrace(ctx).Info("candidate_search_completed", slog.String("file", request.Filename), slog.Int("count", len(candidates)))
 	return candidates, nil
+}
+
+func excludeCurrentCandidate(candidates []tmdb.TMDBCandidate, current *storage.Movie) []tmdb.TMDBCandidate {
+	if current == nil || current.TmdbID <= 0 {
+		return candidates
+	}
+	filtered := make([]tmdb.TMDBCandidate, 0, len(candidates))
+	for _, candidate := range candidates {
+		if candidate.TMDBID == current.TmdbID && string(candidate.MediaType) == current.MediaType {
+			continue
+		}
+		filtered = append(filtered, candidate)
+	}
+	return filtered
 }
 
 func (a *App) auditDuplicateMovieIdentities(ctx context.Context) error {
@@ -1848,6 +1914,7 @@ func candidateSearchTitle(title, filename string) string {
 
 func (a *App) ConfirmTMDBCandidate(request CandidateConfirmRequest) error {
 	ctx := utils.EnsureTrace(a.ctx)
+	startedAt := time.Now()
 	if strings.TrimSpace(request.Filename) == "" || request.TMDBID <= 0 {
 		return fmt.Errorf("valid filename and tmdb_id required")
 	}
@@ -1855,10 +1922,14 @@ func (a *App) ConfirmTMDBCandidate(request CandidateConfirmRequest) error {
 	if mediaType != tmdb.MediaTypeMovie && mediaType != tmdb.MediaTypeTV {
 		return fmt.Errorf("media_type must be movie or tv")
 	}
-	info, err := a.tmdbClient.GetDetails(ctx, mediaType, request.TMDBID, request.Filename)
+	detailsStartedAt := time.Now()
+	// Filename is deliberately empty: local poster download belongs to the
+	// background completion phase and must not delay the visible selection.
+	info, err := a.tmdbClient.GetDetails(ctx, mediaType, request.TMDBID, "")
 	if err != nil {
 		return err
 	}
+	detailsDuration := time.Since(detailsStartedAt)
 	if info == nil || info.TMDBID <= 0 {
 		return fmt.Errorf("TMDB %s/%d not found", mediaType, request.TMDBID)
 	}
@@ -1875,12 +1946,47 @@ func (a *App) ConfirmTMDBCandidate(request CandidateConfirmRequest) error {
 		return err
 	}
 	utils.LoggerWithTrace(ctx).Info("candidate_confirmed",
-		slog.String("file", request.Filename), slog.Int("tmdb_id", request.TMDBID), slog.String("media_type", string(mediaType)))
+		slog.String("file", request.Filename), slog.Int("tmdb_id", request.TMDBID), slog.String("media_type", string(mediaType)),
+		slog.Duration("details_duration", detailsDuration), slog.Duration("foreground_duration", time.Since(startedAt)))
 	if err := a.db.DeleteAIResolution(ctx, request.Filename); err != nil {
 		return err
 	}
-	if a.aiClient != nil && a.movieInfoNeedsTranslation(info) {
-		a.processTranslationQueue(ctx, []string{request.Filename}, a.aiClient)
+	needsTranslation := a.aiClient != nil && a.movieInfoNeedsTranslation(info)
+	if info.PosterURL != "" || needsTranslation {
+		filename, expectedID := request.Filename, request.TMDBID
+		posterURL := info.PosterURL
+		a.wg.Add(1)
+		go func() {
+			defer a.wg.Done()
+			backgroundCtx := utils.EnsureTrace(a.ctx)
+			translationStartedAt := time.Now()
+			utils.LoggerWithTrace(backgroundCtx).Info("candidate_background_started", slog.String("file", filename), slog.Int("tmdb_id", expectedID))
+			if posterURL != "" {
+				posterStartedAt := time.Now()
+				localPath, posterErr := a.tmdbClient.DownloadPoster(backgroundCtx, posterURL, fmt.Sprintf("%d_%s", expectedID, filename))
+				if posterErr != nil {
+					utils.LoggerWithTrace(backgroundCtx).Warn("candidate_poster_failed", slog.String("file", filename), slog.Any("error", posterErr))
+				} else if current, ok := a.currentTranslationTarget(backgroundCtx, filename, expectedID); ok {
+					current.LocalPosterPath = localPath
+					if err := a.db.SaveMoviesBatch(backgroundCtx, []storage.Movie{current}); err != nil {
+						utils.LoggerWithTrace(backgroundCtx).Warn("candidate_poster_save_failed", slog.String("file", filename), slog.Any("error", err))
+					}
+				}
+				utils.LoggerWithTrace(backgroundCtx).Info("candidate_poster_completed", slog.String("file", filename), slog.Duration("duration", time.Since(posterStartedAt)))
+			}
+			if needsTranslation {
+				utils.LoggerWithTrace(backgroundCtx).Info("candidate_translation_started", slog.String("file", filename), slog.Int("tmdb_id", expectedID))
+				if a.candidateTranslationRunner != nil {
+					a.candidateTranslationRunner(backgroundCtx, []string{filename}, map[string]int{filename: expectedID})
+				} else {
+					a.processTranslationQueue(backgroundCtx, []string{filename}, a.aiClient, map[string]int{filename: expectedID})
+				}
+			}
+			if backgroundCtx.Err() == nil {
+				a.emitEvent(a.ctx, "movie-updated", map[string]any{"filename": filename, "tmdb_id": expectedID})
+			}
+			utils.LoggerWithTrace(backgroundCtx).Info("candidate_background_completed", slog.String("file", filename), slog.Int("tmdb_id", expectedID), slog.Duration("duration", time.Since(translationStartedAt)))
+		}()
 	}
 	return nil
 }
@@ -2000,7 +2106,7 @@ func (a *App) FixSelected(selected []FixRequest) {
 
 	// 🟢 НОВЕ: Запускаємо переклад для виправлених
 	if len(translationQueue) > 0 {
-		a.processTranslationQueue(ctx, translationQueue, a.aiClient)
+		a.processTranslationQueue(ctx, translationQueue, a.aiClient, nil)
 	}
 
 	utils.LoggerWithTrace(ctx).Info("fix_selected_completed",
@@ -2234,9 +2340,16 @@ func movieFromTMDB(fname string, info *tmdb.MovieInfo) storage.Movie {
 		MediaType:             string(info.MediaType),
 		RecognitionSource:     "tmdb",
 		RecognitionConfidence: 1,
-		VerificationScore:     1,
+		VerificationScore:     info.VerificationScore,
 		VoteAverage:           info.VoteAverage,
 		VoteCount:             info.VoteCount,
+	}
+	if movie.VerificationScore == 0 {
+		movie.VerificationScore = 1
+	}
+	if info.NeedsReview {
+		movie.NeedsReview = true
+		movie.ReviewReason = info.ReviewReason
 	}
 	if info.AmbiguousExact {
 		movie.NeedsReview = true
@@ -2367,7 +2480,7 @@ func needsTranslation(s string) bool {
 	return lang == utils.LanguageUnknown || lang == utils.LanguageEnglish || lang == utils.LanguageRussian
 }
 
-func (a *App) processTranslationQueue(ctx context.Context, filenames []string, aiClient *ai.Client) {
+func (a *App) processTranslationQueue(ctx context.Context, filenames []string, aiClient *ai.Client, expectedTMDBIDs map[string]int) {
 	a.logFront(fmt.Sprintf("🌍 Аналіз локалізації для %d файлів...", len(filenames)))
 
 	var itemsToTranslate []ai.BulkTranslateItem
@@ -2468,10 +2581,26 @@ func (a *App) processTranslationQueue(ctx context.Context, filenames []string, a
 		}
 
 		var moviesToSave []storage.Movie
+		currentMovies := movies
+		if len(expectedTMDBIDs) > 0 {
+			currentMovies, err = a.db.GetMoviesByFilenames(ctx, filenames)
+			if err != nil {
+				slog.Error("translation_guard_fetch_failed", slog.Any("error", err))
+				continue
+			}
+		}
 		for _, res := range results {
 			movie, ok := movieMap[res.Filename]
 			if !ok {
 				continue
+			}
+			if expectedID, guarded := expectedTMDBIDs[res.Filename]; guarded {
+				current, currentTarget := translationTargetCurrent(currentMovies, res.Filename, expectedID)
+				if !currentTarget {
+					utils.LoggerWithTrace(ctx).Info("candidate_translation_stale_skipped", slog.String("file", res.Filename), slog.Int("expected_tmdb_id", expectedID))
+					continue
+				}
+				movie = current
 			}
 
 			changed := false
@@ -2515,4 +2644,18 @@ func (a *App) processTranslationQueue(ctx context.Context, filenames []string, a
 	if ctx.Err() == nil {
 		a.logFront(fmt.Sprintf("✅ Фаза перекладу завершена! Оновлено записів: %d", updatedCount))
 	}
+}
+
+func translationTargetCurrent(movies map[string]storage.Movie, filename string, expectedTMDBID int) (storage.Movie, bool) {
+	movie, exists := movies[filename]
+	return movie, exists && movie.TmdbID == expectedTMDBID
+}
+
+func (a *App) currentTranslationTarget(ctx context.Context, filename string, expectedTMDBID int) (storage.Movie, bool) {
+	movies, err := a.db.GetMoviesByFilenames(ctx, []string{filename})
+	if err != nil {
+		utils.LoggerWithTrace(ctx).Warn("candidate_background_guard_failed", slog.String("file", filename), slog.Any("error", err))
+		return storage.Movie{}, false
+	}
+	return translationTargetCurrent(movies, filename, expectedTMDBID)
 }

@@ -41,3 +41,37 @@ export function reviewCounts(movies) {
         suspicious: movies.filter(movie => movie.tmdb_id > 0 && movie.needs_review).length,
     };
 }
+
+export function createRequestGate() {
+    const active = new Set();
+    return {
+        begin(key) { if (active.has(key)) return false; active.add(key); return true; },
+        end(key) { active.delete(key); },
+        has(key) { return active.has(key); },
+    };
+}
+
+export function candidateStatus(candidates, error = null) {
+    if (error) return {kind: 'error', text: `Помилка пошуку: ${error}`};
+    if (!candidates || candidates.length === 0) return {kind: 'empty', text: 'Нічого не знайдено'};
+    return {kind: 'ready', text: ''};
+}
+
+export function scanLifecycleTransition(scanning, eventName) {
+    if (eventName === 'scan-started') return true;
+    if (eventName === 'scan-finished') return false;
+    return scanning;
+}
+
+export function cacheEditorValue(cache, filename, value) {
+    cache[filename] = value;
+    return cache;
+}
+
+export function floatingPopoverPosition(anchor, popover, viewport, margin = 8) {
+    let left = Math.min(anchor.left, viewport.width - popover.width - margin);
+    left = Math.max(margin, left);
+    let top = anchor.bottom + 6;
+    if (top + popover.height > viewport.height - margin) top = Math.max(margin, anchor.top - popover.height - 6);
+    return {left, top};
+}
