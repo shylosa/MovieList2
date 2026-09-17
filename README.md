@@ -121,7 +121,9 @@ Version: 2.4.0
 
 `movies.vote_average` і `movies.vote_count` зберігають рейтинг TMDB. Він відображається в редакторі, локальній та мобільній Вітрині й синхронізується з Google Sheets. Перший scan після оновлення дозаповнює рейтинг старих розпізнаних записів одним batch save; наступні scan пропускають уже заповнені записи.
 
-Gemini використовує задані у `GEMINI_MODELS` production-моделі у вказаному порядку та discovered `generateContent` моделі. Типовий каскад: `gemini-2.5-flash,gemini-flash-lite-latest`; після вичерпання Gemini доступний послідовний Grok fallback.
+Gemini використовує задані у `GEMINI_MODELS` production-моделі у вказаному порядку та discovered `generateContent` моделі. Назви моделей мають надходити з Gemini Models API: недоступні configured-моделі ігноруються, а порядок решти зберігається. Типовий каскад: `gemini-2.5-flash,gemini-flash-lite-latest`; після вичерпання Gemini доступний послідовний Grok fallback.
+
+Коли однакова точна назва існує як movie і TV, popularity використовується лише як обмежений tie-breaker. Очищена назва файла та release-каталогу може уточнити identity між уже exact-кандидатами; вона не робить fuzzy-збіг точним і не замінює typed TMDB endpoints.
 
 Сторінка «Моделі ШІ» щоразу запитує Gemini API, окремо показує поточний каскад і всі сумісні `generateContent`-моделі. Вибір із чекбоксами зберігається у SQLite `app_state` та застосовується без редагування `.env`; `GEMINI_MODELS` залишається початковим fallback.
 

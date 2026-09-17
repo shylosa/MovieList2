@@ -3,6 +3,7 @@ import { readFileSync } from 'fs';
 import { candidateConfirmPayload, candidateSearchPayload, fixPayload, reviewCounts, reviewReasonLabel, mediaTypeLabel, candidateTMDBURL, formatRuntime, formatTMDBRating, createRequestGate, candidateStatus, scanLifecycleTransition, cacheEditorValue, floatingPopoverPosition } from './editor-state.js';
 
 assert.deepStrictEqual(candidateSearchPayload('a.mkv', {'a.mkv': 'The Bureau'}, {'a.mkv': 'tv'}), {filename: 'a.mkv', title: 'The Bureau', media_type: 'tv'});
+assert.strictEqual(reviewReasonLabel('identity_conflict'), 'відхилено автоматичну заміну ідентичності');
 assert.deepStrictEqual(candidateConfirmPayload('a.mkv', {tmdb_id: 62476, media_type: 'tv'}), {filename: 'a.mkv', tmdb_id: 62476, media_type: 'tv'});
 assert.deepStrictEqual(candidateSearchPayload('a.mkv', {}, {}, 'The Bureau'), {filename: 'a.mkv', title: '', media_type: 'auto'});
 assert.deepStrictEqual(candidateSearchPayload('Ebigejl.2024.mkv', {}, {}, 'Любимые фильмы'), {filename: 'Ebigejl.2024.mkv', title: '', media_type: 'auto'});

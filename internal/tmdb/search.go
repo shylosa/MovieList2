@@ -195,7 +195,9 @@ func (c *Client) SearchExactTitle(ctx context.Context, title string, year int, p
 			if !exact {
 				continue
 			}
-			candidate := &scoredResult{result: result, score: score, year: resultYear, matchedAlias: matchedAlias}
+			identityScore := exactFilenameContextScore(originalFilename, result)
+			score += identityScore
+			candidate := &scoredResult{result: result, score: score, identityScore: identityScore, year: resultYear, matchedAlias: matchedAlias}
 			exactCandidates = append(exactCandidates, candidate)
 			if best == nil || candidate.score > best.score || (candidate.score == best.score && candidate.result.ID < best.result.ID) {
 				best = candidate
@@ -206,6 +208,11 @@ func (c *Client) SearchExactTitle(ctx context.Context, title string, year int, p
 		return nil, nil
 	}
 	detailType := MediaType(best.result.MediaType)
+	utils.LoggerWithTrace(ctx).Info("manual_exact_candidate_selected",
+		slog.String("query", title), slog.Int("candidate_count", len(exactCandidates)),
+		slog.Int("tmdb_id", best.result.ID), slog.String("preferred_media_type", string(preferredType)),
+		slog.String("selected_media_type", string(detailType)), slog.Int("identity_score", best.identityScore),
+		slog.Int("score", best.score), slog.Int("year", best.year))
 	info, err := c.GetDetails(ctx, detailType, best.result.ID, originalFilename)
 	if err == nil && info != nil {
 		info.VerificationScore = deterministicVerificationScore(best.score)
@@ -240,7 +247,7 @@ func manualAliasScore(result tmdbSearchResult, targetYear int, preferredType Med
 	if len(date) >= 4 {
 		resultYear, _ = strconv.Atoi(date[:4])
 	}
-	score := 1000 + int(result.Popularity*10)
+	score := 1000 + popularityTieBreak(result.Popularity)
 	if MediaType(result.MediaType) == preferredType {
 		score += 30
 	}
@@ -265,8 +272,7 @@ func manualCandidateScore(result tmdbSearchResult, normTitle string, targetYear 
 	if len(date) >= 4 {
 		resultYear, _ = strconv.Atoi(date[:4])
 	}
-	score := int(result.Popularity * 10)
-	score += 1000
+	score := 1000 + popularityTieBreak(result.Popularity)
 	if MediaType(result.MediaType) == preferredType {
 		score += 30
 	}
@@ -279,6 +285,64 @@ func manualCandidateScore(result tmdbSearchResult, normTitle string, targetYear 
 		}
 	}
 	return score, resultYear, true
+}
+
+func popularityTieBreak(popularity float64) int {
+	return min(int(popularity*10), 100)
+}
+
+// exactFilenameContextScore is only a tie-breaker between already exact title
+// matches. A release-folder signature can therefore disambiguate homonyms but
+// can never turn a fuzzy result into an accepted exact match.
+func exactFilenameContextScore(originalFilename string, result tmdbSearchResult) int {
+	if strings.TrimSpace(originalFilename) == "" {
+		return 0
+	}
+	parsed := ParseFilename(originalFilename)
+	contexts := generateTitleCandidates(parsed.CleanTitle, filepath.Base(originalFilename))
+	contexts = append(contexts, cleanExactContextTitle(filepath.Base(originalFilename)))
+	parent := filepath.Base(filepath.Dir(originalFilename))
+	if parent != "." && !genericParentDirs[strings.ToLower(strings.TrimSpace(parent))] {
+		parentParsed := ParseFilename(parent)
+		contexts = append(contexts, generateTitleCandidates(parentParsed.CleanTitle, parent)...)
+		contexts = append(contexts, cleanExactContextTitle(parent))
+	}
+	display := coalesce(result.Title, result.Name)
+	original := coalesce(result.OriginalTitle, result.OriginalName)
+	best := 0.0
+	for _, contextTitle := range contexts {
+		best = max(best,
+			TitleSimilarity(contextTitle, display), TitleSimilarity(contextTitle, original),
+			contextTokenSimilarity(contextTitle, display), contextTokenSimilarity(contextTitle, original))
+	}
+	if best < 0.72 {
+		return 0
+	}
+	return int(best * 175)
+}
+
+func contextTokenSimilarity(contextTitle, candidateTitle string) float64 {
+	contextTokens := strings.Fields(normalizeForCompare(contextTitle))
+	candidateTokens := strings.Fields(normalizeForCompare(candidateTitle))
+	if len(contextTokens) == 0 || len(candidateTokens) == 0 {
+		return 0
+	}
+	total := 0.0
+	for _, contextToken := range contextTokens {
+		best := 0.0
+		for _, candidateToken := range candidateTokens {
+			best = max(best, TitleSimilarity(contextToken, candidateToken))
+		}
+		total += best
+	}
+	return total / float64(len(contextTokens))
+}
+
+func cleanExactContextTitle(value string) string {
+	value = strings.TrimSuffix(filepath.Base(value), filepath.Ext(value))
+	value = strings.NewReplacer(".", " ", "_", " ", "-", " ").Replace(value)
+	value = reExactContextNoise.ReplaceAllString(value, " ")
+	return strings.TrimSpace(reSpaces.ReplaceAllString(value, " "))
 }
 
 var genericParentDirs = map[string]bool{
@@ -935,15 +999,16 @@ func fuzzyMatchScoreJW(a, b string) int {
 // --- РОЗУМНИЙ ПАРСИНГ ТА ГЕНЕРАЦІЯ КАНДИДАТІВ ---
 
 var (
-	reQuality  = regexp.MustCompile(`(?i)\b(1080p|720p|2160p|4k|8k|HDRip|BDRip|WEB-DLRip|WEB-DL|WEBRip|HDTV|HDTVRip|CAMRip|TS|DVDScr|DVDRip|BluRay|HDRezka|Line|\d{3,4}Mb)\b`)
-	reCodec    = regexp.MustCompile(`(?i)\b(x264|x265|h264|h265|HEVC|AV1|AVC)\b`)
-	reAudio    = regexp.MustCompile(`(?i)\b(AAC|DTS|AC3|DDP5\.1|Atmos|Dub|UkrDub|RusDub|MVO|DUB|L1|L2)\b`)
-	reRelease  = regexp.MustCompile(`(?i)(-?seleZen|-?ivanes|-?RG|-?NNMClub|\bUkr\b|\bRus\b|\bEng\b)`)
-	reExt      = regexp.MustCompile(`(?i)\.(mkv|mp4|avi|mov)$`)
-	reBrackets = regexp.MustCompile(`\[.*?\]|\(.*?\)`)
-	rePunct    = regexp.MustCompile(`[\._]`)
-	reSpaces   = regexp.MustCompile(`\s{2,}`)
-	reSeries   = regexp.MustCompile(`(?i)(\d{1,2}\s*сезон|сезон\s*\d{1,2}|серия\s*\d{1,3}|серии\s*\d{1,3}-\d{1,3}|Часть\s*\d)`)
+	reQuality           = regexp.MustCompile(`(?i)\b(1080p|720p|2160p|4k|8k|HDRip|BDRip|WEB-DLRip|WEB-DL|WEBRip|HDTV|HDTVRip|CAMRip|TS|DVDScr|DVDRip|BluRay|HDRezka|Line|\d{3,4}Mb)\b`)
+	reCodec             = regexp.MustCompile(`(?i)\b(x264|x265|h264|h265|HEVC|AV1|AVC)\b`)
+	reAudio             = regexp.MustCompile(`(?i)\b(AAC|DTS|AC3|DDP5\.1|Atmos|Dub|UkrDub|RusDub|MVO|DUB|L1|L2)\b`)
+	reRelease           = regexp.MustCompile(`(?i)(-?seleZen|-?ivanes|-?RG|-?NNMClub|\bUkr\b|\bRus\b|\bEng\b)`)
+	reExt               = regexp.MustCompile(`(?i)\.(mkv|mp4|avi|mov)$`)
+	reBrackets          = regexp.MustCompile(`\[.*?\]|\(.*?\)`)
+	rePunct             = regexp.MustCompile(`[\._]`)
+	reSpaces            = regexp.MustCompile(`\s{2,}`)
+	reSeries            = regexp.MustCompile(`(?i)(\d{1,2}\s*сезон|сезон\s*\d{1,2}|серия\s*\d{1,3}|серии\s*\d{1,3}-\d{1,3}|Часть\s*\d)`)
+	reExactContextNoise = regexp.MustCompile(`(?i)\b(?:mkv|mp4|avi|mov|HDTVRip|HDTV|WEB-DLRip|WEB-DL|WEBRip|HDRip|BDRip|BluRay|DVDRip|GeneralFilm|1080p|720p|2160p|x26[45]|h26[45]|HEVC|\d{1,3})\b`)
 )
 
 // cleanString замінює крапки/підкреслення на пробіли і прибирає зайві пробіли

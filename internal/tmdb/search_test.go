@@ -156,6 +156,8 @@ func TestSearchExactTitleStrictTVSkipsMovieEndpoint(t *testing.T) {
 			w.Write([]byte(`{"results":[{"id":62476,"name":"The Bureau","original_name":"Le Bureau des légendes","first_air_date":"2015-04-27","popularity":35}]}`))
 		case strings.HasSuffix(r.URL.Path, "/tv/62476"):
 			w.Write([]byte(`{"id":62476,"name":"The Bureau","original_name":"Le Bureau des légendes","first_air_date":"2015-04-27"}`))
+		case strings.Contains(r.URL.Path, "/movie/802663"):
+			w.Write([]byte(`{"id":802663,"title":"The Bureau","original_title":"The Bureau","release_date":"2020-01-01"}`))
 		default:
 			http.NotFound(w, r)
 		}
@@ -261,6 +263,42 @@ func TestManualCandidateAutoPrefersPopularSeriesForTheBureau(t *testing.T) {
 	}, norm, 2015, MediaTypeMovie)
 	if seriesScore <= movieScore {
 		t.Fatalf("Auto would prefer obscure movie: movie=%d series=%d", movieScore, seriesScore)
+	}
+}
+
+func TestSearchExactTitleUsesReleaseFolderToDisambiguateTheBureau(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/search/movie"):
+			w.Write([]byte(`{"results":[{"id":802663,"title":"The Bureau","original_title":"The Bureau","release_date":"2020-01-01","popularity":999}]}`))
+		case strings.HasSuffix(r.URL.Path, "/search/tv"):
+			w.Write([]byte(`{"results":[{"id":62476,"name":"The Bureau","original_name":"Le Bureau des légendes","first_air_date":"2015-04-27","popularity":1}]}`))
+		case strings.HasSuffix(r.URL.Path, "/tv/62476"):
+			w.Write([]byte(`{"id":62476,"name":"The Bureau","original_name":"Le Bureau des légendes","first_air_date":"2015-04-27"}`))
+		case strings.Contains(r.URL.Path, "/movie/802663"):
+			w.Write([]byte(`{"id":802663,"title":"The Bureau","original_title":"The Bureau","release_date":"2020-01-01"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	c := &Client{client: &http.Client{Transport: &searchRewriteTransport{serverURL: server.URL}}, rateLimiter: rate.NewLimiter(rate.Inf, 1), postersDir: t.TempDir()}
+	filename := filepath.Join("Bjuro legend.HDTVRip.GeneralFilm", "Bjuro legend.08.HDTVRip.GeneralFilm.avi")
+	info, err := c.SearchExactTitle(context.Background(), "The Bureau", 0, MediaTypeMovie, false, filename)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info == nil || info.TMDBID != 62476 || info.MediaType != MediaTypeTV {
+		movieContext := exactFilenameContextScore(filename, tmdbSearchResult{Title: "The Bureau", OriginalTitle: "The Bureau"})
+		tvContext := exactFilenameContextScore(filename, tmdbSearchResult{Name: "The Bureau", OriginalName: "Le Bureau des légendes"})
+		t.Fatalf("release context selected %+v; want TV 62476 (movie_context=%d tv_context=%d similarity=%.3f)", info, movieContext, tvContext, TitleSimilarity("Bjuro legend", "Le Bureau des légendes"))
+	}
+}
+
+func TestPopularityTieBreakIsBounded(t *testing.T) {
+	if got := popularityTieBreak(999); got != 100 {
+		t.Fatalf("popularity tie-break=%d", got)
 	}
 }
 

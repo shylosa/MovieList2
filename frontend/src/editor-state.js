@@ -3,7 +3,7 @@ export function candidateSearchPayload(filename, hints, mediaTypes) {
 }
 
 export function reviewReasonLabel(reason) {
-    return ({ambiguous_exact: 'кілька близьких точних збігів', low_verification_score: 'низька оцінка перевірки', year_conflict: 'конфлікт року', media_type_conflict: 'конфлікт типу', duplicate_tmdb_id: 'один TMDB ID у різних фільмів'})[reason] || 'потребує ручної перевірки';
+    return ({ambiguous_exact: 'кілька близьких точних збігів', low_verification_score: 'низька оцінка перевірки', year_conflict: 'конфлікт року', media_type_conflict: 'конфлікт типу', identity_conflict: 'відхилено автоматичну заміну ідентичності', duplicate_tmdb_id: 'один TMDB ID у різних фільмів'})[reason] || 'потребує ручної перевірки';
 }
 
 export function mediaTypeLabel(mediaType) {

@@ -212,9 +212,9 @@ func TestMergeGeminiWithTMDBPrefersPopularExactTVForTheBureau(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/search/movie"):
-			io.WriteString(w, `{"results":[{"id":802663,"title":"The Bureau","original_title":"The Bureau","release_date":"2020-01-01","popularity":1}]}`)
+			io.WriteString(w, `{"results":[{"id":802663,"title":"The Bureau","original_title":"The Bureau","release_date":"2020-01-01","popularity":999}]}`)
 		case strings.HasSuffix(r.URL.Path, "/search/tv"):
-			io.WriteString(w, `{"results":[{"id":62476,"name":"The Bureau","original_name":"Le Bureau des légendes","first_air_date":"2015-04-27","popularity":35}]}`)
+			io.WriteString(w, `{"results":[{"id":62476,"name":"The Bureau","original_name":"Le Bureau des légendes","first_air_date":"2015-04-27","popularity":1}]}`)
 		case strings.HasSuffix(r.URL.Path, "/tv/62476"):
 			io.WriteString(w, `{"id":62476,"name":"The Bureau","original_name":"Le Bureau des légendes","first_air_date":"2015-04-27"}`)
 		default:
@@ -291,6 +291,54 @@ func TestGeminiTMDBYearCompatible(t *testing.T) {
 	}
 	if geminiTMDBYearCompatible(2023, &year2023, "2025") {
 		t.Fatal("year difference of two should be rejected")
+	}
+}
+
+func TestPreserveRecognizedContextOverridesWeakGeminiType(t *testing.T) {
+	year := 2020
+	rec := preserveRecognizedContext(ai.RecognizedTitle{ENTitle: "The Bureau", Year: &year, MediaType: "movie"}, &storage.Movie{
+		TmdbID: 62476, Year: "2015", MediaType: "tv",
+	})
+	if rec.Year == nil || *rec.Year != 2015 || rec.MediaType != "tv" {
+		t.Fatalf("recognition context=%+v", rec)
+	}
+}
+
+func TestIdentityReplacementConflictKeepsStableRecord(t *testing.T) {
+	existing := &storage.Movie{Filename: "Bjuro.avi", TmdbID: 62476, Year: "2015", MediaType: "tv"}
+	if !identityReplacementConflicts(existing, storage.Movie{TmdbID: 802663, Year: "2020", MediaType: "movie"}) {
+		t.Fatal("movie replacement must conflict with recognized TV identity")
+	}
+	if identityReplacementConflicts(existing, storage.Movie{TmdbID: 62476, Year: "2015", MediaType: "tv"}) {
+		t.Fatal("stable identity was reported as a conflict")
+	}
+}
+
+func TestUpdateMovieSameExplicitTypeClearsReviewWithoutAI(t *testing.T) {
+	ctx := context.Background()
+	db, err := storage.New(filepath.Join(t.TempDir(), "movies.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.InitSchema(ctx); err != nil {
+		t.Fatal(err)
+	}
+	filename := "Bjuro legend/Bjuro legend.08.avi"
+	if err := db.SaveMoviesBatch(ctx, []storage.Movie{{Filename: filename, TmdbID: 62476, TitleEN: "Le Bureau des légendes", Year: "2015", MediaType: "tv", NeedsReview: true, ReviewReason: "media_type_conflict"}}); err != nil {
+		t.Fatal(err)
+	}
+	app := NewApp()
+	app.ctx, app.db = ctx, db
+	if err := app.updateMovieWithMediaType(ctx, filename, "", "tv"); err != nil {
+		t.Fatal(err)
+	}
+	movie, err := db.GetMovieByFilename(ctx, filename)
+	if err != nil || movie == nil {
+		t.Fatalf("movie=%+v err=%v", movie, err)
+	}
+	if movie.NeedsReview || movie.ReviewReason != "" || movie.TmdbID != 62476 || movie.MediaType != "tv" || movie.RecognitionSource != "manual_id" {
+		t.Fatalf("confirmed movie=%+v", movie)
 	}
 }
 

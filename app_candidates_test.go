@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -39,7 +40,7 @@ func TestSearchTMDBCandidatesUsesFilenameInsteadOfWrongStoredTitle(t *testing.T)
 	if err := db.InitSchema(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.SaveMovie(ctx, storage.Movie{Filename: "The.Bureau.2015.mkv", TmdbID: 802663, TitleEN: "Wrong Stored Title", MediaType: "movie"}); err != nil {
+	if err := db.SaveMovie(ctx, storage.Movie{Filename: "The.Bureau.2015.mkv", TmdbID: 802663, TitleEN: "The Bureau", MediaType: "movie"}); err != nil {
 		t.Fatal(err)
 	}
 	cfg := &config.Config{TMDBAPIKey: "test", PostersDir: t.TempDir()}
@@ -55,6 +56,57 @@ func TestSearchTMDBCandidatesUsesFilenameInsteadOfWrongStoredTitle(t *testing.T)
 	}
 	if len(got) != 1 || got[0].TMDBID != 62476 {
 		t.Fatalf("candidates=%+v", got)
+	}
+}
+
+func TestSearchTMDBCandidatesUsesVerifiedAIResolvedAlias(t *testing.T) {
+	ctx := context.Background()
+	queries := make([]string, 0, 4)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		query := r.URL.Query().Get("query")
+		queries = append(queries, query)
+		if query == "The Bureau" {
+			if r.URL.Path == "/3/search/movie" {
+				io.WriteString(w, `{"results":[{"id":802663,"title":"The Bureau","original_title":"The Bureau","release_date":"2020-01-01"}]}`)
+				return
+			}
+			io.WriteString(w, `{"results":[{"id":62476,"name":"The Bureau","original_name":"Le Bureau des légendes","first_air_date":"2015-04-27"},{"id":89844,"name":"The Bureau","original_name":"The Bureau","first_air_date":"2015-01-01"}]}`)
+			return
+		}
+		io.WriteString(w, `{"results":[]}`)
+	}))
+	defer server.Close()
+	u, _ := url.Parse(server.URL)
+	db, err := storage.New(filepath.Join(t.TempDir(), "movies.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.InitSchema(ctx); err != nil {
+		t.Fatal(err)
+	}
+	filename := "Bjuro legend.HDTVRip.GeneralFilm/Bjuro legend.08.HDTVRip.GeneralFilm.avi"
+	if err := db.SaveMoviesBatch(ctx, []storage.Movie{{Filename: filename, TmdbID: 62476, TitleEN: "Le Bureau des légendes", TitleUA: "Бюро легенд", Year: "2015", MediaType: "tv"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SaveAIResolution(ctx, storage.AIResolution{OriginalFilename: filename, ResolvedTitle: "The Bureau", PipelineVersion: recognitionPipelineVersion}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{TMDBAPIKey: "test", PostersDir: t.TempDir()}
+	client := tmdb.NewClient(cfg)
+	client.SetTransport(&mockTransport{base: http.DefaultTransport, scheme: u.Scheme, host: u.Host})
+	app := NewApp()
+	app.ctx, app.db, app.tmdbClient = ctx, db, client
+	got, err := app.SearchTMDBCandidates(CandidateSearchRequest{Filename: filename, MediaType: "auto"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0].TMDBID != 89844 || got[1].TMDBID != 802663 {
+		t.Fatalf("candidates=%+v", got)
+	}
+	if len(queries) < 2 || queries[0] != "The Bureau" || queries[1] != "The Bureau" {
+		t.Fatalf("queries=%v", queries)
 	}
 }
 
@@ -86,6 +138,18 @@ func TestExcludeCurrentCandidate(t *testing.T) {
 	got := excludeCurrentCandidate(candidates, &storage.Movie{TmdbID: 1002109, MediaType: "movie"})
 	if len(got) != 2 || got[0].TMDBID != 42 || got[1].MediaType != tmdb.MediaTypeTV {
 		t.Fatalf("filtered candidates=%+v", got)
+	}
+}
+
+func TestCurrentNeedsReviewCandidateCanBeConfirmed(t *testing.T) {
+	current := &storage.Movie{TmdbID: 62476, TitleUA: "Бюро легенд", TitleEN: "Le Bureau des légendes", Year: "2015", MediaType: "tv", NeedsReview: true}
+	got := currentReviewCandidate(current)
+	if len(got) != 1 || got[0].TMDBID != 62476 || got[0].MediaType != tmdb.MediaTypeTV || got[0].Title != "Бюро легенд" {
+		t.Fatalf("current review candidate=%+v", got)
+	}
+	current.NeedsReview = false
+	if got := currentReviewCandidate(current); len(got) != 0 {
+		t.Fatalf("trusted current candidate leaked into alternatives: %+v", got)
 	}
 }
 
@@ -185,6 +249,48 @@ func TestCandidateSearchTitleIgnoresUnresolvedPlaceholder(t *testing.T) {
 	parsed := tmdb.ParseFilename(filename)
 	if parsed.CleanTitle != "Daniels Gotta Die" {
 		t.Fatalf("parsed fallback=%q", parsed.CleanTitle)
+	}
+}
+
+func TestCandidateSearchTitleRejectsFullAndBasenamePlaceholders(t *testing.T) {
+	filename := "Bjuro legend.HDTVRip.GeneralFilm/Bjuro legend.08.HDTVRip.GeneralFilm.avi"
+	for _, title := range []string{filename, filepath.Base(filename), "BJuro_LEGEND.08.HDTVRip.GeneralFilm.AVI"} {
+		if got := candidateSearchTitle(title, filename); got != "" {
+			t.Fatalf("placeholder %q used as query: %q", title, got)
+		}
+	}
+}
+
+func TestCandidateSearchQueriesAreCleanAndDeterministic(t *testing.T) {
+	filename := "Bjuro legend.HDTVRip.GeneralFilm/Bjuro legend.08.HDTVRip.GeneralFilm.avi"
+	queries := candidateSearchQueries(filepath.Base(filename), filename, nil, "")
+	if len(queries) == 0 || queries[0].source != "filename" || queries[0].title != "Bjuro legend" {
+		t.Fatalf("queries=%+v", queries)
+	}
+	for _, query := range queries {
+		lower := strings.ToLower(query.title)
+		for _, forbidden := range []string{"08", "hdtvrip", "generalfilm", "avi"} {
+			if strings.Contains(lower, forbidden) {
+				t.Fatalf("dirty query %+v contains %q", query, forbidden)
+			}
+		}
+	}
+}
+
+func TestCandidateSearchQueriesPreferManualThenStoredTitle(t *testing.T) {
+	current := &storage.Movie{TmdbID: 62476, TitleEN: "The Bureau", TitleUA: "Бюро легенд", Year: "2015", MediaType: "tv"}
+	queries := candidateSearchQueries("Le Bureau des légendes", "Bjuro legend.08.avi", current, "The Bureau")
+	want := []candidateQuery{{"manual", "Le Bureau des légendes"}, {"stored_title", "The Bureau"}, {"stored_title", "Бюро легенд"}, {"filename", "Bjuro legend"}}
+	if len(queries) != len(want) {
+		t.Fatalf("queries=%+v", queries)
+	}
+	for i := range want {
+		if queries[i] != want[i] {
+			t.Fatalf("queries[%d]=%+v want %+v", i, queries[i], want[i])
+		}
+	}
+	if year := candidateSearchYear(0, current); year != 2015 {
+		t.Fatalf("candidate year=%d", year)
 	}
 }
 

@@ -2,6 +2,22 @@
 
 All notable changes to this project. Dates are approximate (session-based).
 
+## 13 вересня 2026 — Round 28 automatic exact disambiguation
+
+* Popularity is bounded to a small tie-breaker and can no longer dominate exact movie/TV identity selection.
+* Clean filename and release-folder signatures disambiguate already-exact homonyms without admitting fuzzy candidates.
+* `Bjuro legend.../Bjuro legend.08...avi` now selects The Bureau TV 62476 even when Gemini prefers movie, supplies no year and movie popularity is much larger.
+* Exact selection emits one compact structured winner summary with preferred/selected type and identity score.
+* Candidate search reuses the verified AI-resolution alias (for example `The Bureau`) when stored localized/original titles only rediscover the current record.
+* A current TMDB identity is shown first in `Варіантах` when `NeedsReview` is set, allowing explicit confirmation to clear the warning; selecting the same media type and running the fix now confirms locally without an AI request.
+
+## 13 вересня 2026 — Round 27 candidate/manual-fix safety
+
+- Candidate search rejects filename-shaped placeholders and uses clean deterministic manual, stored-title, filename and parent queries.
+- No-hint manual re-recognition preserves the verified year/media type and refuses silent TMDB identity replacement.
+- Candidate and Gemini merge logs now expose compact query-source and requested/preferred/selected-type diagnostics.
+- Unavailable configured Gemini models are skipped in configured order; production defaults remain unchanged.
+
 ## 13 вересня 2026 — Round 26 grouped TV safety
 
 * Версію документації та `.env.example` синхронізовано з default `APP_VERSION=2.4.0`; застарілі handoff/implementation plan позначено архівними.

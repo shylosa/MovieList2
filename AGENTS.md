@@ -198,17 +198,17 @@ GITHUB_PAGES_BRANCH=main
 
 ---
 
-## Active Work — Round 26 (grouped TV safety; runtime verification pending)
+## Active Work — Round 28 (automatic exact disambiguation; runtime verification pending)
 
-The active implementation specification is `CHECKLIST.md` (gitignored by design). Round 26 corrects grouped-TV false positives such as `Superkopy.80.2026`: strong episode markers are authoritative preferences, while bare episode numbers require an adjacent pair with the same series signature.
+The active implementation specification is `CHECKLIST.md` (gitignored by design). Round 28 corrects the initial automatic choice between exact movie/TV homonyms by bounding popularity and using the cleaned filename/release-folder signature as an exact-candidate tie-breaker.
 
-1. distinguish strong episode markers from weak bare numbers;
-2. apply weak grouped-TV preference only to adjacent episodes with the same signature;
-3. protect parsed titles from generic parent directories;
-4. preserve review state for type/year/verification conflicts;
-5. finish explicit Round 25 test backlog and production runtime verification.
+1. keep movie and TV exact candidates in one deterministic comparison;
+2. bound popularity so it cannot dominate stable identity evidence;
+3. compare cleaned filename/folder context only after an exact title match;
+4. keep Gemini media type as a weak preference;
+5. verify initial recognition and no-hint re-recognition on the real media library.
 
-Round 26 exclusions: migration framework, database backup/restore, file fingerprints/rename tracking and SQLite FTS. Do not expand scope into these items.
+Round 28 exclusions: migration framework, database backup/restore, file fingerprints/rename tracking and SQLite FTS. Do not expand scope into these items.
 
 Important delivery rules:
 
@@ -406,8 +406,8 @@ shutdown) — рівно один app_closed в кінці сесії. FIX-17 (f
 | Manual title correction | ✅ Authoritative exact title with `Авто / Фільм / Серіал`; strict mode limits typed endpoint. |
 | Automatic ambiguity | ✅ Exact movie+TV disambiguation before fuzzy Gemini merge; `The Bureau` regression selects TV 62476. |
 | Scan metrics | ✅ `processed_total` is distinct from complete collection `disk_total`. |
-| Active Round 26 | 🧪 Grouped-TV safety implemented; production runtime verification remains. |
+| Active Round 28 | 🧪 Automatic exact disambiguation implemented; production runtime verification remains. |
 | Candidate confirmation | ✅ TMDB selection saves in foreground; poster/localization finish in a guarded `App.wg` task and emit `movie-updated`. |
-| Tests | ✅ Automated Round 26 verification is maintained in `CHECKLIST.md`; runtime-only checks require a fresh production log. |
+| Tests | ✅ Automated Round 28 verification is maintained in `CHECKLIST.md`; runtime-only checks require a fresh production log. |
 
 > For full change history see [CHANGELOG.md](./CHANGELOG.md).
