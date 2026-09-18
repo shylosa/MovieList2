@@ -595,6 +595,9 @@ var cyrillicCorrections = map[string]string{
 	"ден ":   "день ",
 	"тма":    "тьма",
 	"цар ":   "царь ",
+	"телств": "тельств",
+	"телст":  "тельст",
+	"телск":  "тельск",
 }
 
 var cyrillicReplacer *strings.Replacer

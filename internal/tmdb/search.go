@@ -72,18 +72,27 @@ func (c *Client) SearchCandidates(ctx context.Context, title string, year int, r
 	if err := search(title, "en-US"); err != nil {
 		return nil, err
 	}
-	hasYearCompatible := year == 0
-	for _, candidate := range out {
-		if candidate.Year == 0 || abs(candidate.Year-year) <= 1 {
-			hasYearCompatible = true
-			break
+	hasYearMatch := func(items []TMDBCandidate) bool {
+		if year == 0 {
+			return true
 		}
+		for _, c := range items {
+			if c.Year == 0 || abs(c.Year-year) <= 1 {
+				return true
+			}
+		}
+		return false
 	}
-	if len(out) == 0 || !hasYearCompatible {
+	if len(out) == 0 || !hasYearMatch(out) {
 		transliterated := strings.TrimSpace(latinToCyrillic(title))
 		if transliterated != "" && !strings.EqualFold(transliterated, title) {
 			if err := search(transliterated, "uk-UA"); err != nil {
 				return nil, err
+			}
+			if len(out) == 0 || !hasYearMatch(out) {
+				if err := search(transliterated, "ru-RU"); err != nil {
+					return nil, err
+				}
 			}
 		}
 	}

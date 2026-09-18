@@ -235,6 +235,57 @@ func TestSearchCandidatesRetriesTransliteratedFilenameWhenDirectSearchIsEmpty(t 
 	}
 }
 
+func TestLatinToCyrillicSuffixCorrections(t *testing.T) {
+	tests := []struct {
+		input    string
+		expected string
+	}{
+		{"Zhertva obstoyatelstv", "Жертва обстоятельств"},
+		{"Dokazatelstvo", "Доказательство"},
+		{"Uchitelskiy", "Учительский"},
+		{"Vrag", "Враг"},
+	}
+	for _, tt := range tests {
+		got := latinToCyrillic(tt.input)
+		if got != tt.expected {
+			t.Errorf("latinToCyrillic(%q) = %q; want %q", tt.input, got, tt.expected)
+		}
+	}
+}
+
+func TestSearchCandidatesTransliteratedFallsBackToRussianWhenUkrainianIsEmpty(t *testing.T) {
+	languages := make([]string, 0, 6)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		lang := r.URL.Query().Get("language")
+		languages = append(languages, lang)
+		if lang == "ru-RU" && strings.HasSuffix(r.URL.Path, "/search/movie") {
+			w.Write([]byte(`{"results":[{"id":1284186,"title":"Жертва обстоятельств","original_title":"Sacrifice","release_date":"2026-04-09","popularity":10}]}`))
+			return
+		}
+		w.Write([]byte(`{"results":[]}`))
+	}))
+	defer server.Close()
+	c := &Client{client: &http.Client{Transport: &searchRewriteTransport{serverURL: server.URL}}, rateLimiter: rate.NewLimiter(rate.Inf, 1)}
+	got, err := c.SearchCandidates(context.Background(), "Zhertva obstoyatelstv", 2025, "auto")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].TMDBID != 1284186 {
+		t.Fatalf("expected candidate 1284186, got=%+v", got)
+	}
+	hasRu := false
+	for _, lang := range languages {
+		if lang == "ru-RU" {
+			hasRu = true
+			break
+		}
+	}
+	if !hasRu {
+		t.Fatalf("expected ru-RU fallback in languages, got: %v", languages)
+	}
+}
+
 func TestManualCandidateYearIsTieBreakerNotRejection(t *testing.T) {
 	score, year, ok := manualCandidateScore(tmdbSearchResult{
 		ID: 1, Title: "Daniel's Gotta Die", OriginalTitle: "Daniel's Gotta Die", ReleaseDate: "2025-01-01", MediaType: "movie",
