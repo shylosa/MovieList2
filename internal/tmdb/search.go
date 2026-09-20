@@ -37,6 +37,7 @@ func (c *Client) SearchCandidates(ctx context.Context, title string, year int, r
 		return nil, fmt.Errorf("invalid media_type %q", requestedType)
 	}
 	norm := normalizeForCompare(title)
+	queryNorms := map[string]bool{norm: true}
 	seen := make(map[string]bool)
 	out := make([]TMDBCandidate, 0, 10)
 	search := func(query, language string) error {
@@ -64,7 +65,7 @@ func (c *Client) SearchCandidates(ctx context.Context, title string, year int, r
 				if len(date) >= 4 {
 					resultYear, _ = strconv.Atoi(date[:4])
 				}
-				out = append(out, TMDBCandidate{TMDBID: result.ID, Title: display, OriginalTitle: original, Year: resultYear, MediaType: mediaType, Popularity: result.Popularity, Exact: normalizeForCompare(display) == norm || normalizeForCompare(original) == norm})
+				out = append(out, TMDBCandidate{TMDBID: result.ID, Title: display, OriginalTitle: original, Year: resultYear, MediaType: mediaType, Popularity: result.Popularity, Exact: queryNorms[normalizeForCompare(display)] || queryNorms[normalizeForCompare(original)]})
 			}
 		}
 		return nil
@@ -84,8 +85,8 @@ func (c *Client) SearchCandidates(ctx context.Context, title string, year int, r
 		return false
 	}
 	if len(out) == 0 || !hasYearMatch(out) {
-		transliterated := strings.TrimSpace(latinToCyrillic(title))
-		if transliterated != "" && !strings.EqualFold(transliterated, title) {
+		for _, transliterated := range transliterationVariants(title) {
+			queryNorms[normalizeForCompare(transliterated)] = true
 			if err := search(transliterated, "uk-UA"); err != nil {
 				return nil, err
 			}
@@ -93,6 +94,14 @@ func (c *Client) SearchCandidates(ctx context.Context, title string, year int, r
 				if err := search(transliterated, "ru-RU"); err != nil {
 					return nil, err
 				}
+			}
+			if len(out) == 0 || !hasYearMatch(out) {
+				if err := search(transliterated, "en-US"); err != nil {
+					return nil, err
+				}
+			}
+			if len(out) > 0 && hasYearMatch(out) {
+				break
 			}
 		}
 	}
@@ -1009,9 +1018,12 @@ func fuzzyMatchScoreJW(a, b string) int {
 
 var (
 	reQuality           = regexp.MustCompile(`(?i)\b(1080p|720p|2160p|4k|8k|HDRip|BDRip|WEB-DLRip|WEB-DL|WEBRip|HDTV|HDTVRip|CAMRip|TS|DVDScr|DVDRip|BluRay|HDRezka|Line|\d{3,4}Mb)\b`)
-	reCodec             = regexp.MustCompile(`(?i)\b(x264|x265|h264|h265|HEVC|AV1|AVC)\b`)
-	reAudio             = regexp.MustCompile(`(?i)\b(AAC|DTS|AC3|DDP5\.1|Atmos|Dub|UkrDub|RusDub|MVO|DUB|L1|L2)\b`)
-	reRelease           = regexp.MustCompile(`(?i)(-?seleZen|-?ivanes|-?RG|-?NNMClub|\bUkr\b|\bRus\b|\bEng\b)`)
+	reCodec             = regexp.MustCompile(`(?i)\b(x264|x265|h264|h265|HEVC|AV1|AVC|XviD)\b`)
+	reAudio             = regexp.MustCompile(`(?i)\b(AAC|DTS|AC3|DDP5\.1|Atmos|Dub|UkrDub|RusDub|MVO|DUB|AVO|L1|L2)\b`)
+	reRelease           = regexp.MustCompile(`(?i)(-?seleZen|-?ivanes|-?RG[[:alnum:]]*|-?NNMClub|\bUkr\b|\bRus\b|\bEng\b|\[TC\])`)
+	reReleaseByMarker   = regexp.MustCompile(`(?i)(?:^|[ ._-])by[ ._-]+`)
+	reReleaseGroupTail  = regexp.MustCompile(`(?i)[._\s]+-[[:alnum:]][[:alnum:]_-]*$`)
+	reTerminalPartOne   = regexp.MustCompile(`(?:^|\s)1$`)
 	reExt               = regexp.MustCompile(`(?i)\.(mkv|mp4|avi|mov)$`)
 	reBrackets          = regexp.MustCompile(`\[.*?\]|\(.*?\)`)
 	rePunct             = regexp.MustCompile(`[\._]`)
@@ -1025,6 +1037,22 @@ func cleanString(s string) string {
 	s = rePunct.ReplaceAllString(s, " ")
 	s = reSpaces.ReplaceAllString(s, " ")
 	return strings.TrimSpace(s)
+}
+
+func hasReleaseEvidence(s string) bool {
+	cleaned := cleanString(s)
+	return reYear.MatchString(cleaned) && (reQuality.MatchString(cleaned) || reCodec.MatchString(cleaned) || reAudio.MatchString(cleaned) || reRelease.MatchString(cleaned))
+}
+
+func trimReleaseByTail(s string) string {
+	matches := reReleaseByMarker.FindAllStringIndex(s, -1)
+	for i := len(matches) - 1; i >= 0; i-- {
+		prefix := s[:matches[i][0]]
+		if hasReleaseEvidence(prefix) {
+			return prefix
+		}
+	}
+	return s
 }
 
 // isCyrillicSeries перевіряє наявність специфічних маркерів серіалу
@@ -1047,6 +1075,14 @@ func generateTitleCandidates(ptnTitle, filename string) []string {
 	add(cleanString(ptnTitle))
 
 	s := reExt.ReplaceAllString(filename, "")
+	s = trimReleaseByTail(s)
+	if hasReleaseEvidence(s) {
+		s = reReleaseGroupTail.ReplaceAllString(s, "")
+	}
+	// Normalize dot/underscore separators before word-boundary tag regexps.
+	// In regexp, '_' is a word character and would otherwise keep tags such
+	// as _BDRip_AVO_ from matching their bounded forms.
+	s = cleanString(s)
 	s = reQuality.ReplaceAllString(s, "")
 	s = reCodec.ReplaceAllString(s, "")
 	s = reAudio.ReplaceAllString(s, "")
@@ -1056,6 +1092,9 @@ func generateTitleCandidates(ptnTitle, filename string) []string {
 	noBrackets = reYear.ReplaceAllString(noBrackets, "")
 	noBrackets = cleanString(noBrackets)
 	add(noBrackets)
+	if reYear.MatchString(filename) && (reQuality.MatchString(filename) || reCodec.MatchString(filename) || reAudio.MatchString(filename) || reRelease.MatchString(filename)) {
+		add(strings.TrimSpace(reTerminalPartOne.ReplaceAllString(noBrackets, "")))
+	}
 
 	if idx := strings.Index(noBrackets, " - "); idx > 0 {
 		add(strings.TrimSpace(noBrackets[:idx]))

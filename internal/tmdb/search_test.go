@@ -286,6 +286,158 @@ func TestSearchCandidatesTransliteratedFallsBackToRussianWhenUkrainianIsEmpty(t 
 	}
 }
 
+func TestSearchCandidatesProductionTransliterations(t *testing.T) {
+	tests := []struct {
+		title string
+		year  int
+		id    int
+		cyr   string
+		name  string
+	}{
+		{"Tretyi lishnyi", 2012, 72105, "Третий лишний", "Ted"},
+		{"Dorozhnoe prikljuchenie", 2000, 9285, "Дорожное приключение", "Road Trip"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.title, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				if r.URL.Query().Get("query") == tt.cyr && strings.HasSuffix(r.URL.Path, "/search/movie") {
+					fmt.Fprintf(w, `{"results":[{"id":%d,"title":%q,"original_title":%q,"release_date":%q}]}`, tt.id, tt.cyr, tt.name, fmt.Sprintf("%d-01-01", tt.year))
+					return
+				}
+				w.Write([]byte(`{"results":[]}`))
+			}))
+			defer server.Close()
+			c := &Client{client: &http.Client{Transport: &searchRewriteTransport{serverURL: server.URL}}, rateLimiter: rate.NewLimiter(rate.Inf, 1)}
+			got, err := c.SearchCandidates(context.Background(), tt.title, tt.year, "auto")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(got) != 1 || got[0].TMDBID != tt.id || !got[0].Exact {
+				t.Fatalf("candidates=%+v", got)
+			}
+		})
+	}
+}
+
+func TestGenerateTitleCandidatesContextualPartOne(t *testing.T) {
+	got := generateTitleCandidates("Dorozhnoe prikljuchenie 1", "Dorozhnoe.prikljuchenie.1.2000.XviD.HDTVRip.avi")
+	found := false
+	for _, candidate := range got {
+		if candidate == "Dorozhnoe prikljuchenie" {
+			found = true
+		}
+		if strings.Contains(strings.ToLower(candidate), "xvid") {
+			t.Fatalf("release noise leaked: %v", got)
+		}
+	}
+	if !found {
+		t.Fatalf("missing contextual no-part candidate: %v", got)
+	}
+	for _, fixture := range []string{"Formula.1.2025.mkv", "District.9.2009.mkv", "1917.2019.mkv"} {
+		parsed := ParseFilename(fixture)
+		if parsed.CleanTitle == "" || (fixture != "1917.2019.mkv" && !strings.Contains(parsed.CleanTitle, strings.Fields(strings.ReplaceAll(fixture, ".", " "))[1])) {
+			t.Fatalf("numeric title damaged: %s => %+v", fixture, parsed)
+		}
+	}
+}
+
+func TestGenerateTitleCandidatesRemovesProductionReleaseGroups(t *testing.T) {
+	tests := []struct {
+		parsed   string
+		filename string
+		want     string
+		noise    []string
+	}{
+		{
+			parsed:   "Tretyi lishnyi",
+			filename: "Tretyi_lishnyi_2012_BDRip_AVO_[TC]_by_Dalemake.avi",
+			want:     "Tretyi lishnyi",
+			noise:    []string{"bdrip", "avo", "tc", "by", "dalemake"},
+		},
+		{
+			parsed:   "Obrazcovyj Samec",
+			filename: "Obrazcovyj.Samec.2001.RUS.BDRip.XviD.AC3.-HELLYWOOD.avi",
+			want:     "Obrazcovyj Samec",
+			noise:    []string{"rus", "bdrip", "xvid", "ac3", "hellywood"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.filename, func(t *testing.T) {
+			candidates := generateTitleCandidates(tt.parsed, tt.filename)
+			if len(candidates) == 0 || candidates[0] != tt.want {
+				t.Fatalf("candidates=%v want first=%q", candidates, tt.want)
+			}
+			for _, candidate := range candidates {
+				lower := strings.ToLower(candidate)
+				for _, noise := range tt.noise {
+					if strings.Contains(lower, noise) {
+						t.Fatalf("release noise %q leaked into %q; candidates=%v", noise, candidate, candidates)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestGenerateTitleCandidatesPreservesTitleByAndHyphenSuffix(t *testing.T) {
+	for _, fixture := range []struct{ parsed, filename, forbidden string }{
+		{"Stand by Me", "Stand.by.Me.1986.mkv", "Stand"},
+		{"Written By", "Written.By.2016.mkv", "Written"},
+		{"Spider-Man", "Spider-Man.2002.mkv", "Spider"},
+	} {
+		candidates := generateTitleCandidates(fixture.parsed, fixture.filename)
+		if len(candidates) == 0 || candidates[0] != fixture.parsed {
+			t.Fatalf("%s => %v", fixture.filename, candidates)
+		}
+		for _, candidate := range candidates {
+			if candidate == fixture.forbidden {
+				t.Fatalf("title suffix was treated as release group: %s => %v", fixture.filename, candidates)
+			}
+		}
+	}
+}
+
+func TestPipelineLatinResolvesProductionTransliterationsWithoutAI(t *testing.T) {
+	tests := []struct {
+		filename, query, title string
+		id, year               int
+	}{
+		{"Tretyi_lishnyi_2012_BDRip_AVO_[TC]_by_Dalemake.avi", "Третий лишний", "Третий лишний", 72105, 2012},
+		{"Dorozhnoe.prikljuchenie.1.2000.XviD.HDTVRip.avi", "Дорожное приключение", "Дорожное приключение", 9285, 2000},
+	}
+	for _, tt := range tests {
+		t.Run(tt.filename, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				if strings.HasSuffix(r.URL.Path, "/search/movie") {
+					if r.URL.Query().Get("query") == tt.query {
+						fmt.Fprintf(w, `{"results":[{"id":%d,"title":%q,"original_title":"Original","release_date":"%s-01-01","original_language":"en","popularity":20}]}`, tt.id, tt.title, r.URL.Query().Get("year"))
+						return
+					}
+					w.Write([]byte(`{"results":[]}`))
+					return
+				}
+				if strings.Contains(r.URL.Path, fmt.Sprintf("/movie/%d", tt.id)) {
+					fmt.Fprintf(w, `{"id":%d,"title":%q,"original_title":"Original","release_date":"%d-01-01","overview":"Український опис історії.","genres":[],"credits":{"cast":[]}}`, tt.id, tt.title, tt.year)
+					return
+				}
+				http.NotFound(w, r)
+			}))
+			defer server.Close()
+			c := &Client{client: &http.Client{Transport: &searchRewriteTransport{serverURL: server.URL}}, rateLimiter: rate.NewLimiter(rate.Inf, 1), postersDir: t.TempDir()}
+			parsed := ParseFilename(tt.filename)
+			info, err := c.pipelineLatin(context.Background(), parsed, tt.filename)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if info == nil || info.TMDBID != tt.id {
+				t.Fatalf("info=%+v", info)
+			}
+		})
+	}
+}
+
 func TestManualCandidateYearIsTieBreakerNotRejection(t *testing.T) {
 	score, year, ok := manualCandidateScore(tmdbSearchResult{
 		ID: 1, Title: "Daniel's Gotta Die", OriginalTitle: "Daniel's Gotta Die", ReleaseDate: "2025-01-01", MediaType: "movie",

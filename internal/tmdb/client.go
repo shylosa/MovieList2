@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -43,6 +44,7 @@ var (
 	reLatinOnly            = regexp.MustCompile(`^[a-zA-Z0-9\s\-\:\.,!?']+$`)
 	reInvalidFilenameChars = regexp.MustCompile(`[^\w\-]`)
 	reIMDBIDExact          = regexp.MustCompile(`(?i)^tt\d{7,10}$`)
+	reTranslitWords        = regexp.MustCompile(`[a-z]+`)
 	homoglyphToLatin       = strings.NewReplacer(
 		"а", "a", "о", "o", "е", "e", "с", "c", "р", "p", "х", "x", "у", "y", "і", "i",
 		"А", "A", "О", "O", "Е", "E", "С", "C", "Р", "P", "Х", "X", "У", "Y", "І", "I",
@@ -354,25 +356,24 @@ func (c *Client) pipelineLatin(ctx context.Context, parsed ParsedFile, originalF
 		return info, err
 	}
 
-	// Спроба 3: lat→cyr транслітерація — лише для змішаних рядків з кирилицею.
-	// Чиста ASCII (TitleLangLatin) → пропуск: lat→cyr дає "русизм", не EN-оригінал;
-	// економимо 2+ зайвих TMDB-запити (uk-UA + ru-RU) перед Gemini fallback.
-	if !utils.HasCyrillic(parsed.CleanTitle) {
+	// Спроба 3: lat→cyr лише за достатніх фонетичних ознак слов'янського
+	// трансліту. Звичайні англійські назви не витрачають додаткові запити.
+	variants, score, markers := transliterationVariantsForFile(parsed, originalFilename)
+	if score < transliterationMinScore {
 		return nil, nil
 	}
-
-	cyrillicTitle := latinToCyrillic(parsed.CleanTitle)
-	if cyrillicTitle != parsed.CleanTitle {
-		utils.LoggerWithTrace(ctx).Info("transliteration_applied",
-			slog.String("original", parsed.CleanTitle),
-			slog.String("converted", cyrillicTitle),
-		)
-
+	utils.LoggerWithTrace(ctx).Info("transliteration_detected", slog.Int("score", score), slog.Any("markers", markers))
+	for variantIndex, cyrillicTitle := range variants {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		cyrParsed := parsed
 		cyrParsed.CleanTitle = cyrillicTitle
 		cyrParsed.TitleLang = TitleLangCyrillic
-
 		if info, err := c.trySearch(ctx, cyrParsed, originalFilename); err != nil || info != nil {
+			if info != nil {
+				utils.LoggerWithTrace(ctx).Info("transliteration_resolved", slog.String("original_query", parsed.CleanTitle), slog.String("variant", cyrillicTitle), slog.Int("variant_attempts", variantIndex+1), slog.Int("score", score), slog.Int("tmdb_id", info.TMDBID), slog.String("media_type", string(info.MediaType)), slog.String("year", info.Year))
+			}
 			return info, err
 		}
 	}
@@ -477,19 +478,27 @@ func latinToCyrillic(s string) string {
 	i := 0
 
 	for i < len(runes) {
-		// Спочатку пробуємо діграфи (2 символи)
-		if i+1 < len(runes) {
-			digraph := string(runes[i : i+2])
-			if cyr, ok := digraphMap[digraph]; ok {
+		matched := false
+		for width := min(4, len(runes)-i); width >= 2; width-- {
+			sequence := string(runes[i : i+width])
+			cyr, ok := transliterationMap[sequence]
+			if ok && transliterationSuffixOnly[sequence] && i+width < len(runes) && isASCIILetter(runes[i+width]) {
+				continue
+			}
+			if ok {
 				// Зберігаємо регістр першого символу оригіналу
 				if i < len(origRunes) && isUpper(origRunes[i]) {
 					result.WriteString(strings.ToUpper(cyr))
 				} else {
 					result.WriteString(cyr)
 				}
-				i += 2
-				continue
+				i += width
+				matched = true
+				break
 			}
+		}
+		if matched {
+			continue
 		}
 
 		// Одиночний символ
@@ -526,6 +535,123 @@ func latinToCyrillic(s string) string {
 	return converted
 }
 
+const transliterationMinScore = 4
+
+func isLikelySlavicTransliteration(title string) (int, []string) {
+	lowerTitle := strings.ToLower(strings.TrimSpace(title))
+	if lowerTitle == "" || utils.HasCyrillic(title) || len([]rune(title)) < 4 || strings.Contains(lowerTitle, "://") || (strings.HasPrefix(lowerTitle, "tt") && len(lowerTitle) > 2 && strings.IndexFunc(lowerTitle[2:], func(r rune) bool { return r < '0' || r > '9' }) == -1) {
+		return 0, nil
+	}
+	words := reTranslitWords.FindAllString(lowerTitle, -1)
+	seen := make(map[string]bool)
+	markers := make([]string, 0, 6)
+	score := 0
+	add := func(marker string, weight int) {
+		if !seen[marker] {
+			seen[marker] = true
+			markers = append(markers, marker)
+			score += weight
+		}
+	}
+	for _, word := range words {
+		for _, marker := range []string{"shch", "sch"} {
+			if strings.Contains(word, marker) {
+				add(marker, 4)
+			}
+		}
+		for _, marker := range []string{"zh", "kh", "ts", "lja", "lju", "lje", "njo", "nja", "nju", "nje", "lj", "nj", "ja", "ju", "je", "jo", "ej"} {
+			if strings.Contains(word, marker) {
+				add(marker, 3)
+			}
+		}
+		if strings.Contains(word, "j") {
+			add("j", 2)
+		}
+		for _, marker := range []string{"ya", "yu", "yo", "ye"} {
+			if strings.Contains(word, marker) {
+				add(marker, 2)
+			}
+		}
+		for _, suffix := range []string{"nyi", "aya", "ogo", "enie", "yi", "yj", "iy", "ij", "yy", "oe", "oj"} {
+			if strings.HasSuffix(word, suffix) {
+				add("-"+suffix, 2)
+			}
+		}
+	}
+	sort.Strings(markers)
+	return score, markers
+}
+
+func transliterationVariants(title string) []string {
+	if score, _ := isLikelySlavicTransliteration(title); score < transliterationMinScore {
+		return nil
+	}
+	converted := strings.TrimSpace(latinToCyrillic(title))
+	if converted == "" || strings.EqualFold(converted, title) {
+		return nil
+	}
+	return []string{converted}
+}
+
+// transliterationVariantsForFile applies release-name cleanup before conversion.
+// Shorter candidates are tried first so contextual suffixes such as a part marker
+// do not contaminate the localized title, while the original parsed title remains
+// available as a bounded fallback.
+func transliterationVariantsForFile(parsed ParsedFile, originalFilename string) ([]string, int, []string) {
+	sources := generateTitleCandidates(parsed.CleanTitle, filepath.Base(originalFilename))
+	sort.SliceStable(sources, func(i, j int) bool {
+		return len([]rune(sources[i])) < len([]rune(sources[j]))
+	})
+
+	variants := make([]string, 0, 2)
+	seen := make(map[string]bool)
+	bestScore := 0
+	var bestMarkers []string
+	for _, source := range sources {
+		score, markers := isLikelySlavicTransliteration(source)
+		if score < transliterationMinScore {
+			continue
+		}
+		if score > bestScore {
+			bestScore = score
+			bestMarkers = markers
+		}
+		converted := strings.TrimSpace(latinToCyrillic(source))
+		key := strings.ToLower(converted)
+		if converted == "" || strings.EqualFold(converted, source) || seen[key] {
+			continue
+		}
+		seen[key] = true
+		variants = append(variants, converted)
+		if len(variants) == 2 {
+			break
+		}
+	}
+	return variants, bestScore, bestMarkers
+}
+
+// TransliterationHint returns a deterministic localized-title hint for AI.
+func TransliterationHint(title string) string {
+	variants := transliterationVariants(title)
+	if len(variants) == 0 {
+		return ""
+	}
+	return variants[0]
+}
+
+// TransliterationHintFromPath returns the cleanest bounded hint available from
+// both the parsed title and release filename context.
+func TransliterationHintFromPath(path string) string {
+	parsed := ParseFilename(path)
+	variants, _, _ := transliterationVariantsForFile(parsed, path)
+	if len(variants) == 0 {
+		return ""
+	}
+	return variants[0]
+}
+
+func isASCIILetter(r rune) bool { return r >= 'a' && r <= 'z' }
+
 // cyrillicToLatin конвертує кириличну назву в латиницю для пошуку TMDB.
 // "Слово Пацана" → "Slovo Patsana", "Скарпетта" → "Skarpetta"
 func cyrillicToLatin(s string) string {
@@ -534,7 +660,10 @@ func cyrillicToLatin(s string) string {
 }
 
 // digraphMap — двосимвольні комбінації (порядок важливий: обробляються першими)
-var digraphMap = map[string]string{
+var transliterationMap = map[string]string{
+	"shch": "щ", "sch": "щ",
+	"lja": "ля", "lju": "лю", "lje": "ле", "ljo": "лё",
+	"nja": "ня", "nju": "ню", "nje": "не", "njo": "нё",
 	"sh": "ш",
 	"ch": "ч",
 	"zh": "ж",
@@ -547,11 +676,18 @@ var digraphMap = map[string]string{
 	"yu": "ю",
 	"yo": "ё",
 	"ye": "е",
+	"lj": "ль",
+	"nj": "нь",
+	"yi": "ий",
+	"yj": "ый",
+	"ij": "ий",
 	"iy": "ий",
 	"yy": "ый",
 	"ej": "ей", // Makkej → Маккей
 	"ck": "кк", // Makkej → Маккей
 }
+
+var transliterationSuffixOnly = map[string]bool{"yi": true, "yj": true, "ij": true, "iy": true, "yy": true}
 
 // monographMap — одиночні символи
 var monographMap = map[string]string{

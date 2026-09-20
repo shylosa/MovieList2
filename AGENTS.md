@@ -182,7 +182,7 @@ Examples: `Vrag` → `Враг`, `Nochnoj Rejs` → `Ночной Рейс`.
 ## Environment Configuration
 
 ```env
-APP_VERSION=2.4.0
+APP_VERSION=2.5.0
 GEMINI_API_KEY=
 GEMINI_MODELS=gemini-2.5-flash,gemini-flash-lite-latest
 GROK_API_KEY=

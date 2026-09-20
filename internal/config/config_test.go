@@ -22,7 +22,7 @@ func clearConfigEnv(t *testing.T) {
 func TestLoadDefaults(t *testing.T) {
 	clearConfigEnv(t)
 	cfg := Load()
-	if cfg.AppVersion != "2.4.0" || cfg.DBPath != "movies.db" || cfg.HTMLPath != "local_index.html" || cfg.PostersDir != "posters" {
+	if cfg.AppVersion != "2.5.0" || cfg.DBPath != "movies.db" || cfg.HTMLPath != "local_index.html" || cfg.PostersDir != "posters" {
 		t.Fatalf("unexpected path defaults: %+v", cfg)
 	}
 	if cfg.SheetWorksheetName != "base" || cfg.GrokModel != "grok-3-mini" || cfg.GitHubPagesBranch != "main" {

@@ -14,11 +14,12 @@ import (
 // reSeason — детектор серіальних маркерів що go-ptn пропускає:
 // S07 (без епізоду), Season 3, сезон
 var (
-	reSeason         = regexp.MustCompile(`(?i)\bS(\d{2})\b(?:E\d{2})?|\bSeason\s*\d+\b|\bсезон\b`)
-	rePunctFallback  = regexp.MustCompile(`[._]`)
-	reSpaceFallback  = regexp.MustCompile(`\s{2,}`)
-	yearZeroReplacer = strings.NewReplacer("O", "0", "О", "0", "o", "0", "о", "0")
-	reYearLike       = regexp.MustCompile(`\b(?:19\d{2}|20\d{2}|2[OoОо]\d{2})\b`)
+	reSeason           = regexp.MustCompile(`(?i)\bS(\d{2})\b(?:E\d{2})?|\bSeason\s*\d+\b|\bсезон\b`)
+	rePunctFallback    = regexp.MustCompile(`[._]`)
+	reSpaceFallback    = regexp.MustCompile(`\s{2,}`)
+	yearZeroReplacer   = strings.NewReplacer("O", "0", "О", "0", "o", "0", "о", "0")
+	reYearLike         = regexp.MustCompile(`\b(?:19\d{2}|20\d{2}|2[OoОо]\d{2})\b`)
+	reLeadingTitleYear = regexp.MustCompile(`^(19\d{2}|20\d{2})[._\s-]+`)
 	// reLangTag — знімає мовні теги виду [2xUkr,Eng] або [UKR_ENG] перед go-ptn.
 	// Без цього go-ptn плутає "2x" з лічильником сезону/епізоду і ставить IsMovie=false.
 	reLangTag = regexp.MustCompile(`(?i)\[\d*x?(?:Ukr|Eng|Rus|UA|EN|RU|UKR|ENG|RUS|DUB|VO|MVO|LF|MULTI)[^\]]*\]`)
@@ -133,6 +134,14 @@ func ParseFilename(fullPath string) ParsedFile {
 	}
 
 	title = cleanResidual(title)
+	if strings.TrimSpace(title) == "" {
+		yearTokens := reYear.FindAllString(searchName, -1)
+		if len(yearTokens) >= 2 {
+			if leading := reLeadingTitleYear.FindStringSubmatch(searchName); len(leading) == 2 && mustAtoi(leading[1]) != result.Year {
+				title = leading[1]
+			}
+		}
+	}
 	result.CleanTitle = strings.TrimSpace(title)
 	result.TitleLang = detectLanguage(result.CleanTitle)
 

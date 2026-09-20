@@ -33,15 +33,16 @@ func isQuotaExhaustedError(err error) bool {
 
 // FileRecognitionContext — структурований контекст файлу для промпту Gemini.
 type FileRecognitionContext struct {
-	ID           int    `json:"id"`
-	RequestID    string `json:"request_id"`
-	OriginalFile string `json:"original_file"`
-	FilePath     string `json:"-"`
-	CleanTitle   string `json:"parsed_title"`
-	Year         int    `json:"parsed_year,omitempty"`
-	MediaType    string `json:"parsed_media_type"`
-	ParentDir    string `json:"parent_folder,omitempty"`
-	IMDBID       string `json:"imdb_id,omitempty"`
+	ID                 int    `json:"id"`
+	RequestID          string `json:"request_id"`
+	OriginalFile       string `json:"original_file"`
+	FilePath           string `json:"-"`
+	CleanTitle         string `json:"parsed_title"`
+	TransliteratedHint string `json:"transliterated_hint,omitempty"`
+	Year               int    `json:"parsed_year,omitempty"`
+	MediaType          string `json:"parsed_media_type"`
+	ParentDir          string `json:"parent_folder,omitempty"`
+	IMDBID             string `json:"imdb_id,omitempty"`
 }
 
 // FileRecognitionContextFromPath будує контекст із повного шляху або basename.
@@ -52,13 +53,14 @@ func FileRecognitionContextFromPath(path string) FileRecognitionContext {
 		year = parsed.Year
 	}
 	return FileRecognitionContext{
-		OriginalFile: filepath.Base(path),
-		FilePath:     path,
-		CleanTitle:   parsed.CleanTitle,
-		Year:         year,
-		MediaType:    string(parsed.MediaType),
-		ParentDir:    parsed.ParentDir,
-		IMDBID:       parsed.IMDBID,
+		OriginalFile:       filepath.Base(path),
+		FilePath:           path,
+		CleanTitle:         parsed.CleanTitle,
+		TransliteratedHint: tmdb.TransliterationHintFromPath(path),
+		Year:               year,
+		MediaType:          string(parsed.MediaType),
+		ParentDir:          parsed.ParentDir,
+		IMDBID:             parsed.IMDBID,
 	}
 }
 
@@ -564,6 +566,11 @@ TRANSLITERATION EXAMPLES (Latin-script dub titles → original EN release):
 - "Banshi Inisherina" → "The Banshees of Inisherin"
 - "Nochnoj Rejs" → "Red Eye" (2005)
 - "Ubiystvennyiy podkast" → find actual EN title, do not guess
+
+When "transliterated_hint" is present, treat it as a localized theatrical/release title,
+not as an English title to translate literally. Resolve the actual original TMDB work.
+- "Третий лишний" (2012) → "Ted"
+- "Дорожное приключение" (2000) → "Road Trip"
 
 CYRILLIC / LOCALIZED EXAMPLES (completely different from literal meaning):
 - "Убийца 2. Против всех" → "Sicario: Day of the Soldado"

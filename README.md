@@ -3,10 +3,10 @@ Creator: Serhii Shylo
 Tags: Go, Golang, Wails, JavaScript, Movie Library, TMDB, Gemini AI, Grok AI, SQLite, Local Media
 Requires at least: Go 1.26.2+, Node.js (для збірки), TMDB API Key, Gemini API Key
 License: MIT License
-Version: 2.4.0
+Version: 2.5.0
 ---
 
-# 🍿 MovieList 2.4 — Менеджер локальної медіатеки
+# 🍿 MovieList 2.5 — Менеджер локальної медіатеки
 
 **MovieList 2.4** — високопродуктивний десктопний додаток на **Go 1.26.2 та Wails v2** для перетворення хаотичних папок із відеофайлами на структурований кінокаталог. Програма автоматично збирає метадані (постери, описи, рейтинги), підтримує хмарну синхронізацію та генерує статичну HTML-вітрину для перегляду на мобільних пристроях.
 
@@ -184,7 +184,7 @@ wails build  # Компіляція
 
 ```env
 # Обов'язкові
-APP_VERSION=2.4.0
+APP_VERSION=2.5.0
 TMDB_API_KEY=your_key
 GEMINI_API_KEY=your_key
 MEDIA_FOLDER_PATH=/path/to/your/media

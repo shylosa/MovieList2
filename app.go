@@ -446,15 +446,6 @@ func (a *App) gitRepoRoot() (string, error) {
 	return filepath.FromSlash(root), nil
 }
 
-func (a *App) deployToGitHubPages() error {
-	workDir, err := a.gitRepoRoot()
-	if err != nil {
-		return err
-	}
-
-	return a.deployToGitHubPagesIn(workDir)
-}
-
 func (a *App) deployToGitHubPagesIn(workDir string) error {
 	run := func(args ...string) error {
 		out, err := a.gitRunner(a.ctx, workDir, args[0], args[1:]...)

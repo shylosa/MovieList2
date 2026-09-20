@@ -36,6 +36,26 @@ func TestGetModelsFiltersTTS(t *testing.T) {
 	}
 }
 
+func TestRecognitionContextIncludesBoundedTransliterationHint(t *testing.T) {
+	translit := FileRecognitionContextFromPath("Tretyi_lishnyi_2012_BDRip.avi")
+	if translit.TransliteratedHint != "Третий лишний" {
+		t.Fatalf("hint=%q", translit.TransliteratedHint)
+	}
+	english := FileRecognitionContextFromPath("Inception.2010.BDRip.mkv")
+	if english.TransliteratedHint != "" {
+		t.Fatalf("English title hint=%q", english.TransliteratedHint)
+	}
+	prompt, err := buildPrompt([]FileRecognitionContext{translit})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"transliterated_hint", "Третий лишний", "Ted", "Дорожное приключение", "Road Trip"} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("prompt missing %q", want)
+		}
+	}
+}
+
 func TestModelUnavailableErrorClassification(t *testing.T) {
 	for _, message := range []string{"Error 404: model missing", "Status: NOT_FOUND", "model is no longer available"} {
 		if !isModelUnavailableError(errors.New(message)) {

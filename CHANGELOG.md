@@ -20,7 +20,7 @@ All notable changes to this project. Dates are approximate (session-based).
 
 ## 13 вересня 2026 — Round 26 grouped TV safety
 
-* Версію документації та `.env.example` синхронізовано з default `APP_VERSION=2.4.0`; застарілі handoff/implementation plan позначено архівними.
+* Версію документації та `.env.example` синхронізовано з default `APP_VERSION=2.5.0`; застарілі handoff/implementation plan позначено архівними.
 * Сильні episode-маркери відокремлено від слабких голих номерів; одиночне число більше не робить каталог серіальним.
 * Слабкий TV preference потребує двох сусідніх номерів з однаковою серіальною основою й застосовується лише до відповідних файлів, а не до всього mixed-каталогу.
 * Службові каталоги (`Фильмы`, `Фільми`, `Movies`, `Video`, `Media`) не замінюють parsed filename title.
