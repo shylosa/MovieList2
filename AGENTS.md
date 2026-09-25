@@ -182,7 +182,7 @@ Examples: `Vrag` → `Враг`, `Nochnoj Rejs` → `Ночной Рейс`.
 ## Environment Configuration
 
 ```env
-APP_VERSION=2.5.0
+APP_VERSION=2.6.0
 GEMINI_API_KEY=
 GEMINI_MODELS=gemini-2.5-flash,gemini-flash-lite-latest
 GROK_API_KEY=
@@ -198,17 +198,15 @@ GITHUB_PAGES_BRANCH=main
 
 ---
 
-## Active Work — Round 28 (automatic exact disambiguation; runtime verification pending)
+## Active Work — MovieList 2.6.0
 
-The active implementation specification is `CHECKLIST.md` (gitignored by design). Round 28 corrects the initial automatic choice between exact movie/TV homonyms by bounding popularity and using the cleaned filename/release-folder signature as an exact-candidate tie-breaker.
+`APP_VERSION=2.6.0` is the current release value. `internal/config/config.go` supplies the default; a local `.env` or process environment can override it. Keep the Wails window title, frontend HTML title, npm package metadata, `.env.example`, README and release notes aligned when changing the version.
 
-1. keep movie and TV exact candidates in one deterministic comparison;
-2. bound popularity so it cannot dominate stable identity evidence;
-3. compare cleaned filename/folder context only after an exact title match;
-4. keep Gemini media type as a weak preference;
-5. verify initial recognition and no-hint re-recognition on the real media library.
+The active recognition specification is `CHECKLIST.md` (gitignored by design), currently Round 29 transliteration improvements. Its remaining production-log checks and persisted-model cleanup require a real-library run. `DESIGN_CHECKLIST.md` tracks the desktop UI refresh and its remaining visual runtime check.
 
-Round 28 exclusions: migration framework, database backup/restore, file fingerprints/rename tracking and SQLite FTS. Do not expand scope into these items.
+The 2.6 desktop UI opens on the poster library. A card opens a dedicated detail screen; editing navigates to the matching filename in the editor. The editor search has an explicit clear button and Escape shortcut. The movie detail screen uses existing `GetMovies()` data and TMDB CDN poster URLs, with a local no-poster fallback.
+
+Round 29 exclusions: migration framework, database backup/restore, file fingerprints/rename tracking and SQLite FTS. Do not expand scope into these items.
 
 Important delivery rules:
 
@@ -389,7 +387,7 @@ shutdown) — рівно один app_closed в кінці сесії. FIX-17 (f
 
 ---
 
-## Current State Summary (станом на 2026-09-12)
+## Current State Summary (станом на 2026-09-25)
 
 | Area | Status |
 |------|--------|
@@ -406,8 +404,10 @@ shutdown) — рівно один app_closed в кінці сесії. FIX-17 (f
 | Manual title correction | ✅ Authoritative exact title with `Авто / Фільм / Серіал`; strict mode limits typed endpoint. |
 | Automatic ambiguity | ✅ Exact movie+TV disambiguation before fuzzy Gemini merge; `The Bureau` regression selects TV 62476. |
 | Scan metrics | ✅ `processed_total` is distinct from complete collection `disk_total`. |
-| Active Round 28 | 🧪 Automatic exact disambiguation implemented; production runtime verification remains. |
+| Active Round 29 | 🧪 Transliteration and release cleanup implemented; production runtime verification remains. |
+| Version | ✅ Default, local `.env`, Wails/HTML titles and npm metadata aligned to 2.6.0. |
+| Desktop UI | ✅ Poster library, dedicated detail screen, editor clear search, scan progress; final visual check remains in `DESIGN_CHECKLIST.md`. |
 | Candidate confirmation | ✅ TMDB selection saves in foreground; poster/localization finish in a guarded `App.wg` task and emit `movie-updated`. |
-| Tests | ✅ Automated Round 28 verification is maintained in `CHECKLIST.md`; runtime-only checks require a fresh production log. |
+| Tests | ✅ Automated Round 29 verification is maintained in `CHECKLIST.md`; runtime-only checks require a fresh production log. |
 
 > For full change history see [CHANGELOG.md](./CHANGELOG.md).

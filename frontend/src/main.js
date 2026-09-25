@@ -3,6 +3,7 @@ import './style.css';
 import { GetAppVersion, GetMovies, GetStats, RunScan, StopScan, GetAIModelCatalog, SetAIModels, OpenLogs, FixSelected, SearchTMDBCandidates, ConfirmTMDBCandidate, GetTMDBCandidateDetails, SyncToCloud, SyncToGitHub, OpenShowcase, OpenSheet, OpenGoogleSheet, OpenGitHubRepo, OpenGitHubPage, OpenURL, DeleteMovie, SelectMediaFolder } from '../wailsjs/go/main/App.js';
 import { Quit, WindowMinimise, WindowToggleMaximise, EventsOn } from '../wailsjs/runtime/runtime.js';
 import logoUrl from './assets/images/appicon.png';
+import noPosterUrl from './assets/images/no-poster.jpg';
 import { candidateConfirmPayload, candidateSearchPayload, fixPayload, reviewReasonLabel, mediaTypeLabel, candidateTMDBURL, formatRuntime, formatTMDBRating, createRequestGate, candidateStatus, scanLifecycleTransition, cacheEditorValue, floatingPopoverPosition } from './editor-state.js';
 
 document.querySelector('#app').innerHTML = `
@@ -21,21 +22,24 @@ document.querySelector('#app').innerHTML = `
   <div class="layout">
     <div class="sidebar">
         <div class="sidebar-header">
-            <div class="header-flag" id="current-page-title">Огляд</div>
+            <div class="header-flag" id="current-page-title">MovieList</div>
         </div>
 
         <div style="padding-top: 10px; flex-grow: 1;">
-            <div class="nav-btn active" id="btn-overview"><span class="nav-icon">📊</span> Огляд</div>
-            <div class="nav-btn" id="btn-scan"><span class="nav-icon">🔍</span> Оновити базу</div>
+            <div class="nav-btn active" id="btn-library"><span class="nav-icon">▦</span> Бібліотека</div>
+            <div class="nav-btn" id="btn-overview"><span class="nav-icon">◫</span> Огляд і журнал</div>
+            <div class="nav-btn" id="btn-review"><span class="nav-icon">△</span> Потребують перевірки <span id="nav-review-count" class="nav-count" hidden></span></div>
+            <div class="nav-btn" id="btn-scan"><span class="nav-icon">⟳</span> Сканувати</div>
+            <div class="sidebar-section">Інструменти</div>
             <div class="toolbar-row">
-                <div class="nav-btn" id="btn-sync"><span class="nav-icon">☁️</span> Sync Sheets</div>
+                <div class="nav-btn" id="btn-sync"><span class="nav-icon">☁</span> Google Sheets</div>
                 <div class="nav-btn icon-btn" id="btn-open-sheet" title="Відкрити таблицю">
                     <span class="nav-icon">📊</span>
                 </div>
             </div>
             <div class="toolbar-row github-toolbar">
                 <div class="nav-btn" id="btn-sync-github">
-                    <span class="nav-icon">📱</span><span class="nav-label">Sync GitHub</span>
+                    <span class="nav-icon">↗</span><span class="nav-label">GitHub Pages</span>
                     <span class="nav-spinner" aria-hidden="true"></span>
                 </div>
                 <div class="nav-btn icon-btn" id="btn-open-project" title="Відкрити репозиторій">
@@ -45,13 +49,12 @@ document.querySelector('#app').innerHTML = `
                     <span class="nav-icon">🌐</span>
                 </div>
             </div>
-            <div class="nav-btn" id="btn-showcase"><span class="nav-icon">🎬</span> Вітрина</div>
-            <div style="margin: 20px 15px 5px; font-size: 0.75em; color: var(--text-dim); font-weight: bold;">Інструменти</div>
+            <div class="nav-btn" id="btn-showcase"><span class="nav-icon">▣</span> Вітрина</div>
 
-            <div class="nav-btn" id="btn-editor"><span class="nav-icon">✏️</span> Редактор</div>
-            <div class="nav-btn" id="btn-models"><span class="nav-icon">🤖</span> Моделі ШІ</div>
-            <div class="nav-btn" id="btn-select-folder"><span class="nav-icon">📁</span> Вибрати папку</div>
-            <div class="nav-btn" id="btn-logs"><span class="nav-icon">📁</span> Папка з логами</div>
+            <div class="nav-btn" id="btn-editor"><span class="nav-icon">✎</span> Редактор</div>
+            <div class="nav-btn" id="btn-models"><span class="nav-icon">✦</span> Моделі ШІ</div>
+            <div class="nav-btn" id="btn-select-folder"><span class="nav-icon">▱</span> Вибрати папку</div>
+            <div class="nav-btn" id="btn-logs"><span class="nav-icon">☷</span> Папка з логами</div>
         </div>
 
         <div class="sidebar-footer">
@@ -59,7 +62,61 @@ document.querySelector('#app').innerHTML = `
         </div>
     </div>
     <div class="main-area">
-        <div id="panel-overview" class="panel active">
+        <div id="panel-library" class="panel active">
+            <div class="library-heading">
+                <div><h1>Моя бібліотека</h1></div>
+                <div class="library-heading-actions">
+                    <input id="library-search" type="search" placeholder="Пошук фільмів і серіалів…" aria-label="Пошук у бібліотеці">
+                    <button id="library-scan" class="primary-button" type="button">Сканувати</button>
+                </div>
+            </div>
+            <div class="library-stats">
+                <div class="library-stat"><span>Усього</span><strong id="library-total">—</strong></div>
+                <div class="library-stat"><span>Фільми</span><strong id="library-movies">—</strong></div>
+                <div class="library-stat"><span>Серіали</span><strong id="library-series">—</strong></div>
+                <div class="library-stat review-stat"><span>Потребують перевірки</span><strong id="library-review">—</strong></div>
+            </div>
+            <div id="library-scan-status" class="library-scan-status" hidden>
+                <div class="library-scan-copy"><strong id="library-scan-label">Сканування…</strong><span id="library-scan-file">Пошук файлів і метаданих…</span></div>
+                <div class="library-progress-track"><div id="library-progress-fill"></div></div>
+                <button id="library-stop" type="button">Зупинити</button>
+            </div>
+            <div class="library-controls">
+                <div class="library-filters" role="group" aria-label="Фільтр бібліотеки">
+                    <button class="filter-chip active" data-filter="all" type="button">Усі</button>
+                    <button class="filter-chip" data-filter="movie" type="button">Фільми</button>
+                    <button class="filter-chip" data-filter="tv" type="button">Серіали</button>
+                    <button class="filter-chip" data-filter="no-poster" type="button">Без постера</button>
+                </div>
+                <label class="library-sort-label">Сортувати: <select id="library-sort"><option value="added">За датою додавання</option><option value="title">За назвою</option><option value="year">За роком</option><option value="rating">За рейтингом</option></select></label>
+            </div>
+            <div id="library-grid" class="library-grid" aria-live="polite"></div>
+            <div class="library-footer"><span id="library-last-scan">Останнє сканування: —</span></div>
+        </div>
+        <div id="panel-movie" class="panel movie-view">
+            <div class="movie-view-top">
+                <button id="movie-back" class="movie-back" type="button" aria-label="Повернутися до бібліотеки" title="Повернутися до бібліотеки">
+                    <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M19 12H5m7 7-7-7 7-7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" /></svg>
+                </button>
+                <div class="movie-view-actions">
+                    <button id="movie-tmdb" type="button" hidden>Відкрити в TMDB ↗</button>
+                    <button id="movie-edit" class="primary-button" type="button">Редагувати запис</button>
+                </div>
+            </div>
+            <div class="movie-view-body">
+                <div class="movie-view-art"><img id="movie-poster" alt="" /></div>
+                <div class="movie-view-info">
+                    <div id="movie-status" class="movie-status"></div>
+                    <h1 id="movie-title"></h1>
+                    <p id="movie-original-title" class="movie-original-title" hidden></p>
+                    <div id="movie-facts" class="movie-facts"></div>
+                    <section class="movie-section"><h2>Про фільм</h2><p id="movie-plot"></p></section>
+                    <section id="movie-cast-section" class="movie-section" hidden><h2>У ролях</h2><p id="movie-cast"></p></section>
+                    <section class="movie-section movie-file-section"><h2>Файл у колекції</h2><strong id="movie-file-label"></strong><p id="movie-file-path"></p></section>
+                </div>
+            </div>
+        </div>
+        <div id="panel-overview" class="panel">
             <div class="cards">
                 <div class="card">
                     <div class="card-title">ФАЙЛІВ У БАЗІ</div>
@@ -104,7 +161,10 @@ document.querySelector('#app').innerHTML = `
 
         <div id="panel-editor" class="panel">
             <div class="editor-toolbar">
-                <input type="text" id="search-input" placeholder="Пошук..." />
+                <div class="editor-search">
+                    <input type="text" id="search-input" placeholder="Пошук..." />
+                    <button id="search-clear" type="button" aria-label="Очистити пошук" title="Очистити пошук" hidden>✕</button>
+                </div>
                 <label><input type="checkbox" id="review-only" /> Потребують перевірки</label>
                 <div style="display: flex; gap: 10px;">
                     <button id="btn-fix" style="cursor: pointer;">✨ Виправити вибрані</button>
@@ -128,6 +188,7 @@ document.querySelector('#app').innerHTML = `
 
 const btnScan = document.getElementById('btn-scan');
 const btnStop = document.getElementById('btn-stop-scan');
+const libraryScan = document.getElementById('library-scan');
 
 // ЗАМОК: Змінна, що стежить, чи йде зараз сканування
 let isScanning = false;
@@ -152,6 +213,8 @@ btnStop.addEventListener('click', async (e) => {
         console.error("Помилка при спробі зупинки:", err);
     }
 });
+document.getElementById('library-stop').addEventListener('click', () => btnStop.click());
+libraryScan.addEventListener('click', () => btnScan.click());
 
 // 🟢 Клік по кнопці Сканувати
 btnScan.addEventListener('click', async (e) => {
@@ -162,7 +225,7 @@ btnScan.addEventListener('click', async (e) => {
     isScanning = true;
     btnScan.classList.add('disabled');
 
-    switchTab('overview', 'Оновлення бази');
+    switchTab('library', 'Бібліотека');
     setStopButtonState('active'); // Стає червоною
 
     document.getElementById('progress-bar').style.width = '0%';
@@ -188,7 +251,7 @@ const switchTab = (tab, title) => {
     document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
 
     document.getElementById(`panel-${tab}`).classList.add('active');
-    document.getElementById(`btn-${tab}`).classList.add('active');
+    document.getElementById(`btn-${tab}`)?.classList.add('active');
 
     document.getElementById('current-page-title').innerText = title;
 
@@ -197,7 +260,16 @@ const switchTab = (tab, title) => {
 };
 
 // Прив'язка кнопок
+document.getElementById('btn-library').onclick = () => { switchTab('library', 'Бібліотека'); loadMovies(); };
 document.getElementById('btn-overview').onclick = () => switchTab('overview', 'Огляд');
+document.getElementById('btn-review').onclick = () => {
+    document.getElementById('search-input').value = '';
+    document.getElementById('review-only').checked = true;
+    switchTab('editor', 'Потребують перевірки');
+    document.getElementById('btn-editor').classList.remove('active');
+    document.getElementById('btn-review').classList.add('active');
+    loadMovies();
+};
 document.getElementById('btn-sync').onclick = () => {
     switchTab('overview', 'Sync Sheets');
     SyncToCloud();
@@ -241,6 +313,7 @@ document.getElementById('btn-showcase').onclick = () => {
     OpenShowcase();
 };
 document.getElementById('btn-editor').onclick = () => {
+    document.getElementById('review-only').checked = false;
     switchTab('editor', 'Редактор');
     loadMovies();
 };
@@ -314,6 +387,11 @@ let scanStartTime;
 
 EventsOn('scan-started', () => {
 	isScanning = scanLifecycleTransition(isScanning, 'scan-started');
+    document.getElementById('library-scan-status').hidden = false;
+    document.getElementById('library-scan-label').textContent = 'Сканування…';
+    document.getElementById('library-scan-file').textContent = 'Пошук файлів і метаданих…';
+    document.getElementById('library-progress-fill').style.width = '0%';
+    libraryScan.disabled = true;
     consoleBody.innerHTML = ""; // Чистимо консоль
     logToConsole("🚀 Запуск процесу...");
 
@@ -341,8 +419,11 @@ EventsOn('scan-started', () => {
 
 EventsOn('scan-progress', (data) => {
     // data містить { current, total, filename } з нашого app.go
-    const percent = (data.current / data.total) * 100;
+    const percent = data.total > 0 ? Math.min(100, data.current / data.total * 100) : 0;
     pb.style.width = percent + "%";
+    document.getElementById('library-progress-fill').style.width = percent + '%';
+    document.getElementById('library-scan-label').textContent = `Сканування: ${Math.round(percent)}% · ${data.current} із ${data.total}`;
+    document.getElementById('library-scan-file').textContent = data.filename || 'Обробка файлів…';
     logToConsole(`[${data.current}/${data.total}] Обробка: ${data.filename}`);
 });
 
@@ -367,6 +448,8 @@ EventsOn('github-sync-finished', (data) => {
 
 EventsOn('scan-finished', (msg) => {
 	isScanning = scanLifecycleTransition(isScanning, 'scan-finished');
+    document.getElementById('library-scan-status').hidden = true;
+    libraryScan.disabled = false;
     clearInterval(scanTimerInterval);
     logToConsole(`\n✅ ${msg}`, "log-success");
     cStatus.innerText = "Готово";
@@ -379,6 +462,7 @@ EventsOn('scan-finished', (msg) => {
     document.getElementById('btn-scan').style.pointerEvents = "auto";
     document.getElementById('btn-scan').style.opacity = "1";
     loadStats(); // Оновлюємо картки
+    loadMovies();
 });
 
 EventsOn('movie-updated', (data) => {
@@ -417,6 +501,13 @@ async function loadStats() {
         }
 
         document.getElementById('val-last').innerText = stats.last;
+        document.getElementById('library-total').textContent = Number(stats.total || 0).toLocaleString('uk-UA');
+        const reviewCount = Number(stats.unrec || 0) + Number(stats.suspicious || 0);
+        document.getElementById('library-review').textContent = reviewCount.toLocaleString('uk-UA');
+        const badge = document.getElementById('nav-review-count');
+        badge.textContent = reviewCount;
+        badge.hidden = reviewCount === 0;
+        document.getElementById('library-last-scan').textContent = `Останнє сканування: ${stats.last || '—'}`;
     } catch (e) {
         console.error("❌ Помилка при завантаженні статистики:", e);
     }
@@ -424,6 +515,145 @@ async function loadStats() {
 
 // --- ЛОГІКА РЕДАКТОРА ---
 let allMovies = []; // Зберігаємо список глобально для швидкого пошуку
+let libraryFilter = 'all';
+
+function needsReview(movie) { return !movie.tmdb_id || movie.needs_review; }
+
+function safePosterURL(value) {
+    try {
+        const url = new URL(value);
+        return url.protocol === 'https:' && url.hostname === 'image.tmdb.org' ? url.href : noPosterUrl;
+    } catch { return noPosterUrl; }
+}
+
+let activeMovieFilename = '';
+let movieReturnTab = 'library';
+
+function renderMovieView(movie) {
+    const title = movie.title_ua || movie.title_en || movie.file_label || 'Невідомий запис';
+    const poster = document.getElementById('movie-poster');
+    poster.src = safePosterURL(movie.poster_url);
+    poster.alt = `Постер: ${title}`;
+    poster.onerror = () => { poster.onerror = null; poster.src = noPosterUrl; };
+    document.getElementById('movie-title').textContent = title;
+    const original = document.getElementById('movie-original-title');
+    original.textContent = movie.title_en || '';
+    original.hidden = !movie.title_en || movie.title_en === title;
+    const status = document.getElementById('movie-status');
+    status.textContent = needsReview(movie) ? 'Потребує перевірки' : 'У бібліотеці';
+    status.classList.toggle('needs-review', needsReview(movie));
+    const facts = document.getElementById('movie-facts');
+    facts.replaceChildren();
+    const items = [
+        {text: movie.media_type === 'tv' ? 'Серіал' : movie.media_type === 'movie' ? 'Фільм' : 'Тип невідомий', kind: 'type'},
+        {text: movie.year || 'Рік невідомий', kind: 'year'},
+    ];
+    if (movie.vote_count > 0) items.push({text: `★ ${Number(movie.vote_average).toFixed(1)} TMDB`, kind: 'rating'});
+    if (movie.genres) items.push({text: movie.genres, kind: 'genres'});
+    for (const item of items) {
+        const chip = document.createElement('span');
+        chip.className = `movie-fact-${item.kind}`;
+        chip.textContent = item.text;
+        facts.appendChild(chip);
+    }
+    document.querySelector('.movie-section h2').textContent = movie.media_type === 'tv' ? 'Про серіал' : 'Про фільм';
+    document.getElementById('movie-plot').textContent = movie.plot || 'Опис поки що відсутній.';
+    const cast = document.getElementById('movie-cast-section');
+    document.getElementById('movie-cast').textContent = movie.cast || '';
+    cast.hidden = !movie.cast;
+    document.getElementById('movie-file-label').textContent = movie.file_label || movie.filename;
+    document.getElementById('movie-file-path').textContent = movie.filename;
+    const tmdbButton = document.getElementById('movie-tmdb');
+    const validType = movie.media_type === 'tv' || movie.media_type === 'movie';
+    tmdbButton.hidden = !(movie.tmdb_id > 0 && validType);
+    tmdbButton.onclick = () => { if (!tmdbButton.hidden) OpenURL(`https://www.themoviedb.org/${movie.media_type}/${movie.tmdb_id}`); };
+}
+
+function showMovieView(movie, returnTab = 'library') {
+    activeMovieFilename = movie.filename;
+    movieReturnTab = returnTab;
+    renderMovieView(movie);
+    const backLabel = returnTab === 'editor' ? 'Повернутися до редактора' : 'Повернутися до бібліотеки';
+    document.getElementById('movie-back').setAttribute('aria-label', backLabel);
+    document.getElementById('movie-back').title = backLabel;
+    switchTab('movie', 'Перегляд');
+    document.getElementById(returnTab === 'editor' ? 'btn-editor' : 'btn-library').classList.add('active');
+}
+
+document.getElementById('movie-back').onclick = () => switchTab(movieReturnTab, movieReturnTab === 'editor' ? 'Редактор' : 'Бібліотека');
+document.getElementById('movie-edit').onclick = () => {
+    document.getElementById('review-only').checked = false;
+    document.getElementById('search-input').value = activeMovieFilename;
+    switchTab('editor', 'Редактор');
+    renderFilteredMovies();
+    requestAnimationFrame(() => document.querySelector('.movie-row')?.scrollIntoView({block: 'center'}));
+};
+
+function renderLibrary() {
+    const grid = document.getElementById('library-grid');
+    const query = document.getElementById('library-search').value.trim().toLocaleLowerCase('uk-UA');
+    const movies = allMovies.filter(movie => {
+        const matchesType = libraryFilter === 'all' || (libraryFilter === 'no-poster' ? !movie.poster_url : movie.media_type === libraryFilter);
+        const haystack = [movie.title_ua, movie.title_en, movie.filename, movie.file_label, movie.year].join(' ').toLocaleLowerCase('uk-UA');
+        return matchesType && haystack.includes(query);
+    });
+    const sort = document.getElementById('library-sort').value;
+    if (sort === 'title') movies.sort((a, b) => (a.title_ua || a.title_en || a.file_label || '').localeCompare(b.title_ua || b.title_en || b.file_label || '', 'uk'));
+    if (sort === 'year') movies.sort((a, b) => Number(b.year || 0) - Number(a.year || 0));
+    if (sort === 'rating') movies.sort((a, b) => Number(b.vote_average || 0) - Number(a.vote_average || 0));
+    grid.replaceChildren();
+    if (movies.length === 0) {
+        const empty = document.createElement('div');
+        empty.className = 'library-empty';
+        empty.textContent = allMovies.length ? 'За цим запитом нічого не знайдено.' : 'Бібліотека порожня. Натисніть «Сканувати», щоб додати файли.';
+        grid.appendChild(empty);
+        return;
+    }
+    for (const movie of movies) {
+        const card = document.createElement('button');
+        card.type = 'button';
+        card.className = 'library-movie';
+        card.title = `${movie.file_label || movie.filename} — переглянути`;
+        const poster = document.createElement('img');
+        poster.src = safePosterURL(movie.poster_url);
+        poster.alt = '';
+        poster.loading = 'lazy';
+        poster.onerror = () => { poster.onerror = null; poster.src = noPosterUrl; };
+        const art = document.createElement('div');
+        art.className = 'library-poster';
+        art.appendChild(poster);
+        if (needsReview(movie)) {
+            const badge = document.createElement('span');
+            badge.className = 'library-review-badge';
+            badge.textContent = 'Перевірити';
+            art.appendChild(badge);
+        }
+        const title = document.createElement('strong');
+        title.textContent = movie.title_ua || movie.title_en || movie.file_label || 'Невідомий запис';
+        const meta = document.createElement('span');
+        meta.className = 'library-movie-meta';
+        meta.textContent = `${movie.year || 'Рік невідомий'} · ${movie.media_type === 'tv' ? 'Серіал' : movie.media_type === 'movie' ? 'Фільм' : 'Тип невідомий'}`;
+        card.append(art, title, meta);
+        if (movie.vote_count > 0) {
+            const rating = document.createElement('span');
+            rating.className = 'library-rating';
+            rating.textContent = `★ ${Number(movie.vote_average).toFixed(1)}`;
+            card.appendChild(rating);
+        }
+        card.onclick = () => showMovieView(movie);
+        grid.appendChild(card);
+    }
+}
+
+document.getElementById('library-search').addEventListener('input', renderLibrary);
+document.getElementById('library-sort').addEventListener('change', renderLibrary);
+document.querySelector('.library-filters').addEventListener('click', event => {
+    const chip = event.target.closest('.filter-chip');
+    if (!chip) return;
+    libraryFilter = chip.dataset.filter;
+    document.querySelectorAll('.filter-chip').forEach(button => button.classList.toggle('active', button === chip));
+    renderLibrary();
+});
 let hintsCache = {}; // 👈 ФІКС: Кеш для текстових підказок
 let mediaTypesCache = {}; // auto | movie | tv для ручного уточнення
 let checkedCache = new Set(); // 👈 ФІКС: Кеш для вибраних чекбоксів
@@ -434,6 +664,13 @@ async function loadMovies(focusFilename = '') {
     list.innerHTML = "Завантаження...";
     try {
         allMovies = await GetMovies();
+		if (document.getElementById('panel-movie').classList.contains('active')) {
+			const current = allMovies.find(movie => movie.filename === activeMovieFilename);
+			if (current) renderMovieView(current);
+		}
+		document.getElementById('library-movies').textContent = allMovies.filter(movie => movie.media_type === 'movie').length.toLocaleString('uk-UA');
+		document.getElementById('library-series').textContent = allMovies.filter(movie => movie.media_type === 'tv').length.toLocaleString('uk-UA');
+		renderLibrary();
 		renderFilteredMovies();
 		if (focusFilename) {
 			requestAnimationFrame(() => {
@@ -500,6 +737,13 @@ function renderMovies(movies) {
 		link.textContent = title;
 		link.tabIndex = 0;
 		titleCol.appendChild(link);
+		const detailButton = document.createElement('button');
+		detailButton.type = 'button';
+		detailButton.className = 'btn-movie-detail';
+		detailButton.textContent = 'Перегляд';
+		detailButton.setAttribute('aria-label', `Переглянути: ${title}`);
+		detailButton.onclick = () => showMovieView(m, 'editor');
+		titleCol.appendChild(detailButton);
 		if (m.tmdb_id > 0 && (m.media_type === 'movie' || m.media_type === 'tv')) attachRecognizedMoviePreview(link, m);
 		if (m.vote_count > 0) { const rating = document.createElement('span'); rating.className = 'movie-rating'; rating.textContent = `★ ${Number(m.vote_average).toFixed(1)}`; rating.title = `${m.vote_count} оцінок TMDB`; titleCol.appendChild(rating); }
 		if (m.needs_review && m.tmdb_id) {
@@ -582,15 +826,28 @@ document.getElementById('movie-list').addEventListener('change', (e) => {
 // Пошук по списку (без звернення до бази)
 function renderFilteredMovies() {
 	const q = document.getElementById('search-input').value.toLowerCase();
+	document.getElementById('search-clear').hidden = q.length === 0;
 	const reviewOnly = document.getElementById('review-only').checked;
     const filtered = allMovies.filter(m => {
         const title = (m.title_ua || m.title_en || "").toLowerCase();
         const label = (m.file_label || m.filename || "").toLowerCase();
-		return (!reviewOnly || m.needs_review) && (m.filename.toLowerCase().includes(q) || title.includes(q) || label.includes(q));
+        return (!reviewOnly || needsReview(m)) && (m.filename.toLowerCase().includes(q) || title.includes(q) || label.includes(q));
     });
     renderMovies(filtered);
 }
 document.getElementById('search-input').addEventListener('input', renderFilteredMovies);
+document.getElementById('search-clear').addEventListener('click', () => {
+	const input = document.getElementById('search-input');
+	input.value = '';
+	input.dispatchEvent(new Event('input'));
+	input.focus();
+});
+document.getElementById('search-input').addEventListener('keydown', event => {
+	if (event.key === 'Escape' && event.currentTarget.value) {
+		event.currentTarget.value = '';
+		event.currentTarget.dispatchEvent(new Event('input'));
+	}
+});
 document.getElementById('review-only').addEventListener('change', () => document.getElementById('search-input').dispatchEvent(new Event('input')));
 
 document.getElementById('movie-list').addEventListener('click', async (e) => {
@@ -823,6 +1080,7 @@ EventsOn('wails:ready', () => {
     console.log("⚡ wails:ready событие получено");
     loadAppVersion();
     loadStats();
+    loadMovies();
 });
 
 // Також завантажуємо на прямому завантаженні скрипта (не чекаючи на готовність)
@@ -831,4 +1089,5 @@ setTimeout(() => {
     console.log("⏱️ Спроба завантажити статистику (через setTimeout)...");
     loadAppVersion();
     loadStats();
+    loadMovies();
 }, 500);

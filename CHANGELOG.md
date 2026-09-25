@@ -2,6 +2,13 @@
 
 All notable changes to this project. Dates are approximate (session-based).
 
+## 25 вересня 2026 — MovieList 2.6.0
+
+* Узгоджено версію в конфігурації, локальному `.env`, шаблоні, заголовках Wails/HTML, npm-метаданих і документації.
+* Додано бібліотеку з постерами, пошуком, фільтрами, статистикою та компактним прогресом сканування.
+* Картка відкриває окремий перегляд; редактор зберігає ручні виправлення та має швидке очищення пошуку.
+* Оновлено темну палітру, навігацію та подання метаданих фільму. Перевірку фінального вигляду на реальній бібліотеці залишено відкритою.
+
 ## 13 вересня 2026 — Round 28 automatic exact disambiguation
 
 * Popularity is bounded to a small tie-breaker and can no longer dominate exact movie/TV identity selection.

@@ -3,6 +3,7 @@
 ## Workflow
 
 - Read `AGENTS.md` before starting work.
+- Keep the current application version synchronized across the config default, Wails/HTML titles, frontend package metadata, `.env.example`, README and release notes. A local `.env` can override the displayed version.
 - Update `AGENTS.md` only for meaningful architectural or behavioral changes.
 - Work incrementally: one function / one subsystem at a time.
 - After compile/test failure: STOP and wait for user instructions.
@@ -96,6 +97,9 @@ Use:
 - Keep TMDB verification mandatory before translation.
 
 ## Frontend / Wails Rules
+
+- The library is the home screen. Movie cards open a dedicated detail screen; editor changes still use `movies.filename` as the stable key.
+- Preserve the editor search clear button and Escape behavior when changing navigation or filtering.
 
 Do not rename without explicit migration:
 
