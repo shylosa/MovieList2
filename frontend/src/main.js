@@ -28,7 +28,6 @@ document.querySelector('#app').innerHTML = `
         <div style="padding-top: 10px; flex-grow: 1;">
             <div class="nav-btn active" id="btn-library"><span class="nav-icon">▦</span> Бібліотека</div>
             <div class="nav-btn" id="btn-overview"><span class="nav-icon">◫</span> Огляд і журнал</div>
-            <div class="nav-btn" id="btn-review"><span class="nav-icon">△</span> Потребують перевірки <span id="nav-review-count" class="nav-count" hidden></span></div>
             <div class="nav-btn" id="btn-scan"><span class="nav-icon">⟳</span> Сканувати</div>
             <div class="sidebar-section">Інструменти</div>
             <div class="nav-btn" id="btn-editor"><span class="nav-icon">✎</span> Редактор</div>
@@ -278,15 +277,6 @@ const switchTab = (tab, title) => {
 // Прив'язка кнопок
 document.getElementById('btn-library').onclick = () => { switchTab('library', 'Бібліотека'); loadMovies(); };
 document.getElementById('btn-overview').onclick = () => switchTab('overview', 'Огляд');
-document.getElementById('btn-review').onclick = () => {
-    document.getElementById('search-input').value = '';
-    editorFilter = 'review';
-    closeEditorInspector();
-    switchTab('editor', 'Потребують перевірки');
-    document.getElementById('btn-editor').classList.remove('active');
-    document.getElementById('btn-review').classList.add('active');
-    loadMovies();
-};
 document.getElementById('btn-sync').onclick = () => {
     switchTab('overview', 'Sync Sheets');
     SyncToCloud();
@@ -521,9 +511,6 @@ async function loadStats() {
         document.getElementById('library-total').textContent = Number(stats.total || 0).toLocaleString('uk-UA');
         const reviewCount = Number(stats.unrec || 0) + Number(stats.suspicious || 0);
         document.getElementById('library-review').textContent = reviewCount.toLocaleString('uk-UA');
-        const badge = document.getElementById('nav-review-count');
-        badge.textContent = reviewCount;
-        badge.hidden = reviewCount === 0;
         document.getElementById('library-last-scan').textContent = `Останнє сканування: ${stats.last || '—'}`;
     } catch (e) {
         console.error("❌ Помилка при завантаженні статистики:", e);
