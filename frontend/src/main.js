@@ -4,7 +4,7 @@ import { GetAppVersion, GetMovies, GetStats, RunScan, StopScan, GetAIModelCatalo
 import { Quit, WindowMinimise, WindowToggleMaximise, EventsOn } from '../wailsjs/runtime/runtime.js';
 import logoUrl from './assets/images/appicon.png';
 import noPosterUrl from './assets/images/no-poster.jpg';
-import { candidateConfirmPayload, candidateSearchPayload, fixPayload, reviewReasonLabel, mediaTypeLabel, candidateTMDBURL, formatRuntime, formatTMDBRating, createRequestGate, createAsyncVisibilityGate, candidateStatus, scanLifecycleTransition, cacheEditorValue, floatingPopoverPosition } from './editor-state.js';
+import { candidateConfirmPayload, candidateSearchPayload, fixPayload, reviewReasonLabel, mediaTypeLabel, candidateTMDBURL, formatRuntime, formatTMDBRating, candidateStatus, scanLifecycleTransition, cacheEditorValue, filterAndSortEditorMovies, updateEditorSelection as changeEditorSelection } from './editor-state.js';
 
 document.querySelector('#app').innerHTML = `
   <div class="titlebar">
@@ -31,6 +31,7 @@ document.querySelector('#app').innerHTML = `
             <div class="nav-btn" id="btn-review"><span class="nav-icon">△</span> Потребують перевірки <span id="nav-review-count" class="nav-count" hidden></span></div>
             <div class="nav-btn" id="btn-scan"><span class="nav-icon">⟳</span> Сканувати</div>
             <div class="sidebar-section">Інструменти</div>
+            <div class="nav-btn" id="btn-editor"><span class="nav-icon">✎</span> Редактор</div>
             <div class="toolbar-row">
                 <div class="nav-btn" id="btn-sync"><span class="nav-icon">☁</span> Google Sheets</div>
                 <div class="nav-btn icon-btn" id="btn-open-sheet" title="Відкрити таблицю">
@@ -51,7 +52,6 @@ document.querySelector('#app').innerHTML = `
             </div>
             <div class="nav-btn" id="btn-showcase"><span class="nav-icon">▣</span> Вітрина</div>
 
-            <div class="nav-btn" id="btn-editor"><span class="nav-icon">✎</span> Редактор</div>
             <div class="nav-btn" id="btn-models"><span class="nav-icon">✦</span> Моделі ШІ</div>
             <div class="nav-btn" id="btn-select-folder"><span class="nav-icon">▱</span> Вибрати папку</div>
             <div class="nav-btn" id="btn-logs"><span class="nav-icon">☷</span> Папка з логами</div>
@@ -61,7 +61,7 @@ document.querySelector('#app').innerHTML = `
             © 2026 <a href="#" onclick="window.go.main.App.OpenGitHubRepo(); return false;">shylosa</a>
         </div>
     </div>
-    <div class="main-area">
+    <div class="main-area library-active">
         <div id="panel-library" class="panel active">
             <div class="library-heading">
                 <div><h1>Моя бібліотека</h1></div>
@@ -99,7 +99,6 @@ document.querySelector('#app').innerHTML = `
                     <svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M19 12H5m7 7-7-7 7-7" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" /></svg>
                 </button>
                 <div class="movie-view-actions">
-                    <button id="movie-tmdb" type="button" hidden>Відкрити в TMDB ↗</button>
                     <button id="movie-edit" class="primary-button" type="button">Редагувати запис</button>
                 </div>
             </div>
@@ -112,7 +111,7 @@ document.querySelector('#app').innerHTML = `
                     <div id="movie-facts" class="movie-facts"></div>
                     <section class="movie-section"><h2>Про фільм</h2><p id="movie-plot"></p></section>
                     <section id="movie-cast-section" class="movie-section" hidden><h2>У ролях</h2><p id="movie-cast"></p></section>
-                    <section class="movie-section movie-file-section"><h2>Файл у колекції</h2><strong id="movie-file-label"></strong><p id="movie-file-path"></p></section>
+                    <section class="movie-section movie-file-section"><h2>Файл</h2><p id="movie-file-path"></p></section>
                 </div>
             </div>
         </div>
@@ -161,26 +160,42 @@ document.querySelector('#app').innerHTML = `
 
         <div id="panel-editor" class="panel">
             <div class="editor-toolbar">
+                <div class="editor-heading"><h1>Редактор</h1><span id="editor-count">—</span></div>
                 <div class="editor-search">
-                    <input type="text" id="search-input" placeholder="Пошук..." />
+                    <span aria-hidden="true">⌕</span>
+                    <input type="text" id="search-input" placeholder="Назва або файл…" aria-label="Пошук у редакторі" />
                     <button id="search-clear" type="button" aria-label="Очистити пошук" title="Очистити пошук" hidden>✕</button>
                 </div>
-                <label><input type="checkbox" id="review-only" /> Потребують перевірки</label>
-                <div style="display: flex; gap: 10px;">
-                    <button id="btn-fix" style="cursor: pointer;">✨ Виправити вибрані</button>
-                    <button id="btn-delete-selected" class="btn-danger">🗑 Видалити вибрані</button>
+                <label class="editor-sort-label">Сортувати <select id="editor-sort"><option value="title">За назвою</option><option value="year">За роком</option><option value="rating">За рейтингом</option><option value="filename">За файлом</option></select></label>
+            </div>
+            <div class="editor-filters" role="group" aria-label="Фільтр редактора">
+                <button class="editor-filter active" data-filter="all" type="button">Усі</button>
+                <button class="editor-filter" data-filter="review" type="button">Потребують перевірки</button>
+                <button class="editor-filter" data-filter="unresolved" type="button">Нерозпізнані</button>
+                <label class="editor-select-all-label" title="Вибрати всі записи поточного списку"><input id="editor-select-all" class="row-cb" type="checkbox" aria-label="Вибрати всі записи поточного списку"> Вибрати всі</label>
+            </div>
+            <div class="editor-workspace">
+                <div class="editor-list-area">
+                    <div id="movie-list" aria-label="Записи колекції">Завантаження...</div>
                 </div>
+                <aside id="editor-inspector" class="editor-inspector" aria-label="Вибраний запис">
+                    <div id="editor-inspector-content" class="editor-inspector-content"></div>
+                </aside>
             </div>
-            <div class="editor-header">
-                <div class="col-cb"></div>
-                <div class="col-file">Файл</div>
-                <div class="col-arr"></div>
-                <div class="col-year">Рік</div>
-                <div class="col-title">Розпізнано як</div>
-                <div class="col-media-type">Тип</div>
-                <div class="col-hint">Підказка</div>
+            <div id="editor-bulk" class="editor-bulk" hidden>
+                <span id="editor-selected-count"></span>
+                <button id="editor-clear-selection" type="button">Скасувати вибір</button>
+                <button id="editor-batch-open" type="button">✦ Уточнити й виправити</button>
+                <button id="btn-delete-selected" class="btn-danger" type="button">Видалити вибрані</button>
             </div>
-            <div id="movie-list" style="overflow-y: scroll; flex-grow: 1;">Завантаження...</div>
+            <div id="editor-batch-panel" class="editor-batch-panel" hidden>
+                <section class="editor-batch-dialog" role="dialog" aria-modal="true" aria-labelledby="editor-batch-title">
+                    <div class="editor-batch-heading"><div><h2 id="editor-batch-title">Пакетне уточнення</h2><p>Для кожного файлу вкажіть власну назву або IMDb ID.</p></div><button id="editor-batch-close" type="button" aria-label="Закрити пакетне уточнення" title="Закрити">✕</button></div>
+                    <div class="editor-batch-tools"><label>Тип для всіх <select id="editor-batch-type"><option value="">Не змінювати</option><option value="auto">Авто</option><option value="movie">Фільм</option><option value="tv">Серіал</option></select></label><button id="editor-batch-apply-type" type="button">Застосувати тип</button></div>
+                    <div id="editor-batch-list" class="editor-batch-list"></div>
+                    <div class="editor-batch-footer"><span id="editor-batch-count"></span><button id="editor-batch-fix" class="primary-button" type="button">✦ Запустити виправлення</button></div>
+                </section>
+            </div>
         </div>
     </div>
   </div>
@@ -252,6 +267,7 @@ const switchTab = (tab, title) => {
 
     document.getElementById(`panel-${tab}`).classList.add('active');
     document.getElementById(`btn-${tab}`)?.classList.add('active');
+    document.querySelector('.main-area').classList.toggle('library-active', tab === 'library');
 
     document.getElementById('current-page-title').innerText = title;
 
@@ -264,7 +280,8 @@ document.getElementById('btn-library').onclick = () => { switchTab('library', '�
 document.getElementById('btn-overview').onclick = () => switchTab('overview', 'Огляд');
 document.getElementById('btn-review').onclick = () => {
     document.getElementById('search-input').value = '';
-    document.getElementById('review-only').checked = true;
+    editorFilter = 'review';
+    closeEditorInspector();
     switchTab('editor', 'Потребують перевірки');
     document.getElementById('btn-editor').classList.remove('active');
     document.getElementById('btn-review').classList.add('active');
@@ -313,7 +330,8 @@ document.getElementById('btn-showcase').onclick = () => {
     OpenShowcase();
 };
 document.getElementById('btn-editor').onclick = () => {
-    document.getElementById('review-only').checked = false;
+    editorFilter = 'all';
+    closeEditorInspector();
     switchTab('editor', 'Редактор');
     loadMovies();
 };
@@ -539,20 +557,31 @@ function renderMovieView(movie) {
     original.textContent = movie.title_en || '';
     original.hidden = !movie.title_en || movie.title_en === title;
     const status = document.getElementById('movie-status');
-    status.textContent = needsReview(movie) ? 'Потребує перевірки' : 'У бібліотеці';
-    status.classList.toggle('needs-review', needsReview(movie));
+    const reviewRequired = needsReview(movie);
+    status.textContent = reviewRequired ? 'Потребує перевірки' : '';
+    status.hidden = !reviewRequired;
+    status.classList.toggle('needs-review', reviewRequired);
     const facts = document.getElementById('movie-facts');
     facts.replaceChildren();
     const items = [
-        {text: movie.media_type === 'tv' ? 'Серіал' : movie.media_type === 'movie' ? 'Фільм' : 'Тип невідомий', kind: 'type'},
+        {text: movie.media_type === 'tv' ? 'TV' : movie.media_type === 'movie' ? 'Фільм' : 'Тип невідомий', kind: 'type'},
         {text: movie.year || 'Рік невідомий', kind: 'year'},
     ];
-    if (movie.vote_count > 0) items.push({text: `★ ${Number(movie.vote_average).toFixed(1)} TMDB`, kind: 'rating'});
+    const tmdbURL = candidateTMDBURL(movie);
+    if (movie.vote_count > 0 || tmdbURL) {
+        items.push({text: movie.vote_count > 0 ? `★ ${Number(movie.vote_average).toFixed(1)} TMDB ↗` : 'TMDB ↗', kind: 'rating', url: tmdbURL});
+    }
     if (movie.genres) items.push({text: movie.genres, kind: 'genres'});
     for (const item of items) {
-        const chip = document.createElement('span');
+        const chip = document.createElement(item.url ? 'a' : 'span');
         chip.className = `movie-fact-${item.kind}`;
         chip.textContent = item.text;
+        if (item.url) {
+            chip.href = item.url;
+            chip.title = 'Відкрити в TMDB';
+            chip.setAttribute('aria-label', `${item.text.replace(' ↗', '')}. Відкрити в TMDB`);
+            chip.onclick = event => { event.preventDefault(); OpenURL(item.url); };
+        }
         facts.appendChild(chip);
     }
     document.querySelector('.movie-section h2').textContent = movie.media_type === 'tv' ? 'Про серіал' : 'Про фільм';
@@ -560,12 +589,7 @@ function renderMovieView(movie) {
     const cast = document.getElementById('movie-cast-section');
     document.getElementById('movie-cast').textContent = movie.cast || '';
     cast.hidden = !movie.cast;
-    document.getElementById('movie-file-label').textContent = movie.file_label || movie.filename;
     document.getElementById('movie-file-path').textContent = movie.filename;
-    const tmdbButton = document.getElementById('movie-tmdb');
-    const validType = movie.media_type === 'tv' || movie.media_type === 'movie';
-    tmdbButton.hidden = !(movie.tmdb_id > 0 && validType);
-    tmdbButton.onclick = () => { if (!tmdbButton.hidden) OpenURL(`https://www.themoviedb.org/${movie.media_type}/${movie.tmdb_id}`); };
 }
 
 function showMovieView(movie, returnTab = 'library') {
@@ -581,10 +605,13 @@ function showMovieView(movie, returnTab = 'library') {
 
 document.getElementById('movie-back').onclick = () => switchTab(movieReturnTab, movieReturnTab === 'editor' ? 'Редактор' : 'Бібліотека');
 document.getElementById('movie-edit').onclick = () => {
-    document.getElementById('review-only').checked = false;
+    editorFilter = 'all';
+    editorActiveFilename = activeMovieFilename;
     document.getElementById('search-input').value = activeMovieFilename;
     switchTab('editor', 'Редактор');
     renderFilteredMovies();
+    document.getElementById('editor-inspector').classList.add('open');
+    document.querySelector('.editor-workspace').classList.add('has-selection');
     requestAnimationFrame(() => document.querySelector('.movie-row')?.scrollIntoView({block: 'center'}));
 };
 
@@ -606,6 +633,7 @@ function renderLibrary() {
         empty.className = 'library-empty';
         empty.textContent = allMovies.length ? 'За цим запитом нічого не знайдено.' : 'Бібліотека порожня. Натисніть «Сканувати», щоб додати файли.';
         grid.appendChild(empty);
+        updateLibraryScrolledState();
         return;
     }
     for (const movie of movies) {
@@ -631,20 +659,39 @@ function renderLibrary() {
         title.textContent = movie.title_ua || movie.title_en || movie.file_label || 'Невідомий запис';
         const meta = document.createElement('span');
         meta.className = 'library-movie-meta';
-        meta.textContent = `${movie.year || 'Рік невідомий'} · ${movie.media_type === 'tv' ? 'Серіал' : movie.media_type === 'movie' ? 'Фільм' : 'Тип невідомий'}`;
-        card.append(art, title, meta);
+        meta.textContent = movie.year || 'Рік невідомий';
+        const metaRow = document.createElement('div');
+        metaRow.className = 'library-movie-meta-row';
+        metaRow.appendChild(meta);
+        if (movie.media_type === 'tv') {
+            const tvBadge = document.createElement('span');
+            tvBadge.className = 'library-tv-badge';
+            tvBadge.textContent = 'TV';
+            metaRow.appendChild(tvBadge);
+        }
         if (movie.vote_count > 0) {
             const rating = document.createElement('span');
             rating.className = 'library-rating';
             rating.textContent = `★ ${Number(movie.vote_average).toFixed(1)}`;
-            card.appendChild(rating);
+            metaRow.appendChild(rating);
         }
+        const genres = document.createElement('span');
+        genres.className = 'library-movie-genres';
+        genres.textContent = movie.genres || 'Жанр не вказано';
+        if (movie.genres) genres.title = movie.genres;
+        card.append(art, title, metaRow, genres);
         card.onclick = () => showMovieView(movie);
         grid.appendChild(card);
     }
+    updateLibraryScrolledState();
+}
+
+function updateLibraryScrolledState() {
+    document.getElementById('panel-library').classList.toggle('library-scrolled', document.getElementById('library-grid').scrollTop > 8);
 }
 
 document.getElementById('library-search').addEventListener('input', renderLibrary);
+document.getElementById('library-grid').addEventListener('scroll', updateLibraryScrolledState, {passive: true});
 document.getElementById('library-sort').addEventListener('change', renderLibrary);
 document.querySelector('.library-filters').addEventListener('click', event => {
     const chip = event.target.closest('.filter-chip');
@@ -653,16 +700,23 @@ document.querySelector('.library-filters').addEventListener('click', event => {
     document.querySelectorAll('.filter-chip').forEach(button => button.classList.toggle('active', button === chip));
     renderLibrary();
 });
-let hintsCache = {}; // 👈 ФІКС: Кеш для текстових підказок
-let mediaTypesCache = {}; // auto | movie | tv для ручного уточнення
-let checkedCache = new Set(); // 👈 ФІКС: Кеш для вибраних чекбоксів
-const candidateSearches = createRequestGate();
+let hintsCache = {};
+let mediaTypesCache = {};
+let checkedCache = new Set();
+let editorFilter = 'all';
+let editorActiveFilename = '';
+let visibleEditorMovies = [];
+let editorCandidateRequest = 0;
+let editorPreview = null;
 
 async function loadMovies(focusFilename = '') {
     const list = document.getElementById('movie-list');
-    list.innerHTML = "Завантаження...";
+    list.textContent = 'Завантаження…';
     try {
         allMovies = await GetMovies();
+		checkedCache = new Set([...checkedCache].filter(filename => allMovies.some(movie => movie.filename === filename)));
+		if (focusFilename && document.getElementById('editor-inspector').classList.contains('open')) editorActiveFilename = focusFilename;
+		if (editorActiveFilename && !allMovies.some(movie => movie.filename === editorActiveFilename)) editorActiveFilename = '';
 		if (document.getElementById('panel-movie').classList.contains('active')) {
 			const current = allMovies.find(movie => movie.filename === activeMovieFilename);
 			if (current) renderMovieView(current);
@@ -671,6 +725,7 @@ async function loadMovies(focusFilename = '') {
 		document.getElementById('library-series').textContent = allMovies.filter(movie => movie.media_type === 'tv').length.toLocaleString('uk-UA');
 		renderLibrary();
 		renderFilteredMovies();
+		if (editorActiveFilename) renderEditorInspector();
 		if (focusFilename) {
 			requestAnimationFrame(() => {
 				const row = Array.from(document.querySelectorAll('.movie-row')).find(item => item.dataset.filename === focusFilename);
@@ -680,258 +735,451 @@ async function loadMovies(focusFilename = '') {
     } catch (e) { console.error(e); }
 }
 
+function editorStatus(movie) {
+    if (!movie.tmdb_id) return {icon: '!', label: 'Не розпізнано', kind: 'unresolved'};
+    if (movie.needs_review) return {icon: '!', label: `Потребує перевірки: ${reviewReasonLabel(movie.review_reason)}`, kind: 'review'};
+    return {icon: '✓', label: 'Розпізнано', kind: 'recognized'};
+}
+
+function editorElement(tag, className, textValue) {
+    const element = document.createElement(tag);
+    if (className) element.className = className;
+    if (textValue !== undefined) element.textContent = textValue;
+    return element;
+}
+
+function hideEditorPreview() {
+    editorPreview?.remove();
+    editorPreview = null;
+}
+
+function showEditorPreview(anchor, movie) {
+    hideEditorPreview();
+    if (!movie.tmdb_id) return;
+    const preview = editorElement('div', 'editor-hover-preview');
+    preview.setAttribute('role', 'tooltip');
+    const poster = editorElement('img', 'editor-hover-poster');
+    poster.src = safePosterURL(movie.poster_url);
+    poster.alt = '';
+    poster.onerror = () => { poster.onerror = null; poster.src = noPosterUrl; };
+    const body = editorElement('div', 'editor-hover-body');
+    body.appendChild(editorElement('strong', '', movie.title_ua || movie.title_en || 'Без назви'));
+    body.appendChild(editorElement('span', '', `${movie.year || 'Рік невідомий'} · ${mediaTypeLabel(movie.media_type)}${movie.vote_count > 0 ? ` · ★ ${Number(movie.vote_average).toFixed(1)}` : ''}`));
+    if (movie.plot) body.appendChild(editorElement('p', '', movie.plot));
+    preview.append(poster, body);
+    document.body.appendChild(preview);
+    editorPreview = preview;
+    const rect = anchor.getBoundingClientRect();
+    const left = rect.left >= preview.offsetWidth + 18 ? rect.left - preview.offsetWidth - 10 : rect.right + 10;
+    preview.style.left = `${Math.max(8, Math.min(left, window.innerWidth - preview.offsetWidth - 8))}px`;
+    preview.style.top = `${Math.max(8, Math.min(rect.top - 12, window.innerHeight - preview.offsetHeight - 8))}px`;
+}
+
+function updateEditorSelection() {
+    const count = checkedCache.size;
+    const bar = document.getElementById('editor-bulk');
+    bar.hidden = count === 0;
+    document.getElementById('editor-selected-count').textContent = `Вибрано: ${count}`;
+    const selectAll = document.getElementById('editor-select-all');
+    const visibleCount = visibleEditorMovies.filter(movie => checkedCache.has(movie.filename)).length;
+    selectAll.checked = visibleEditorMovies.length > 0 && visibleCount === visibleEditorMovies.length;
+    selectAll.indeterminate = visibleCount > 0 && visibleCount < visibleEditorMovies.length;
+    selectAll.disabled = visibleEditorMovies.length === 0;
+    if (count === 0) closeEditorBatchPanel();
+    else if (!document.getElementById('editor-batch-panel').hidden) renderEditorBatchPanel();
+}
+
+function closeEditorBatchPanel() {
+    const panel = document.getElementById('editor-batch-panel');
+    const wasOpen = !panel.hidden;
+    panel.hidden = true;
+    if (wasOpen && editorActiveFilename && document.getElementById('editor-inspector').classList.contains('open')) renderEditorInspector();
+}
+
+function renderEditorBatchPanel() {
+    const list = document.getElementById('editor-batch-list');
+    const selected = [...checkedCache].map(filename => allMovies.find(movie => movie.filename === filename)).filter(Boolean);
+    list.replaceChildren();
+    document.getElementById('editor-batch-count').textContent = `Вибрано: ${selected.length}`;
+    for (const movie of selected) {
+        const row = editorElement('div', 'editor-batch-row');
+        const identity = editorElement('div', 'editor-batch-identity');
+        identity.appendChild(editorElement('strong', '', movie.title_ua || movie.title_en || 'Не розпізнано'));
+        const filename = editorElement('span', '', movie.file_label || movie.filename);
+        filename.title = movie.filename;
+        identity.appendChild(filename);
+        const typeLabel = editorElement('label', '', 'Тип');
+        const type = editorElement('select', 'editor-batch-type');
+        for (const [value, label] of [['auto', 'Авто'], ['movie', 'Фільм'], ['tv', 'Серіал']]) {
+            const option = editorElement('option', '', label); option.value = value; type.appendChild(option);
+        }
+        type.value = mediaTypesCache[movie.filename] || 'auto';
+        type.onchange = () => cacheEditorValue(mediaTypesCache, movie.filename, type.value);
+        typeLabel.appendChild(type);
+        const hintLabel = editorElement('label', '', 'Підказка');
+        const hint = editorElement('input', 'editor-batch-hint');
+        hint.type = 'text'; hint.placeholder = 'Назва або IMDb ID'; hint.value = hintsCache[movie.filename] || '';
+        hint.oninput = () => cacheEditorValue(hintsCache, movie.filename, hint.value);
+        hintLabel.appendChild(hint);
+        row.append(identity, typeLabel, hintLabel);
+        list.appendChild(row);
+    }
+}
+
+document.getElementById('editor-batch-open').onclick = () => {
+    if (!checkedCache.size) return;
+    renderEditorBatchPanel();
+    document.getElementById('editor-batch-panel').hidden = false;
+    document.getElementById('editor-batch-close').focus();
+};
+document.getElementById('editor-batch-close').onclick = closeEditorBatchPanel;
+document.getElementById('editor-batch-panel').addEventListener('click', event => {
+    if (event.target.id === 'editor-batch-panel') closeEditorBatchPanel();
+});
+document.getElementById('editor-batch-apply-type').onclick = () => {
+    const value = document.getElementById('editor-batch-type').value;
+    if (!value) return;
+    for (const filename of checkedCache) cacheEditorValue(mediaTypesCache, filename, value);
+    renderEditorBatchPanel();
+};
+document.getElementById('editor-batch-fix').onclick = () => runEditorFix(checkedCache);
+document.addEventListener('keydown', event => {
+    if (event.key === 'Escape' && !document.getElementById('editor-batch-panel').hidden) {
+        event.preventDefault(); closeEditorBatchPanel(); document.getElementById('editor-batch-open').focus();
+    }
+});
+
 function renderMovies(movies) {
     const list = document.getElementById('movie-list');
-	document.querySelectorAll('.floating-movie-popover').forEach(popover => popover.remove());
-	list.replaceChildren();
-
-    movies.forEach((m) => {
-        const title = m.title_ua || m.title_en || "Невідомо";
-        const query = encodeURIComponent(title);
-        const urlType = m.media_type === "tv" ? "tv" : "movie";
-        let tmdbUrl = (m.tmdb_id && m.tmdb_id !== 0)
-            ? `https://www.themoviedb.org/${urlType}/${m.tmdb_id}`
-            : `https://www.themoviedb.org/search/${urlType}?query=${query}`;
-
-        // 👈 ФІКС: Дістаємо значення з кешу
-        const hintVal = hintsCache[m.filename] || "";
-        const isUnrecognized = !m.tmdb_id || m.tmdb_id === 0;
-        const titleColor = isUnrecognized ? "var(--warn-yellow)" : "#58a6ff";
-
-		const row = document.createElement('div');
-		row.className = 'movie-row';
-		row.dataset.filename = m.filename;
-
-		const checkboxCol = document.createElement('div');
-		checkboxCol.className = 'col-cb';
-		const checkbox = document.createElement('input');
-		checkbox.type = 'checkbox';
-		checkbox.className = 'row-cb';
-		checkbox.dataset.filename = m.filename;
-		checkbox.checked = checkedCache.has(m.filename);
-		checkboxCol.appendChild(checkbox);
-
-		const fileCol = document.createElement('div');
-		fileCol.className = 'col-file';
-		fileCol.title = m.filename;
-		fileCol.textContent = m.file_label || m.filename;
-
-		const arrowCol = document.createElement('div');
-		arrowCol.className = 'col-arr';
-		arrowCol.textContent = '➜';
-
-		const yearCol = document.createElement('div');
-		yearCol.className = 'col-year';
-		yearCol.textContent = m.year || '—';
-
-		const titleCol = document.createElement('div');
-		titleCol.className = 'col-title';
-		const link = document.createElement('span');
-		link.className = 'tmdb-link';
-		link.dataset.url = tmdbUrl;
-		link.style.color = titleColor;
-		link.style.cursor = 'pointer';
-		link.style.textDecoration = 'none';
-		link.style.fontWeight = '500';
-		link.textContent = title;
-		link.tabIndex = 0;
-		titleCol.appendChild(link);
-		const detailButton = document.createElement('button');
-		detailButton.type = 'button';
-		detailButton.className = 'btn-movie-detail';
-		detailButton.textContent = 'Перегляд';
-		detailButton.setAttribute('aria-label', `Переглянути: ${title}`);
-		detailButton.onclick = () => showMovieView(m, 'editor');
-		titleCol.appendChild(detailButton);
-		if (m.tmdb_id > 0 && (m.media_type === 'movie' || m.media_type === 'tv')) attachRecognizedMoviePreview(link, m);
-		if (m.vote_count > 0) { const rating = document.createElement('span'); rating.className = 'movie-rating'; rating.textContent = `★ ${Number(m.vote_average).toFixed(1)}`; rating.title = `${m.vote_count} оцінок TMDB`; titleCol.appendChild(rating); }
-		if (m.needs_review && m.tmdb_id) {
-			const badge = document.createElement('span'); badge.className = 'review-badge'; badge.textContent = `Сумнівний: ${reviewReasonLabel(m.review_reason)}`; titleCol.appendChild(badge);
-		}
-
-		const mediaTypeCol = document.createElement('div');
-		mediaTypeCol.className = 'col-media-type';
-		const mediaTypeSelect = document.createElement('select');
-		mediaTypeSelect.className = 'media-type-select';
-		mediaTypeSelect.dataset.filename = m.filename;
-		for (const [value, label] of [['auto', 'Авто'], ['movie', 'Фільм'], ['tv', 'Серіал']]) {
-			const option = document.createElement('option');
-			option.value = value;
-			option.textContent = label;
-			mediaTypeSelect.appendChild(option);
-		}
-		mediaTypeSelect.value = mediaTypesCache[m.filename] || 'auto';
-		mediaTypeCol.appendChild(mediaTypeSelect);
-
-		const hintCol = document.createElement('div');
-		hintCol.className = 'col-hint';
-		const hintInput = document.createElement('input');
-		hintInput.type = 'text';
-		hintInput.className = 'hint-input';
-		hintInput.dataset.filename = m.filename;
-		hintInput.value = hintVal;
-		hintCol.appendChild(hintInput);
-		const candidatesButton = document.createElement('button');
-		candidatesButton.type = 'button';
-		candidatesButton.className = 'btn-candidates';
-		candidatesButton.dataset.filename = m.filename;
-		candidatesButton.textContent = 'Варіанти';
-		hintCol.appendChild(candidatesButton);
-
-		row.append(checkboxCol, fileCol, arrowCol, yearCol, titleCol, mediaTypeCol, hintCol);
-		list.appendChild(row);
-		const candidatePanel = document.createElement('div');
-		candidatePanel.className = 'candidate-panel';
-		candidatePanel.dataset.filename = m.filename;
-		candidatePanel.hidden = true;
-		list.appendChild(candidatePanel);
-    });
-
-    document.querySelectorAll('.tmdb-link').forEach(el => {
-        el.onclick = (e) => {
-            const url = e.target.getAttribute('data-url');
-			try {
-				const parsed = new URL(url);
-				if (parsed.protocol !== 'https:' || parsed.hostname !== 'www.themoviedb.org') return;
-				if (typeof OpenURL === "function") OpenURL(parsed.href);
-				else window.open(parsed.href, '_blank');
-			} catch (err) {
-				console.error('Некоректний TMDB URL:', err);
-			}
-        };
-        el.onmouseover = () => el.style.textDecoration = 'underline';
-        el.onmouseout = () => el.style.textDecoration = 'none';
-    });
-}
-
-// 👈 ФІКС: Обробники подій для збереження стану в кеш під час вводу/кліку
-document.getElementById('movie-list').addEventListener('input', (e) => {
-    if (e.target.classList.contains('hint-input')) {
-		cacheEditorValue(hintsCache, e.target.getAttribute('data-filename'), e.target.value);
+    hideEditorPreview();
+    list.replaceChildren();
+    if (!movies.length) {
+        const isReviewEmpty = editorFilter !== 'all' && !document.getElementById('search-input').value.trim();
+        const message = !allMovies.length ? 'Колекція порожня. Запустіть сканування.' : isReviewEmpty ? 'Всі файли розпізнані' : 'Нічого не знайдено.';
+        list.appendChild(editorElement('div', 'editor-empty', message));
     }
-});
+    for (const movie of movies) {
+        const row = editorElement('div', 'movie-row');
+        row.dataset.filename = movie.filename;
+        row.tabIndex = 0;
+        row.setAttribute('role', 'button');
+        row.setAttribute('aria-label', `Редагувати ${movie.title_ua || movie.title_en || movie.file_label || movie.filename}`);
+        row.classList.toggle('active', movie.filename === editorActiveFilename);
 
-document.getElementById('movie-list').addEventListener('change', (e) => {
-    if (e.target.classList.contains('row-cb')) {
-        const fname = e.target.getAttribute('data-filename');
-        if (e.target.checked) checkedCache.add(fname);
-		else checkedCache.delete(fname);
-	}
-	if (e.target.classList.contains('media-type-select')) {
-		cacheEditorValue(mediaTypesCache, e.target.dataset.filename, e.target.value);
-	}
-});
+        const checkCell = editorElement('div', 'col-cb');
+        const checkbox = editorElement('input', 'row-cb');
+        checkbox.type = 'checkbox';
+        checkbox.checked = checkedCache.has(movie.filename);
+        checkbox.setAttribute('aria-label', `Вибрати ${movie.file_label || movie.filename}`);
+        checkbox.addEventListener('click', event => event.stopPropagation());
+        checkbox.addEventListener('change', () => {
+            checkedCache = changeEditorSelection(checkedCache, [movie.filename], checkbox.checked);
+            updateEditorSelection();
+        });
+        checkCell.appendChild(checkbox);
 
-// Пошук по списку (без звернення до бази)
-function renderFilteredMovies() {
-	const q = document.getElementById('search-input').value.toLowerCase();
-	document.getElementById('search-clear').hidden = q.length === 0;
-	const reviewOnly = document.getElementById('review-only').checked;
-    const filtered = allMovies.filter(m => {
-        const title = (m.title_ua || m.title_en || "").toLowerCase();
-        const label = (m.file_label || m.filename || "").toLowerCase();
-        return (!reviewOnly || needsReview(m)) && (m.filename.toLowerCase().includes(q) || title.includes(q) || label.includes(q));
-    });
-    renderMovies(filtered);
+        const titleCell = editorElement('div', 'col-file');
+        titleCell.appendChild(editorElement('strong', 'editor-row-title', movie.title_ua || movie.title_en || 'Не розпізнано'));
+        const file = editorElement('span', 'editor-row-file', movie.file_label || movie.filename);
+        file.title = movie.filename;
+        titleCell.appendChild(file);
+        const yearCell = editorElement('span', 'col-year', movie.year || '—');
+        const typeCell = editorElement('span', 'col-type', movie.media_type === 'tv' ? 'Серіал' : movie.media_type === 'movie' ? 'Фільм' : '—');
+        const ratingCell = editorElement('span', 'col-rating', movie.vote_count > 0 ? `★ ${Number(movie.vote_average).toFixed(1)}` : '—');
+        const status = editorStatus(movie);
+        const statusCell = editorElement('span', `col-status status-${status.kind}`, status.icon);
+        statusCell.title = status.label;
+        statusCell.setAttribute('aria-label', status.label);
+        const actionCell = editorElement('div', 'col-action');
+        const view = editorElement('button', 'editor-icon-button');
+        const eye = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+        eye.setAttribute('viewBox', '0 0 24 24');
+        eye.setAttribute('width', '17'); eye.setAttribute('height', '17'); eye.setAttribute('aria-hidden', 'true');
+        const eyeShape = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+        eyeShape.setAttribute('d', 'M2 12s3.6-6 10-6 10 6 10 6-3.6 6-10 6S2 12 2 12Z M12 9a3 3 0 1 0 0 6 3 3 0 0 0 0-6Z');
+        eyeShape.setAttribute('fill', 'none'); eyeShape.setAttribute('stroke', 'currentColor'); eyeShape.setAttribute('stroke-width', '1.8');
+        eye.appendChild(eyeShape); view.appendChild(eye);
+        view.type = 'button';
+        view.title = movie.tmdb_id ? '' : 'Переглянути картку';
+        view.setAttribute('aria-label', `Переглянути картку: ${movie.title_ua || movie.title_en || movie.filename}`);
+        view.onmouseenter = () => showEditorPreview(view, movie);
+        view.onmouseleave = hideEditorPreview;
+        view.onfocus = () => showEditorPreview(view, movie);
+        view.onblur = hideEditorPreview;
+        view.onclick = event => { event.stopPropagation(); hideEditorPreview(); showMovieView(movie, 'editor'); };
+        actionCell.appendChild(view);
+        row.append(checkCell, titleCell, yearCell, typeCell, ratingCell, statusCell, actionCell);
+        row.onclick = () => selectEditorMovie(movie.filename);
+        row.onkeydown = event => {
+            if ((event.key === 'Enter' || event.key === ' ') && event.target === row) { event.preventDefault(); selectEditorMovie(movie.filename); }
+        };
+        list.appendChild(row);
+    }
+    updateEditorSelection();
+    if (document.getElementById('editor-inspector-content').dataset.filename !== editorActiveFilename) renderEditorInspector();
 }
+
+function selectEditorMovie(filename) {
+    if (editorActiveFilename === filename && document.getElementById('editor-inspector').classList.contains('open')) return;
+    editorActiveFilename = filename;
+    document.querySelectorAll('#movie-list .movie-row').forEach(row => row.classList.toggle('active', row.dataset.filename === filename));
+    renderEditorInspector();
+    document.getElementById('editor-inspector').classList.add('open');
+    document.querySelector('.editor-workspace').classList.add('has-selection');
+}
+
+function closeEditorInspector() {
+    editorActiveFilename = '';
+    document.getElementById('editor-inspector').classList.remove('open');
+    document.querySelector('.editor-workspace').classList.remove('has-selection');
+    document.querySelectorAll('#movie-list .movie-row').forEach(row => row.classList.remove('active'));
+    renderEditorInspector();
+}
+
+function renderEditorInspector() {
+    editorCandidateRequest++;
+    const content = document.getElementById('editor-inspector-content');
+    content.replaceChildren();
+    content.dataset.filename = editorActiveFilename;
+    const movie = allMovies.find(item => item.filename === editorActiveFilename);
+    if (!movie) {
+        content.appendChild(editorElement('div', 'editor-inspector-empty', 'Виберіть запис у списку, щоб переглянути й змінити його.'));
+        return;
+    }
+    const top = editorElement('div', 'inspector-top');
+    const close = editorElement('button', 'editor-inspector-close', '✕');
+    close.type = 'button'; close.title = 'Закрити панель'; close.setAttribute('aria-label', 'Закрити панель');
+    close.onclick = closeEditorInspector;
+    top.appendChild(close);
+    content.appendChild(top);
+    const hero = editorElement('div', 'inspector-hero');
+    const poster = editorElement('img', 'inspector-hero-poster');
+    poster.src = safePosterURL(movie.poster_url);
+    poster.alt = `Постер: ${movie.title_ua || movie.title_en || 'Без назви'}`;
+    poster.onerror = () => { poster.onerror = null; poster.src = noPosterUrl; };
+    const heroDetails = editorElement('div', 'inspector-hero-details');
+    const title = editorElement('h2', 'inspector-title');
+    const titleLink = editorElement('button', 'inspector-title-link', movie.title_ua || movie.title_en || 'Не розпізнано');
+    titleLink.type = 'button';
+    titleLink.title = 'Переглянути картку';
+    titleLink.setAttribute('aria-label', `Переглянути картку: ${titleLink.textContent}`);
+    titleLink.onclick = () => showMovieView(movie, 'editor');
+    title.appendChild(titleLink);
+    heroDetails.appendChild(title);
+    if (movie.title_en && movie.title_en !== movie.title_ua) heroDetails.appendChild(editorElement('p', 'inspector-original', movie.title_en));
+    const status = editorStatus(movie);
+    const meta = editorElement('div', 'inspector-meta');
+    meta.appendChild(editorElement('span', `inspector-status status-${status.kind}`, `${status.icon} ${status.label}`));
+    meta.appendChild(editorElement('span', '', movie.year || 'Рік невідомий'));
+    if (movie.media_type === 'tv') meta.appendChild(editorElement('span', '', 'TV'));
+    const tmdbURL = candidateTMDBURL(movie);
+    if (movie.vote_count > 0 || tmdbURL) {
+        const ratingText = movie.vote_count > 0 ? `★ ${Number(movie.vote_average).toFixed(1)} TMDB ↗` : 'TMDB ↗';
+        const rating = editorElement(tmdbURL ? 'a' : 'span', 'inspector-rating', ratingText);
+        if (tmdbURL) {
+            rating.href = tmdbURL;
+            rating.title = 'Відкрити в TMDB';
+            rating.setAttribute('aria-label', `${ratingText.replace(' ↗', '')}. Відкрити в TMDB`);
+            rating.onclick = event => { event.preventDefault(); OpenURL(tmdbURL); };
+        }
+        meta.appendChild(rating);
+    }
+    heroDetails.appendChild(meta);
+    hero.append(poster, heroDetails);
+    content.appendChild(hero);
+    const path = editorElement('div', 'inspector-file');
+    path.appendChild(editorElement('span', 'inspector-label', 'ФАЙЛ'));
+    path.appendChild(editorElement('strong', '', movie.filename));
+    content.appendChild(path);
+    const fields = editorElement('div', 'inspector-fields');
+    const typeLabel = editorElement('label', '', 'Тип для пошуку');
+    const type = editorElement('select', 'media-type-select');
+    for (const [value, label] of [['auto', 'Авто'], ['movie', 'Фільм'], ['tv', 'Серіал']]) {
+        const option = editorElement('option', '', label); option.value = value; type.appendChild(option);
+    }
+    type.value = mediaTypesCache[movie.filename] || 'auto';
+    type.onchange = () => cacheEditorValue(mediaTypesCache, movie.filename, type.value);
+    typeLabel.appendChild(type);
+    const hintLabel = editorElement('label', '', 'Підказка для пошуку');
+    const hint = editorElement('input', 'hint-input');
+    hint.type = 'text'; hint.placeholder = 'Назва, IMDb ID або посилання'; hint.value = hintsCache[movie.filename] || '';
+    hint.oninput = () => cacheEditorValue(hintsCache, movie.filename, hint.value);
+    hintLabel.appendChild(hint);
+    fields.append(typeLabel, hintLabel);
+    content.appendChild(fields);
+    const actions = editorElement('div', 'inspector-actions');
+    const candidatesButton = editorElement('button', 'primary-button', 'Знайти варіанти');
+    candidatesButton.type = 'button';
+    const fixButton = editorElement('button', 'inspector-secondary', '✦ Виправити запис');
+    fixButton.type = 'button';
+    fixButton.onclick = () => runEditorFix([movie.filename]);
+    const remove = editorElement('button', 'inspector-delete', 'Видалити');
+    remove.type = 'button';
+    remove.title = 'Видалити запис із MovieList';
+    remove.setAttribute('aria-controls', 'inspector-delete-confirm');
+    remove.setAttribute('aria-expanded', 'false');
+    actions.append(candidatesButton, fixButton, remove);
+    content.appendChild(actions);
+    const deletePanel = editorElement('section', 'inspector-delete-confirm');
+    deletePanel.id = 'inspector-delete-confirm';
+    deletePanel.hidden = true;
+    deletePanel.setAttribute('aria-label', 'Підтвердження видалення');
+    const deleteError = editorElement('p', 'inspector-delete-error');
+    deleteError.setAttribute('role', 'alert');
+    deleteError.hidden = true;
+    const deleteActions = editorElement('div', 'inspector-delete-actions');
+    const cancelDelete = editorElement('button', '', 'Скасувати');
+    cancelDelete.type = 'button';
+    const confirmDelete = editorElement('button', 'inspector-delete-confirm-button', 'Видалити запис');
+    confirmDelete.type = 'button';
+    deleteActions.append(cancelDelete, confirmDelete);
+    deletePanel.appendChild(deleteActions);
+    content.append(deletePanel, deleteError);
+    let deleting = false;
+    const hideDeletePanel = () => {
+        if (deleting) return;
+        deletePanel.hidden = true;
+        deleteError.hidden = true;
+        remove.setAttribute('aria-expanded', 'false');
+        remove.focus();
+    };
+    remove.onclick = () => {
+        if (deleting) return;
+        if (!deletePanel.hidden) {
+            hideDeletePanel();
+            return;
+        }
+        deleteError.hidden = true;
+        deletePanel.hidden = false;
+        remove.setAttribute('aria-expanded', 'true');
+        cancelDelete.focus();
+    };
+    cancelDelete.onclick = hideDeletePanel;
+    deletePanel.addEventListener('keydown', event => {
+        if (event.key === 'Escape' && !deleting) {
+            event.preventDefault();
+            hideDeletePanel();
+        }
+    });
+    confirmDelete.onclick = async () => {
+        if (deleting) return;
+        deleting = true;
+        confirmDelete.disabled = true;
+        cancelDelete.disabled = true;
+        deleteError.hidden = true;
+        try {
+            await DeleteMovie(movie.filename);
+        } catch (error) {
+            deleteError.textContent = `Не вдалося видалити запис: ${error}`;
+            deleteError.hidden = false;
+            deleting = false;
+            confirmDelete.disabled = false;
+            cancelDelete.disabled = false;
+            return;
+        }
+        checkedCache.delete(movie.filename);
+        if (editorActiveFilename === movie.filename) closeEditorInspector();
+        await loadMovies();
+        await loadStats();
+    };
+    const candidatesPanel = editorElement('div', 'inspector-candidates');
+    content.appendChild(candidatesPanel);
+    candidatesButton.onclick = async () => {
+        const filename = movie.filename;
+        const request = ++editorCandidateRequest;
+        candidatesButton.disabled = true;
+        candidatesPanel.textContent = 'Пошук варіантів…';
+        try {
+            const candidates = await SearchTMDBCandidates(candidateSearchPayload(filename, hintsCache, mediaTypesCache));
+            if (request !== editorCandidateRequest || editorActiveFilename !== filename) return;
+            candidatesPanel.replaceChildren();
+            const status = candidateStatus(candidates);
+            if (status.kind === 'empty') candidatesPanel.textContent = status.text;
+            else for (const candidate of (candidates || []).slice(0, 5)) candidatesPanel.appendChild(renderEditorCandidate(filename, candidate));
+        } catch (error) {
+            if (request === editorCandidateRequest) candidatesPanel.textContent = candidateStatus(null, error).text;
+        } finally {
+            candidatesButton.disabled = false;
+        }
+    };
+}
+
+function renderEditorCandidate(filename, candidate) {
+    const item = editorElement('div', 'candidate-item');
+    const label = editorElement('div', 'candidate-label');
+    label.appendChild(editorElement('strong', '', candidate.title || candidate.original_title || 'Без назви'));
+    label.appendChild(editorElement('span', '', `${candidate.original_title || '—'} · ${candidate.year || '—'} · ${mediaTypeLabel(candidate.media_type)}`));
+    const url = candidateTMDBURL(candidate);
+    if (url) {
+        const tmdb = editorElement('button', 'candidate-tmdb-link', `TMDB ${candidate.tmdb_id} ↗`);
+        tmdb.type = 'button'; tmdb.onclick = () => OpenURL(url); label.appendChild(tmdb);
+    }
+    const buttons = editorElement('div', 'candidate-actions');
+    const detailsButton = editorElement('button', 'inspector-secondary', 'Деталі');
+    detailsButton.type = 'button';
+    const choose = editorElement('button', 'primary-button', 'Обрати');
+    choose.type = 'button';
+    const detailsPanel = editorElement('div', 'candidate-popover candidate-inline-details');
+    detailsPanel.hidden = true;
+    detailsButton.onclick = async () => {
+        if (detailsButton.dataset.loaded === 'true') { detailsPanel.hidden = !detailsPanel.hidden; return; }
+        detailsButton.disabled = true;
+        try {
+            const details = await GetTMDBCandidateDetails(candidateConfirmPayload(filename, candidate));
+            if (editorActiveFilename !== filename || !item.isConnected) return;
+            renderCandidatePopover(detailsPanel, details);
+            detailsButton.dataset.loaded = 'true'; detailsPanel.hidden = false;
+        } catch (error) { detailsPanel.textContent = `Не вдалося завантажити деталі: ${error}`; detailsPanel.hidden = false; }
+        finally { detailsButton.disabled = false; }
+    };
+    choose.onclick = async () => {
+        choose.disabled = true; choose.textContent = 'Збереження…';
+        try { await ConfirmTMDBCandidate(candidateConfirmPayload(filename, candidate)); await loadMovies(filename); await loadStats(); }
+        catch (error) { choose.disabled = false; choose.textContent = 'Повторити'; alert(`Не вдалося обрати фільм: ${error}`); }
+    };
+    buttons.append(detailsButton, choose);
+    item.append(label, buttons, detailsPanel);
+    return item;
+}
+
+function renderFilteredMovies() {
+    const query = document.getElementById('search-input').value;
+    document.getElementById('search-clear').hidden = query.length === 0;
+    const sort = document.getElementById('editor-sort').value;
+    visibleEditorMovies = filterAndSortEditorMovies(allMovies, query, editorFilter, sort);
+    if (editorActiveFilename && !visibleEditorMovies.some(movie => movie.filename === editorActiveFilename)) closeEditorInspector();
+    document.querySelectorAll('.editor-filter').forEach(button => button.classList.toggle('active', button.dataset.filter === editorFilter));
+    document.getElementById('editor-count').textContent = `${visibleEditorMovies.length} із ${allMovies.length}`;
+    renderMovies(visibleEditorMovies);
+}
+
 document.getElementById('search-input').addEventListener('input', renderFilteredMovies);
+document.getElementById('editor-sort').addEventListener('change', renderFilteredMovies);
+document.querySelector('.editor-filters').addEventListener('click', event => {
+    const button = event.target.closest('.editor-filter');
+    if (!button) return;
+    editorFilter = button.dataset.filter;
+    renderFilteredMovies();
+});
 document.getElementById('search-clear').addEventListener('click', () => {
-	const input = document.getElementById('search-input');
-	input.value = '';
-	input.dispatchEvent(new Event('input'));
-	input.focus();
+    const input = document.getElementById('search-input');
+    input.value = ''; renderFilteredMovies(); input.focus();
 });
 document.getElementById('search-input').addEventListener('keydown', event => {
-	if (event.key === 'Escape' && event.currentTarget.value) {
-		event.currentTarget.value = '';
-		event.currentTarget.dispatchEvent(new Event('input'));
-	}
+    if (event.key === 'Escape' && event.currentTarget.value) { event.currentTarget.value = ''; renderFilteredMovies(); }
 });
-document.getElementById('review-only').addEventListener('change', () => document.getElementById('search-input').dispatchEvent(new Event('input')));
-
-document.getElementById('movie-list').addEventListener('click', async (e) => {
-	if (e.target.classList.contains('btn-candidates')) {
-		const filename = e.target.dataset.filename;
-		if (!candidateSearches.begin(filename)) return;
-		e.target.disabled = true;
-		const panel = document.querySelector(`.candidate-panel[data-filename="${CSS.escape(filename)}"]`);
-		panel.hidden = false;
-		panel.replaceChildren(document.createTextNode('Пошук…'));
-		try {
-			const candidates = await SearchTMDBCandidates(candidateSearchPayload(filename, hintsCache, mediaTypesCache));
-			panel.replaceChildren();
-			const status = candidateStatus(candidates);
-			if (status.kind === 'empty') panel.textContent = status.text;
-			for (const candidate of candidates || []) {
-				const item = document.createElement('div'); item.className = 'candidate-item';
-				const label = document.createElement('span'); label.className = 'candidate-label';
-				label.appendChild(document.createTextNode(`${candidate.title} · ${candidate.original_title || '—'} · ${candidate.year || '—'} · ${mediaTypeLabel(candidate.media_type)} · `));
-				const tmdbLink = document.createElement('a');
-				tmdbLink.className = 'candidate-tmdb-link'; tmdbLink.textContent = `TMDB ${candidate.tmdb_id}`; tmdbLink.href = candidateTMDBURL(candidate);
-				tmdbLink.onclick = (event) => { event.preventDefault(); const url = candidateTMDBURL(candidate); if (url) OpenURL(url); };
-				label.appendChild(tmdbLink);
-				const choose = document.createElement('button'); choose.type = 'button'; choose.textContent = 'Обрати'; choose.className = 'btn-choose-candidate';
-				choose.onclick = async () => {
-					choose.disabled = true;
-					choose.textContent = 'Збереження…';
-					try {
-						await ConfirmTMDBCandidate(candidateConfirmPayload(filename, candidate));
-						await loadMovies(filename);
-						await loadStats();
-					} catch (err) {
-						choose.disabled = false;
-						choose.textContent = 'Повторити';
-						alert(`Не вдалося обрати фільм: ${err}`);
-					}
-				};
-				const refine = document.createElement('button'); refine.type = 'button'; refine.textContent = 'Уточнити'; refine.className = 'btn-refine-candidate';
-				const popover = document.createElement('div'); popover.className = 'candidate-popover floating-movie-popover'; popover.hidden = true; document.body.appendChild(popover);
-				refine.onclick = async () => {
-					if (refine.dataset.loaded === 'true') { popover.hidden = !popover.hidden; return; }
-					refine.disabled = true; refine.textContent = 'Завантаження…';
-					try { const details = await GetTMDBCandidateDetails(candidateConfirmPayload(filename, candidate)); renderCandidatePopover(popover, details); refine.dataset.loaded = 'true'; refine.textContent = 'Деталі ✓'; showFloatingPopover(refine, popover); }
-					catch (err) { refine.textContent = 'Повторити'; popover.textContent = `Не вдалося завантажити деталі: ${err}`; }
-					finally { refine.disabled = false; }
-				};
-				refine.onmouseenter = () => { if (refine.dataset.loaded === 'true') showFloatingPopover(refine, popover); };
-				item.onmouseleave = () => { if (refine.dataset.loaded === 'true') popover.hidden = true; };
-				item.append(label, refine, choose); panel.appendChild(item);
-			}
-			const cancel = document.createElement('button'); cancel.type = 'button'; cancel.textContent = 'Скасувати'; cancel.onclick = () => { panel.hidden = true; document.querySelectorAll('.floating-movie-popover').forEach(popover => popover.remove()); };
-			panel.appendChild(cancel);
-		} catch (err) { panel.textContent = candidateStatus(null, err).text; }
-		finally { candidateSearches.end(filename); e.target.disabled = false; }
-		return;
-	}
-    // Якщо клікнули по іконці видалення
-    if (e.target.classList.contains('btn-del')) {
-        const filename = e.target.getAttribute('data-filename');
-
-        // Запитуємо підтвердження, щоб не видалити випадково
-        if (confirm(`Дійсно видалити "${filename}" з бази?\nПостер також буде знищено. Після цього можна запустити сканування знову.`)) {
-            try {
-                // Викликаємо Go-метод
-                await DeleteMovie(filename);
-
-                // Видаляємо з глобального масиву
-                allMovies = allMovies.filter(m => m.filename !== filename);
-
-                // Знаходимо рядок в DOM і видаляємо його плавно (без перерендеру всього списку)
-                const row = e.target.closest('.movie-row');
-                if (row) {
-                    row.style.opacity = '0';
-                    setTimeout(() => row.remove(), 200);
-                }
-
-                // Оновлюємо статистику
-                loadStats();
-            } catch (err) {
-                console.error("Помилка видалення:", err);
-                alert("Не вдалося видалити файл. Дивіться консоль.");
-            }
-        }
-    }
+document.getElementById('editor-select-all').addEventListener('change', event => {
+    checkedCache = changeEditorSelection(checkedCache, visibleEditorMovies.map(movie => movie.filename), event.target.checked);
+    document.querySelectorAll('#movie-list .movie-row').forEach(row => { row.querySelector('.row-cb').checked = checkedCache.has(row.dataset.filename); });
+    updateEditorSelection();
 });
+document.getElementById('editor-clear-selection').onclick = () => {
+    checkedCache = new Set();
+    document.querySelectorAll('#movie-list .row-cb').forEach(checkbox => { checkbox.checked = false; });
+    updateEditorSelection();
+};
+document.getElementById('movie-list').addEventListener('scroll', hideEditorPreview);
+window.addEventListener('resize', hideEditorPreview);
 
 function renderCandidatePopover(popover, details) {
 	popover.replaceChildren();
@@ -945,59 +1193,19 @@ function renderCandidatePopover(popover, details) {
 	body.append(heading, meta, rating, genres, overview); popover.appendChild(body);
 }
 
-function showFloatingPopover(anchor, popover) {
-	popover.hidden = false;
-	const rect = anchor.getBoundingClientRect();
-	const position = floatingPopoverPosition(rect, {width: popover.offsetWidth, height: popover.offsetHeight}, {width: window.innerWidth, height: window.innerHeight});
-	popover.style.left = `${position.left}px`;
-	popover.style.top = `${position.top}px`;
-}
-
-function attachRecognizedMoviePreview(link, movie) {
-	const popover = document.createElement('div');
-	popover.className = 'candidate-popover floating-movie-popover recognized-movie-popover';
-	popover.hidden = true;
-	document.body.appendChild(popover);
-	let hideTimer;
-	let loadPromise;
-	const visibility = createAsyncVisibilityGate();
-	const show = async () => {
-		clearTimeout(hideTimer);
-		visibility.activate();
-		if (!loadPromise) {
-			popover.textContent = 'Завантаження…';
-			showFloatingPopover(link, popover);
-			loadPromise = GetTMDBCandidateDetails({filename: movie.filename, tmdb_id: movie.tmdb_id, media_type: movie.media_type})
-				.then(details => renderCandidatePopover(popover, details))
-				.catch(err => { popover.textContent = `Не вдалося завантажити деталі: ${err}`; loadPromise = null; });
-			await loadPromise;
-		}
-		if (visibility.isActive()) showFloatingPopover(link, popover);
-	};
-	const hide = () => { hideTimer = setTimeout(() => { visibility.deactivate(); popover.hidden = true; }, 120); };
-	link.addEventListener('mouseenter', show);
-	link.addEventListener('mouseleave', hide);
-	link.addEventListener('focus', show);
-	link.addEventListener('blur', hide);
-	popover.addEventListener('mouseenter', () => { clearTimeout(hideTimer); visibility.activate(); });
-	popover.addEventListener('mouseleave', hide);
-}
-
-// Кнопка "Виправити вибрані"
-document.getElementById('btn-fix').onclick = () => {
-	const selected = fixPayload(checkedCache, hintsCache, mediaTypesCache);
-    // 👈 ФІКС: Беремо дані з кешу, а не з DOM, бо елементи можуть бути відфільтровані
+async function runEditorFix(filenames) {
+	const selected = fixPayload(filenames, hintsCache, mediaTypesCache);
     if (selected.length === 0) return;
-
-    // Очищаємо кеш після відправки
-	checkedCache.clear();
-	hintsCache = {};
-	mediaTypesCache = {};
-
-    switchTab('overview', 'Виправлення');
-    FixSelected(selected);
-};
-
+    try {
+        await FixSelected(selected);
+        for (const {filename} of selected) { checkedCache.delete(filename); delete hintsCache[filename]; delete mediaTypesCache[filename]; }
+        updateEditorSelection();
+        closeEditorBatchPanel();
+        switchTab('overview', 'Виправлення');
+    } catch (error) {
+        alert(`Не вдалося запустити виправлення: ${error}`);
+    }
+}
 // Вбудоване підтвердження (без модальних вікон)
 let deleteConfirmTimeout;
 let isConfirmingDelete = false;
@@ -1045,17 +1253,14 @@ document.getElementById('btn-delete-selected').onclick = async (e) => {
         for (const filename of selected) {
             await DeleteMovie(filename);
         }
-
-        allMovies = allMovies.filter(m => !selected.includes(m.filename));
-        checkedCache.clear();
-        document.getElementById('search-input').dispatchEvent(new Event('input'));
-        loadStats();
-
     } catch (err) {
         console.error("❌ Помилка масового видалення:", err);
+        alert(`Не вдалося видалити всі вибрані записи: ${err}`);
     } finally {
+        await loadMovies();
+        await loadStats();
         // Відновлюємо кнопку після завершення
-        btn.innerHTML = "🗑 Видалити вибрані";
+        btn.innerHTML = "Видалити вибрані";
         btn.style.pointerEvents = "auto";
     }
 };

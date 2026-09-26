@@ -182,7 +182,7 @@ Examples: `Vrag` → `Враг`, `Nochnoj Rejs` → `Ночной Рейс`.
 ## Environment Configuration
 
 ```env
-APP_VERSION=2.6.0
+APP_VERSION=2.7.0
 GEMINI_API_KEY=
 GEMINI_MODELS=gemini-2.5-flash,gemini-flash-lite-latest
 GROK_API_KEY=
@@ -198,15 +198,15 @@ GITHUB_PAGES_BRANCH=main
 
 ---
 
-## Active Work — MovieList 2.6.0
+## Active Work — MovieList 2.7.0
 
 The project-scoped `reviewer` custom agent is defined in `.codex/agents/reviewer.toml`. Run it only when the user explicitly requests a review; it is read-only and reports actionable findings without changing files.
 
-`APP_VERSION=2.6.0` is the current release value. `internal/config/config.go` supplies the default; a local `.env` or process environment can override it. Keep the Wails window title, frontend HTML title, npm package metadata, `.env.example`, README and release notes aligned when changing the version.
+`APP_VERSION=2.7.0` is the current release value. `internal/config/config.go` supplies the default; a local `.env` or process environment can override it. Keep the Wails window title, frontend HTML title, npm package metadata, `.env.example`, README and release notes aligned when changing the version.
 
 The active recognition specification is `CHECKLIST.md` (gitignored by design), currently Round 29 transliteration improvements. Its remaining production-log checks and persisted-model cleanup require a real-library run. `DESIGN_CHECKLIST.md` tracks the desktop UI refresh and its remaining visual runtime check.
 
-The 2.6 desktop UI opens on the poster library. A card opens a dedicated detail screen; editing navigates to the matching filename in the editor. The editor search has an explicit clear button and Escape shortcut. The movie detail screen uses existing `GetMovies()` data and TMDB CDN poster URLs, with a local no-poster fallback.
+The 2.7 desktop UI opens on the poster library. A card opens a dedicated detail screen; editing navigates to the matching filename in the editor. The editor has a compact list, selection inspector, batch correction, TMDB candidates and an explicit search clear button with Escape shortcut. Movie ratings link to TMDB. The detail screen uses existing `GetMovies()` data and TMDB CDN poster URLs, with a local no-poster fallback.
 
 Round 29 exclusions: migration framework, database backup/restore, file fingerprints/rename tracking and SQLite FTS. Do not expand scope into these items.
 
@@ -407,7 +407,7 @@ shutdown) — рівно один app_closed в кінці сесії. FIX-17 (f
 | Automatic ambiguity | ✅ Exact movie+TV disambiguation before fuzzy Gemini merge; `The Bureau` regression selects TV 62476. |
 | Scan metrics | ✅ `processed_total` is distinct from complete collection `disk_total`. |
 | Active Round 29 | 🧪 Transliteration and release cleanup implemented; production runtime verification remains. |
-| Version | ✅ Default, local `.env`, Wails/HTML titles and npm metadata aligned to 2.6.0. |
+| Version | ✅ Default, local `.env`, Wails/HTML titles and npm metadata aligned to 2.7.0. |
 | Desktop UI | ✅ Poster library, dedicated detail screen, editor clear search, scan progress; final visual check remains in `DESIGN_CHECKLIST.md`. |
 | Candidate confirmation | ✅ TMDB selection saves in foreground; poster/localization finish in a guarded `App.wg` task and emit `movie-updated`. |
 | Tests | ✅ Automated Round 29 verification is maintained in `CHECKLIST.md`; runtime-only checks require a fresh production log. |

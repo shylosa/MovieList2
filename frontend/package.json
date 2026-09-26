@@ -2,7 +2,7 @@
   "name": "frontend",
   "type": "module",
   "private": true,
-  "version": "2.6.0",
+  "version": "2.7.0",
   "scripts": {
     "test": "node src/test-runner.mjs",
     "dev": "vite",

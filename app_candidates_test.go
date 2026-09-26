@@ -153,6 +153,43 @@ func TestCurrentNeedsReviewCandidateCanBeConfirmed(t *testing.T) {
 	}
 }
 
+func TestConfirmCandidateKeepsExistingUkrainianPlot(t *testing.T) {
+	ctx := context.Background()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"id":586353,"title":"The Master and Margarita","original_title":"Мастер и Маргарита","release_date":"2024-01-25","overview":"Москва, 1930-е годы. Драматурга обвиняют в антисоветчине."}`)
+	}))
+	defer server.Close()
+	u, _ := url.Parse(server.URL)
+	db, err := storage.New(filepath.Join(t.TempDir(), "movies.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.InitSchema(ctx); err != nil {
+		t.Fatal(err)
+	}
+	filename := "Master.i.Margarita.2023.WEB-DLRip.AVC.mkv"
+	wantTitle := "Майстер і Маргарита"
+	wantPlot := "Москва, 1930-ті роки. Драматурга звинувачують в антирадянщині."
+	if err := db.SaveMoviesBatch(ctx, []storage.Movie{{Filename: filename, TmdbID: 586353, MediaType: "movie", TitleUA: wantTitle, Plot: wantPlot}}); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{TMDBAPIKey: "test", PostersDir: t.TempDir()}
+	client := tmdb.NewClient(cfg)
+	defer client.Close()
+	client.SetTransport(&mockTransport{base: http.DefaultTransport, scheme: u.Scheme, host: u.Host})
+	app := NewApp()
+	app.ctx, app.db, app.cfg, app.tmdbClient = ctx, db, cfg, client
+	if err := app.ConfirmTMDBCandidate(CandidateConfirmRequest{Filename: filename, TMDBID: 586353, MediaType: "movie"}); err != nil {
+		t.Fatal(err)
+	}
+	movie, err := db.GetMovieByFilename(ctx, filename)
+	if err != nil || movie == nil || movie.TitleUA != wantTitle || movie.Plot != wantPlot {
+		t.Fatalf("Ukrainian localization was lost: movie=%+v err=%v", movie, err)
+	}
+}
+
 func TestConfirmCandidateReturnsBeforeBackgroundTranslation(t *testing.T) {
 	ctx := context.Background()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

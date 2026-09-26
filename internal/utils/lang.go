@@ -15,7 +15,8 @@ const (
 	LanguageEnglish   TextLanguage = "en"
 )
 
-var russianWordMarkersRE = regexp.MustCompile(`(?i)\b(?:из|как|что|это|бы|вот)\b`)
+// Go's \b is ASCII-only, so use Unicode letter boundaries for Cyrillic words.
+var russianWordMarkersRE = regexp.MustCompile(`(?i)(?:^|[^\p{L}])(?:из|как|что|это|бы|вот)(?:$|[^\p{L}])`)
 
 // cyrToLatDoubles — подвоєні кириличні приголосні (BGN/PCGN: зберігаються у латиниці).
 // Обробляються ПЕРЕД одинарними, щоб "тт" не розпався на два "t" через інший механізм.

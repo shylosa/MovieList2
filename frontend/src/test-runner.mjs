@@ -1,6 +1,5 @@
 import assert from 'assert';
-import { readFileSync } from 'fs';
-import { candidateConfirmPayload, candidateSearchPayload, fixPayload, reviewCounts, reviewReasonLabel, mediaTypeLabel, candidateTMDBURL, formatRuntime, formatTMDBRating, createRequestGate, createAsyncVisibilityGate, candidateStatus, scanLifecycleTransition, cacheEditorValue, floatingPopoverPosition } from './editor-state.js';
+import { candidateConfirmPayload, candidateSearchPayload, fixPayload, reviewCounts, reviewReasonLabel, mediaTypeLabel, candidateTMDBURL, formatRuntime, formatTMDBRating, candidateStatus, scanLifecycleTransition, cacheEditorValue, filterAndSortEditorMovies, updateEditorSelection } from './editor-state.js';
 
 assert.deepStrictEqual(candidateSearchPayload('a.mkv', {'a.mkv': 'The Bureau'}, {'a.mkv': 'tv'}), {filename: 'a.mkv', title: 'The Bureau', media_type: 'tv'});
 assert.strictEqual(reviewReasonLabel('identity_conflict'), 'відхилено автоматичну заміну ідентичності');
@@ -17,16 +16,6 @@ assert.strictEqual(formatRuntime(14), '14 хв');
 assert.match(formatTMDBRating(7.12, 250), /★ 7\.1/);
 assert.deepStrictEqual(fixPayload(new Set(['a']), {a: 'Hint'}, {a: 'movie'}), [{filename: 'a', hint: 'Hint', media_type: 'movie'}]);
 assert.deepStrictEqual(reviewCounts([{tmdb_id: 0, needs_review: true}, {tmdb_id: 2, needs_review: true}, {tmdb_id: 3}]), {unresolved: 1, suspicious: 1});
-const gate = createRequestGate();
-assert.strictEqual(gate.begin('a.mkv'), true);
-assert.strictEqual(gate.begin('a.mkv'), false);
-gate.end('a.mkv');
-assert.strictEqual(gate.begin('a.mkv'), true);
-const visibility = createAsyncVisibilityGate();
-visibility.activate();
-assert.strictEqual(visibility.isActive(), true);
-visibility.deactivate();
-assert.strictEqual(visibility.isActive(), false);
 assert.deepStrictEqual(candidateStatus([]), {kind: 'empty', text: 'Нічого не знайдено'});
 assert.strictEqual(candidateStatus(null, 'network').kind, 'error');
 assert.strictEqual(candidateStatus([{}]).kind, 'ready');
@@ -37,8 +26,25 @@ const cachedHints = {}, cachedTypes = {};
 cacheEditorValue(cachedHints, 'a.mkv', 'Abigail');
 cacheEditorValue(cachedTypes, 'a.mkv', 'movie');
 assert.deepStrictEqual(candidateSearchPayload('a.mkv', cachedHints, cachedTypes), {filename: 'a.mkv', title: 'Abigail', media_type: 'movie'});
-assert.deepStrictEqual(floatingPopoverPosition({left: 900, top: 700, bottom: 730}, {width: 430, height: 180}, {width: 1100, height: 800}), {left: 662, top: 514});
-const editorCSS = readFileSync(new URL('./style.css', import.meta.url), 'utf8');
-assert.match(editorCSS, /\.candidate-item\s*\{[^}]*grid-template-columns:\s*minmax\(0, 1fr\) 96px 64px/);
-assert.match(editorCSS, /\.btn-refine-candidate\s*\{[^}]*width:\s*96px/);
+const editorMovies = [
+    {filename: 'B.mkv', title_ua: 'Бета', year: 2018, tmdb_id: 1, needs_review: false, vote_average: 6.2},
+    {filename: 'A.mkv', title_ua: 'Альфа', year: 2020, tmdb_id: 2, needs_review: true, vote_average: 7.8},
+    {filename: 'C.mkv', file_label: 'Невідомий', year: 2019, tmdb_id: 0, needs_review: false, vote_average: 0},
+];
+assert.deepStrictEqual(filterAndSortEditorMovies(editorMovies, '', 'all', 'title').map(movie => movie.filename), ['A.mkv', 'B.mkv', 'C.mkv']);
+assert.deepStrictEqual(filterAndSortEditorMovies(editorMovies, '', 'review', 'year').map(movie => movie.filename), ['A.mkv', 'C.mkv']);
+assert.deepStrictEqual(filterAndSortEditorMovies(editorMovies, 'невідомий', 'unresolved').map(movie => movie.filename), ['C.mkv']);
+assert.deepStrictEqual(filterAndSortEditorMovies(editorMovies, '', 'all', 'rating').map(movie => movie.filename), ['A.mkv', 'B.mkv', 'C.mkv']);
+assert.deepStrictEqual(editorMovies.map(movie => movie.filename), ['B.mkv', 'A.mkv', 'C.mkv']);
+let selection = updateEditorSelection(new Set(), ['A.mkv', 'B.mkv'], true);
+selection = updateEditorSelection(selection, ['B.mkv'], false);
+selection = updateEditorSelection(selection, ['C.mkv'], true);
+assert.deepStrictEqual([...selection].sort(), ['A.mkv', 'C.mkv']);
+assert.deepStrictEqual([...updateEditorSelection(selection, ['C.mkv'], false)], ['A.mkv']);
+const batchHints = {'A.mkv': 'IMDb tt1234567', 'C.mkv': 'Інша назва'};
+const batchTypes = {'A.mkv': 'movie', 'C.mkv': 'tv'};
+assert.deepStrictEqual(fixPayload(selection, batchHints, batchTypes), [
+    {filename: 'A.mkv', hint: 'IMDb tt1234567', media_type: 'movie'},
+    {filename: 'C.mkv', hint: 'Інша назва', media_type: 'tv'},
+]);
 console.log('frontend state tests passed');

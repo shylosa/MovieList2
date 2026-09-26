@@ -41,3 +41,12 @@ func TestDetectTextLanguage(t *testing.T) {
 		}
 	}
 }
+
+func TestDetectTextLanguageRussianWordsWithoutDistinctiveLetters(t *testing.T) {
+	if got := DetectTextLanguage("Что он сказал про кино?"); got != LanguageRussian {
+		t.Fatalf("Russian sentence classified as %q", got)
+	}
+	if got := DetectTextLanguage("Що він сказав про кіно?"); got != LanguageUkrainian {
+		t.Fatalf("Ukrainian sentence classified as %q", got)
+	}
+}

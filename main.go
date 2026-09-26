@@ -36,7 +36,7 @@ func main() {
 	app := NewApp()
 
 	err := wails.Run(&options.App{
-		Title:     "MovieList 2.6.0",
+		Title:     "MovieList 2.7.0",
 		Width:     1100,
 		Height:    650,
 		MinWidth:  860,

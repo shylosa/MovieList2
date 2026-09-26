@@ -42,22 +42,33 @@ export function reviewCounts(movies) {
     };
 }
 
-export function createRequestGate() {
-    const active = new Set();
-    return {
-        begin(key) { if (active.has(key)) return false; active.add(key); return true; },
-        end(key) { active.delete(key); },
-        has(key) { return active.has(key); },
-    };
+export function filterAndSortEditorMovies(movies, query = '', filter = 'all', sort = 'title') {
+    const search = query.trim().toLocaleLowerCase('uk-UA');
+    const result = movies.filter(movie => {
+        if (filter === 'review' && !(movie.needs_review || !movie.tmdb_id)) return false;
+        if (filter === 'unresolved' && movie.tmdb_id) return false;
+        const text = [movie.filename, movie.file_label, movie.title_ua, movie.title_en, movie.year].join(' ').toLocaleLowerCase('uk-UA');
+        return text.includes(search);
+    });
+    const title = movie => movie.title_ua || movie.title_en || movie.file_label || movie.filename || '';
+    result.sort((a, b) => {
+        let difference = 0;
+        if (sort === 'year') difference = Number(b.year || 0) - Number(a.year || 0);
+        else if (sort === 'rating') difference = Number(b.vote_average || 0) - Number(a.vote_average || 0);
+        else if (sort === 'filename') difference = (a.filename || '').localeCompare(b.filename || '', 'uk');
+        else difference = title(a).localeCompare(title(b), 'uk');
+        return difference || (a.filename || '').localeCompare(b.filename || '', 'uk');
+    });
+    return result;
 }
 
-export function createAsyncVisibilityGate() {
-    let active = false;
-    return {
-        activate() { active = true; },
-        deactivate() { active = false; },
-        isActive() { return active; },
-    };
+export function updateEditorSelection(selection, filenames, checked) {
+    const next = new Set(selection);
+    for (const filename of filenames) {
+        if (checked) next.add(filename);
+        else next.delete(filename);
+    }
+    return next;
 }
 
 export function candidateStatus(candidates, error = null) {
@@ -75,12 +86,4 @@ export function scanLifecycleTransition(scanning, eventName) {
 export function cacheEditorValue(cache, filename, value) {
     cache[filename] = value;
     return cache;
-}
-
-export function floatingPopoverPosition(anchor, popover, viewport, margin = 8) {
-    let left = Math.min(anchor.left, viewport.width - popover.width - margin);
-    left = Math.max(margin, left);
-    let top = anchor.bottom + 6;
-    if (top + popover.height > viewport.height - margin) top = Math.max(margin, anchor.top - popover.height - 6);
-    return {left, top};
 }

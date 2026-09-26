@@ -98,6 +98,32 @@ func TestUpdateMovie_BypassesGeminiOnCyrillicTMDB(t *testing.T) {
 	}
 }
 
+func TestApplyTMDBToMovieKeepsUkrainianLocalizationForSameIdentity(t *testing.T) {
+	movie := storage.Movie{
+		TmdbID: 586353, MediaType: "movie",
+		TitleUA: "Майстер і Маргарита",
+		Plot:    "Москва, 1930-ті роки. Драматурга звинувачують в антирадянщині.",
+	}
+	info := &tmdb.MovieInfo{
+		TMDBID: 586353, MediaType: tmdb.MediaTypeMovie,
+		TitleUA: "The Master and Margarita",
+		Plot:    "Москва, 1930-е годы. Драматурга обвиняют в антисоветчине.",
+	}
+	applyTMDBToMovie(&movie, info)
+	if movie.TitleUA != "Майстер і Маргарита" || movie.Plot != "Москва, 1930-ті роки. Драматурга звинувачують в антирадянщині." {
+		t.Fatalf("Ukrainian localization was replaced: title=%q plot=%q", movie.TitleUA, movie.Plot)
+	}
+	if needsTranslation(movie.Plot) {
+		t.Fatalf("preserved plot should not require translation: %q", movie.Plot)
+	}
+
+	info.TMDBID = 586354
+	applyTMDBToMovie(&movie, info)
+	if movie.TitleUA != info.TitleUA || movie.Plot != info.Plot {
+		t.Fatalf("localization from a different movie leaked into replacement: title=%q plot=%q", movie.TitleUA, movie.Plot)
+	}
+}
+
 func TestUpdateMovieAuthoritativeManualTitleNeverCallsGemini(t *testing.T) {
 	ctx := context.Background()
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

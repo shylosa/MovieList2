@@ -90,8 +90,9 @@ const htmlLayout = `<!DOCTYPE html>
     <link rel="icon" type="image/png" href="data:image/png;base64,{{.FaviconBase64}}">
     <style>
         /* Додаємо стиль для посилання в назві */
-        .title-ua a { color: inherit; text-decoration: none; transition: color 0.2s; }
-        .title-ua a:hover { color: #e50914; text-decoration: underline; }
+        a, a:hover, a:focus-visible { text-decoration: none; }
+        .title-ua a { color: inherit; transition: color 0.2s; }
+        .title-ua a:hover { color: #e50914; }
 
         /* (Решта ваших стилів без змін) */
         body { background-color: #121212; color: #e0e0e0; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 0; line-height: 1.6; }

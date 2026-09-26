@@ -863,6 +863,10 @@ func (a *App) RunScan() {
 		filesToProcess := a.filterUnprocessed(scanCtx, diskPaths)
 		processedTotal = len(filesToProcess)
 		if len(filesToProcess) == 0 {
+			a.localizeStoredMovies(scanCtx, nil)
+			if scanCtx.Err() != nil {
+				return
+			}
 			a.cleanOrphanPostersAfterSuccess(scanCtx)
 			a.finalizeScan("Змін не знайдено.", true)
 			scanFinished = true
@@ -899,6 +903,7 @@ func (a *App) RunScan() {
 		if len(translationQueue) > 0 {
 			a.processTranslationQueue(scanCtx, translationQueue, a.aiClient, nil)
 		}
+		a.localizeStoredMovies(scanCtx, translationQueue)
 		if scanCtx.Err() == nil {
 			a.cleanOrphanPostersAfterSuccess(scanCtx)
 		}
@@ -2106,7 +2111,7 @@ func (a *App) ConfirmTMDBCandidate(request CandidateConfirmRequest) error {
 	if err := a.db.DeleteAIResolution(ctx, request.Filename); err != nil {
 		return err
 	}
-	needsTranslation := a.aiClient != nil && a.movieInfoNeedsTranslation(info)
+	needsTranslation := a.aiClient != nil && (existing.TitleUA == "" || needsTranslation(existing.TitleUA) || existing.Plot == "" || needsTranslation(existing.Plot))
 	if info.PosterURL != "" || needsTranslation {
 		filename, expectedID, expectedMediaType := request.Filename, request.TMDBID, string(mediaType)
 		posterURL := info.PosterURL
@@ -2296,7 +2301,20 @@ func fixSelectedCompletion(ctx context.Context, succeeded, failed int) (string, 
 // UpdateMovie — Wails API: оновлення одного запису за hint від користувача.
 func (a *App) UpdateMovie(filename, hint string) error {
 	ctx := utils.EnsureTrace(a.ctx)
-	return a.updateMovie(ctx, filename, hint)
+	if err := a.updateMovie(ctx, filename, hint); err != nil {
+		return err
+	}
+	if a.aiClient == nil {
+		return nil
+	}
+	movie, err := a.db.GetMovieByFilename(ctx, filename)
+	if err != nil {
+		return err
+	}
+	if movie != nil && movie.TmdbID > 0 && (movie.TitleUA == "" || needsTranslation(movie.TitleUA) || movie.Plot == "" || needsTranslation(movie.Plot)) {
+		a.processTranslationQueue(ctx, []string{filename}, a.aiClient, map[string]int{filename: movie.TmdbID})
+	}
+	return nil
 }
 
 // updateMovie — внутрішня реалізація з контекстом (FixSelected, тести).
@@ -2589,6 +2607,8 @@ func movieFromTMDB(fname string, info *tmdb.MovieInfo) storage.Movie {
 
 // applyTMDBToMovie — перезаписує поля movie з tmdbInfo (для ручного виправлення)
 func applyTMDBToMovie(movie *storage.Movie, info *tmdb.MovieInfo) {
+	sameIdentity := movie.TmdbID > 0 && movie.TmdbID == info.TMDBID && movie.MediaType == string(info.MediaType)
+	oldTitle, oldPlot := movie.TitleUA, movie.Plot
 	movie.TmdbID = info.TMDBID
 	movie.VoteAverage = info.VoteAverage
 	movie.VoteCount = info.VoteCount
@@ -2600,6 +2620,14 @@ func applyTMDBToMovie(movie *storage.Movie, info *tmdb.MovieInfo) {
 	movie.LocalPosterPath = info.LocalPosterPath
 	movie.TitleUA = info.TitleUA
 	movie.Plot = info.Plot
+	if sameIdentity {
+		if oldTitle != "" && !needsTranslation(oldTitle) && needsTranslation(movie.TitleUA) {
+			movie.TitleUA = oldTitle
+		}
+		if oldPlot != "" && !needsTranslation(oldPlot) && needsTranslation(movie.Plot) {
+			movie.Plot = oldPlot
+		}
+	}
 	movie.Genres = info.Genres
 	movie.Cast = info.Cast
 	movie.MediaType = string(info.MediaType)
@@ -2693,6 +2721,41 @@ func (a *App) movieInfoNeedsTranslation(info *tmdb.MovieInfo) bool {
 	needTitle := info.TitleUA == "" || needsTranslation(info.TitleUA)
 	needPlot := info.Plot == "" || needsTranslation(info.Plot)
 	return needTitle || needPlot
+}
+
+// localizeStoredMovies retries localization for recognized records from earlier scans.
+// Entries already attempted in this scan are excluded to avoid duplicate AI calls.
+func (a *App) localizeStoredMovies(ctx context.Context, attempted []string) {
+	if a.aiClient == nil || ctx.Err() != nil {
+		return
+	}
+	movies, err := a.db.GetAllMovies(ctx)
+	if err != nil {
+		utils.LoggerWithTrace(ctx).Warn("localization_backfill_read_failed", slog.Any("error", err))
+		return
+	}
+	excluded := make(map[string]struct{}, len(attempted))
+	for _, filename := range attempted {
+		excluded[filename] = struct{}{}
+	}
+	var queue []string
+	for _, movie := range movies {
+		if ctx.Err() != nil {
+			return
+		}
+		if movie.TmdbID <= 0 {
+			continue
+		}
+		if _, skip := excluded[movie.Filename]; skip {
+			continue
+		}
+		if movie.TitleUA == "" || needsTranslation(movie.TitleUA) || movie.Plot == "" || needsTranslation(movie.Plot) {
+			queue = append(queue, movie.Filename)
+		}
+	}
+	if len(queue) > 0 {
+		a.processTranslationQueue(ctx, queue, a.aiClient, nil)
+	}
 }
 
 // needsTranslation повертає true, якщо текст треба перекласти (англійська або підозріла кирилиця)
@@ -2844,9 +2907,11 @@ func (a *App) processTranslationQueue(ctx context.Context, filenames []string, a
 					changed = true
 				}
 			}
-			if res.Plot != "" && res.Plot != movie.Plot {
+			if res.Plot != "" && res.Plot != movie.Plot && !needsTranslation(res.Plot) {
 				movie.Plot = res.Plot
 				changed = true
+			} else if res.Plot != "" && needsTranslation(res.Plot) {
+				utils.LoggerWithTrace(ctx).Warn("translation_plot_not_ukrainian", slog.String("file", res.Filename))
 			}
 
 			if changed {
