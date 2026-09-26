@@ -4,7 +4,7 @@ import { GetAppVersion, GetMovies, GetStats, RunScan, StopScan, GetAIModelCatalo
 import { Quit, WindowMinimise, WindowToggleMaximise, EventsOn } from '../wailsjs/runtime/runtime.js';
 import logoUrl from './assets/images/appicon.png';
 import noPosterUrl from './assets/images/no-poster.jpg';
-import { candidateConfirmPayload, candidateSearchPayload, fixPayload, reviewReasonLabel, mediaTypeLabel, candidateTMDBURL, formatRuntime, formatTMDBRating, createRequestGate, candidateStatus, scanLifecycleTransition, cacheEditorValue, floatingPopoverPosition } from './editor-state.js';
+import { candidateConfirmPayload, candidateSearchPayload, fixPayload, reviewReasonLabel, mediaTypeLabel, candidateTMDBURL, formatRuntime, formatTMDBRating, createRequestGate, createAsyncVisibilityGate, candidateStatus, scanLifecycleTransition, cacheEditorValue, floatingPopoverPosition } from './editor-state.js';
 
 document.querySelector('#app').innerHTML = `
   <div class="titlebar">
@@ -325,7 +325,6 @@ document.getElementById('btn-select-folder').onclick = async () => {
         const path = await SelectMediaFolder();
         if (path) {
             logToConsole(`📁 Вибрана папка: ${path}`, "log-info");
-            // Тут можна зберегти path у конфіг, але поки що просто лог
         }
     } catch (err) {
         logToConsole(`❌ Помилка вибору папки: ${err}`, "log-error");
@@ -961,8 +960,10 @@ function attachRecognizedMoviePreview(link, movie) {
 	document.body.appendChild(popover);
 	let hideTimer;
 	let loadPromise;
+	const visibility = createAsyncVisibilityGate();
 	const show = async () => {
 		clearTimeout(hideTimer);
+		visibility.activate();
 		if (!loadPromise) {
 			popover.textContent = 'Завантаження…';
 			showFloatingPopover(link, popover);
@@ -971,14 +972,14 @@ function attachRecognizedMoviePreview(link, movie) {
 				.catch(err => { popover.textContent = `Не вдалося завантажити деталі: ${err}`; loadPromise = null; });
 			await loadPromise;
 		}
-		showFloatingPopover(link, popover);
+		if (visibility.isActive()) showFloatingPopover(link, popover);
 	};
-	const hide = () => { hideTimer = setTimeout(() => { popover.hidden = true; }, 120); };
+	const hide = () => { hideTimer = setTimeout(() => { visibility.deactivate(); popover.hidden = true; }, 120); };
 	link.addEventListener('mouseenter', show);
 	link.addEventListener('mouseleave', hide);
 	link.addEventListener('focus', show);
 	link.addEventListener('blur', hide);
-	popover.addEventListener('mouseenter', () => clearTimeout(hideTimer));
+	popover.addEventListener('mouseenter', () => { clearTimeout(hideTimer); visibility.activate(); });
 	popover.addEventListener('mouseleave', hide);
 }
 

@@ -87,6 +87,7 @@ type Client struct {
 	apiKey      string
 	postersDir  string
 	mediaRoot   string
+	mediaRootMu sync.RWMutex
 	rateLimiter *rate.Limiter
 
 	// altTitlesCache — кеш для аліасів, щоб не смикати API для однакових ID
@@ -137,6 +138,18 @@ func (c *Client) Close() {
 
 func (c *Client) SetTransport(tr http.RoundTripper) {
 	c.client.Transport = tr
+}
+
+func (c *Client) SetMediaRoot(root string) {
+	c.mediaRootMu.Lock()
+	c.mediaRoot = root
+	c.mediaRootMu.Unlock()
+}
+
+func (c *Client) mediaRootPath() string {
+	c.mediaRootMu.RLock()
+	defer c.mediaRootMu.RUnlock()
+	return c.mediaRoot
 }
 
 // ClearCaches — безпечне очищення кешу між скануваннями
@@ -233,6 +246,19 @@ func (c *Client) FetchFromParsed(ctx context.Context, parsed ParsedFile, filenam
 		slog.String("imdb_id", parsed.IMDBID),
 	)
 
+	// IMDb ID є авторитетнішим за кеш пошуку за назвою. Два однойменні твори
+	// можуть мати однаковий title/year/type, але різні IMDb identities.
+	if parsed.IMDBID != "" {
+		info, err := c.tryFindByIMDB(ctx, parsed.IMDBID, filename)
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		if err == nil && info != nil {
+			utils.LoggerWithTrace(ctx).Info("imdb_match_found", slog.String("imdb_id", parsed.IMDBID), slog.String("title", info.TitleUA))
+			return info, nil
+		}
+	}
+
 	// 🟢 ПЕРЕВІРКА КЕШУ: struct-ключ не потребує алокацій strings.ToLower або fmt.Sprintf
 	cacheKey := SearchCacheKey{
 		query:      strings.ToLower(parsed.CleanTitle),
@@ -245,18 +271,6 @@ func (c *Client) FetchFromParsed(ctx context.Context, parsed ParsedFile, filenam
 		info, _ := val.(*MovieInfo)
 		utils.LoggerWithTrace(ctx).Info("tmdb_l1_cache_hit", slog.String("title", parsed.CleanTitle))
 		return info, nil
-	}
-
-	// 1. Спроба 0: Прямий пошук по IMDb ID (найшвидший та найточніший)
-	if parsed.IMDBID != "" {
-		info, err := c.tryFindByIMDB(ctx, parsed.IMDBID, filename)
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
-		if err == nil && info != nil {
-			utils.LoggerWithTrace(ctx).Info("imdb_match_found", slog.String("imdb_id", parsed.IMDBID), slog.String("title", info.TitleUA))
-			return info, nil // Ранній вихід!
-		}
 	}
 
 	if parsed.CleanTitle == "" {

@@ -133,8 +133,6 @@ func (a *App) getDiskFiles(ctx context.Context) ([]string, error) {
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
 	a.cfg = config.Load()
-	a.tmdbClient = tmdb.NewClient(a.cfg)
-	a.aiClient = ai.NewClient(a.cfg)
 
 	var err error
 	a.db, err = storage.New(a.cfg.DBPath)
@@ -147,8 +145,23 @@ func (a *App) startup(ctx context.Context) {
 		slog.Error("db_schema_init_error", slog.Any("error", err))
 		os.Exit(1)
 	}
+	a.restoreMediaFolder(ctx)
+	a.tmdbClient = tmdb.NewClient(a.cfg)
+	a.aiClient = ai.NewClient(a.cfg)
 	if err := a.auditDuplicateMovieIdentities(ctx); err != nil {
 		slog.Warn("duplicate_identity_audit_failed", slog.Any("error", err))
+	}
+}
+
+func (a *App) restoreMediaFolder(ctx context.Context) {
+	selected := strings.TrimSpace(a.db.GetState(ctx, "media_folder_path"))
+	if selected == "" {
+		return
+	}
+	if info, err := os.Stat(selected); err == nil && info.IsDir() {
+		a.cfg.MediaFolderPath = selected
+	} else {
+		slog.Warn("saved_media_folder_unavailable", slog.String("path", selected), slog.Any("error", err))
 	}
 }
 
@@ -284,6 +297,34 @@ func (a *App) SelectMediaFolder() (string, error) {
 	if err != nil {
 		return "", err
 	}
+	if path == "" {
+		return "", nil
+	}
+	return a.setMediaFolder(path)
+}
+
+func (a *App) setMediaFolder(path string) (string, error) {
+	a.scanMutex.Lock()
+	defer a.scanMutex.Unlock()
+	if a.isScanning {
+		return "", fmt.Errorf("cannot change media folder while scanning")
+	}
+	path = filepath.Clean(path)
+	info, err := os.Stat(path)
+	if err != nil {
+		return "", fmt.Errorf("selected media folder: %w", err)
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("selected media path is not a directory")
+	}
+	if err := a.db.SetState(a.ctx, "media_folder_path", path); err != nil {
+		return "", fmt.Errorf("save selected media folder: %w", err)
+	}
+	a.cfg.MediaFolderPath = path
+	if a.tmdbClient != nil {
+		a.tmdbClient.SetMediaRoot(path)
+	}
+	slog.Info("media_folder_selected", slog.String("path", path))
 	return path, nil
 }
 func (a *App) OpenSheet() {
@@ -460,8 +501,8 @@ func (a *App) deployToGitHubPagesIn(workDir string) error {
 	}
 
 	// commit може повернути ненульовий код якщо "nothing to commit" — це не помилка
-	_ = run("git", "commit", "-m", fmt.Sprintf("Update mobile showcase %s",
-		time.Now().Format("2006-01-02 15:04")))
+	_ = run("git", "commit", "--only", "-m", fmt.Sprintf("Update mobile showcase %s",
+		time.Now().Format("2006-01-02 15:04")), "--", "index.html")
 
 	if err := run("git", "push", "origin", a.cfg.GitHubPagesBranch); err != nil {
 		return fmt.Errorf("push failed: %w", err)
@@ -1381,6 +1422,10 @@ func (a *App) processGeminiQueue(ctx context.Context, paths []string, aiClient *
 // мержить результати: TMDB має пріоритет, Gemini заповнює прогалини.
 // filePath — повний шлях або basename (для ParseFilename).
 func (a *App) mergeGeminiWithTMDB(ctx context.Context, filePath string, rec ai.RecognizedTitle) storage.Movie {
+	return a.mergeGeminiWithTMDBForType(ctx, filePath, rec, false)
+}
+
+func (a *App) mergeGeminiWithTMDBForType(ctx context.Context, filePath string, rec ai.RecognizedTitle, strictMediaType bool) storage.Movie {
 	fname := a.getFileIdentifier(filePath)
 	logger := utils.LoggerWithTrace(ctx).With(
 		slog.String("file", fname),
@@ -1454,7 +1499,7 @@ func (a *App) mergeGeminiWithTMDB(ctx context.Context, filePath string, rec ai.R
 	if rec.Year != nil {
 		targetYear = *rec.Year
 	}
-	tmdbInfo, err := a.tmdbClient.SearchExactTitle(ctx, rec.ENTitle, targetYear, mt, false, filePath)
+	tmdbInfo, err := a.tmdbClient.SearchExactTitle(ctx, rec.ENTitle, targetYear, mt, strictMediaType, filePath)
 	if err == nil && tmdbInfo != nil {
 		logger.Info("gemini_merge_exact_candidate_selected",
 			slog.Int("tmdb_id", tmdbInfo.TMDBID),
@@ -1463,7 +1508,7 @@ func (a *App) mergeGeminiWithTMDB(ctx context.Context, filePath string, rec ai.R
 			slog.String("matched_alias", tmdbInfo.MatchedAlias),
 		)
 	}
-	if tmdbInfo == nil && err == nil {
+	if tmdbInfo == nil && err == nil && !strictMediaType {
 		tmdbInfo, err = a.tmdbClient.FetchByCleanTitle(ctx, rec.ENTitle, yearStr, mt)
 	}
 	if err != nil {
@@ -1471,7 +1516,7 @@ func (a *App) mergeGeminiWithTMDB(ctx context.Context, filePath string, rec ai.R
 		a.logFront(fmt.Sprintf("⚠️ TMDB помилка для '%s': %v", rec.ENTitle, err))
 	}
 
-	if tmdbInfo == nil && err == nil && mt == tmdb.MediaTypeMovie && ctx.Err() == nil {
+	if tmdbInfo == nil && err == nil && !strictMediaType && mt == tmdb.MediaTypeMovie && ctx.Err() == nil {
 		logger.Info("gemini_merge_tv_retry")
 		tmdbInfo, err = a.tmdbClient.FetchByCleanTitle(ctx, rec.ENTitle, yearStr, tmdb.MediaTypeTV)
 		if err != nil {
@@ -2063,7 +2108,7 @@ func (a *App) ConfirmTMDBCandidate(request CandidateConfirmRequest) error {
 	}
 	needsTranslation := a.aiClient != nil && a.movieInfoNeedsTranslation(info)
 	if info.PosterURL != "" || needsTranslation {
-		filename, expectedID := request.Filename, request.TMDBID
+		filename, expectedID, expectedMediaType := request.Filename, request.TMDBID, string(mediaType)
 		posterURL := info.PosterURL
 		a.wg.Add(1)
 		go func() {
@@ -2076,7 +2121,7 @@ func (a *App) ConfirmTMDBCandidate(request CandidateConfirmRequest) error {
 				localPath, posterErr := a.tmdbClient.DownloadPoster(backgroundCtx, posterURL, fmt.Sprintf("%d_%s", expectedID, filename))
 				if posterErr != nil {
 					utils.LoggerWithTrace(backgroundCtx).Warn("candidate_poster_failed", slog.String("file", filename), slog.Any("error", posterErr))
-				} else if current, ok := a.currentTranslationTarget(backgroundCtx, filename, expectedID); ok {
+				} else if current, ok := a.currentTranslationTarget(backgroundCtx, filename, expectedID, expectedMediaType); ok {
 					current.LocalPosterPath = localPath
 					if err := a.db.SaveMoviesBatch(backgroundCtx, []storage.Movie{current}); err != nil {
 						utils.LoggerWithTrace(backgroundCtx).Warn("candidate_poster_save_failed", slog.String("file", filename), slog.Any("error", err))
@@ -2159,7 +2204,7 @@ func (a *App) FixSelected(selected []FixRequest) {
 		if lookupErr != nil {
 			utils.LoggerWithTrace(ctx).Warn("fix_selected_existing_lookup_failed", slog.String("file", s.Filename), slog.Any("error", lookupErr))
 		}
-		if (s.Hint != "" && s.Hint != "skip") || (existing != nil && existing.TmdbID > 0) {
+		if fixRequestUsesDirectPath(s, existing) {
 			withHint = append(withHint, s)
 		} else {
 			geminiQueue = append(geminiQueue, filepath.Join(a.cfg.MediaFolderPath, s.Filename))
@@ -2222,13 +2267,30 @@ func (a *App) FixSelected(selected []FixRequest) {
 	if len(translationQueue) > 0 {
 		a.processTranslationQueue(ctx, translationQueue, a.aiClient, nil)
 	}
+	message, success := fixSelectedCompletion(ctx, succeeded, failed)
+	if !success {
+		a.finalizeScan(message, false)
+		return
+	}
 
 	utils.LoggerWithTrace(ctx).Info("fix_selected_completed",
 		slog.Int("requested", total),
 		slog.Int("resolved", succeeded),
 		slog.Int("unresolved", failed),
 	)
-	a.finalizeScan(fmt.Sprintf("Успішно виправлено: %d; не виправлено: %d", succeeded, failed), true)
+	a.finalizeScan(message, true)
+}
+
+func fixRequestUsesDirectPath(request FixRequest, existing *storage.Movie) bool {
+	requestedType := strings.ToLower(strings.TrimSpace(request.MediaType))
+	return (request.Hint != "" && request.Hint != "skip") || requestedType == "movie" || requestedType == "tv" || (existing != nil && existing.TmdbID > 0)
+}
+
+func fixSelectedCompletion(ctx context.Context, succeeded, failed int) (string, bool) {
+	if ctx.Err() != nil {
+		return "Виправлення перервано користувачем", false
+	}
+	return fmt.Sprintf("Успішно виправлено: %d; не виправлено: %d", succeeded, failed), true
 }
 
 // UpdateMovie — Wails API: оновлення одного запису за hint від користувача.
@@ -2254,6 +2316,7 @@ func (a *App) updateMovieWithMediaType(ctx context.Context, filename, hint, requ
 		existing = &storage.Movie{Filename: filename}
 	}
 	requestedMediaType = strings.ToLower(strings.TrimSpace(requestedMediaType))
+	strictMediaType := requestedMediaType == "movie" || requestedMediaType == "tv"
 	if hint == "" && existing.TmdbID > 0 && (requestedMediaType == "movie" || requestedMediaType == "tv") && requestedMediaType == existing.MediaType {
 		existing.NeedsReview = false
 		existing.ReviewReason = ""
@@ -2378,9 +2441,13 @@ func (a *App) updateMovieWithMediaType(ctx context.Context, filename, hint, requ
 	}
 
 	a.logFront(fmt.Sprintf("🤖 Gemini: '%s' → '%s'", filename, rec.ENTitle))
-	rec = preserveRecognizedContext(rec, existing)
-	movie := a.mergeGeminiWithTMDB(ctx, filepath.Join(a.cfg.MediaFolderPath, filename), rec)
-	if identityReplacementConflicts(existing, movie) {
+	if strictMediaType {
+		rec.MediaType = requestedMediaType
+	} else {
+		rec = preserveRecognizedContext(rec, existing)
+	}
+	movie := a.mergeGeminiWithTMDBForType(ctx, filepath.Join(a.cfg.MediaFolderPath, filename), rec, strictMediaType)
+	if !strictMediaType && identityReplacementConflicts(existing, movie) {
 		utils.LoggerWithTrace(ctx).Warn("identity_replacement_rejected",
 			slog.String("file", filename), slog.Int("old_tmdb_id", existing.TmdbID), slog.String("old_media_type", existing.MediaType), slog.String("old_year", existing.Year),
 			slog.Int("new_tmdb_id", movie.TmdbID), slog.String("new_media_type", movie.MediaType), slog.String("new_year", movie.Year))
@@ -2411,12 +2478,15 @@ func (a *App) updateMovieWithMediaType(ctx context.Context, filename, hint, requ
 		}
 	}
 
-	// Зберігаємо існуючі поля якщо нові порожні
-	if movie.TitleUA == "" {
-		movie.TitleUA = existing.TitleUA
-	}
-	if movie.Plot == "" {
-		movie.Plot = existing.Plot
+	// Доповнюємо прогалини лише для тієї самої identity. Під час ручної
+	// заміни типу/ID метадані попереднього твору не повинні переноситися.
+	if sameMovieIdentity(existing, movie) {
+		if movie.TitleUA == "" {
+			movie.TitleUA = existing.TitleUA
+		}
+		if movie.Plot == "" {
+			movie.Plot = existing.Plot
+		}
 	}
 
 	if movie.TmdbID == 0 && existing.TmdbID > 0 {
@@ -2441,6 +2511,10 @@ func preserveRecognizedContext(rec ai.RecognizedTitle, existing *storage.Movie) 
 func identityReplacementConflicts(existing *storage.Movie, replacement storage.Movie) bool {
 	return existing != nil && existing.TmdbID > 0 && replacement.TmdbID > 0 &&
 		(replacement.TmdbID != existing.TmdbID || replacement.MediaType != existing.MediaType)
+}
+
+func sameMovieIdentity(existing *storage.Movie, replacement storage.Movie) bool {
+	return existing != nil && existing.TmdbID > 0 && replacement.TmdbID == existing.TmdbID && replacement.MediaType == existing.MediaType
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -2524,18 +2598,10 @@ func applyTMDBToMovie(movie *storage.Movie, info *tmdb.MovieInfo) {
 	movie.Year = info.Year
 	movie.PosterURL = info.PosterURL
 	movie.LocalPosterPath = info.LocalPosterPath
-	if info.TitleUA != "" {
-		movie.TitleUA = info.TitleUA
-	}
-	if info.Plot != "" {
-		movie.Plot = info.Plot
-	}
-	if info.Genres != "" {
-		movie.Genres = info.Genres
-	}
-	if info.Cast != "" {
-		movie.Cast = info.Cast
-	}
+	movie.TitleUA = info.TitleUA
+	movie.Plot = info.Plot
+	movie.Genres = info.Genres
+	movie.Cast = info.Cast
 	movie.MediaType = string(info.MediaType)
 }
 
@@ -2750,7 +2816,8 @@ func (a *App) processTranslationQueue(ctx context.Context, filenames []string, a
 				continue
 			}
 			if expectedID, guarded := expectedTMDBIDs[res.Filename]; guarded {
-				current, currentTarget := translationTargetCurrent(currentMovies, res.Filename, expectedID)
+				expectedMediaType := movie.MediaType
+				current, currentTarget := translationTargetCurrent(currentMovies, res.Filename, expectedID, expectedMediaType)
 				if !currentTarget {
 					utils.LoggerWithTrace(ctx).Info("candidate_translation_stale_skipped", slog.String("file", res.Filename), slog.Int("expected_tmdb_id", expectedID))
 					continue
@@ -2801,16 +2868,16 @@ func (a *App) processTranslationQueue(ctx context.Context, filenames []string, a
 	}
 }
 
-func translationTargetCurrent(movies map[string]storage.Movie, filename string, expectedTMDBID int) (storage.Movie, bool) {
+func translationTargetCurrent(movies map[string]storage.Movie, filename string, expectedTMDBID int, expectedMediaType string) (storage.Movie, bool) {
 	movie, exists := movies[filename]
-	return movie, exists && movie.TmdbID == expectedTMDBID
+	return movie, exists && movie.TmdbID == expectedTMDBID && movie.MediaType == expectedMediaType
 }
 
-func (a *App) currentTranslationTarget(ctx context.Context, filename string, expectedTMDBID int) (storage.Movie, bool) {
+func (a *App) currentTranslationTarget(ctx context.Context, filename string, expectedTMDBID int, expectedMediaType string) (storage.Movie, bool) {
 	movies, err := a.db.GetMoviesByFilenames(ctx, []string{filename})
 	if err != nil {
 		utils.LoggerWithTrace(ctx).Warn("candidate_background_guard_failed", slog.String("file", filename), slog.Any("error", err))
 		return storage.Movie{}, false
 	}
-	return translationTargetCurrent(movies, filename, expectedTMDBID)
+	return translationTargetCurrent(movies, filename, expectedTMDBID, expectedMediaType)
 }

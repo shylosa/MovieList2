@@ -200,6 +200,8 @@ GITHUB_PAGES_BRANCH=main
 
 ## Active Work — MovieList 2.6.0
 
+The project-scoped `reviewer` custom agent is defined in `.codex/agents/reviewer.toml`. Run it only when the user explicitly requests a review; it is read-only and reports actionable findings without changing files.
+
 `APP_VERSION=2.6.0` is the current release value. `internal/config/config.go` supplies the default; a local `.env` or process environment can override it. Keep the Wails window title, frontend HTML title, npm package metadata, `.env.example`, README and release notes aligned when changing the version.
 
 The active recognition specification is `CHECKLIST.md` (gitignored by design), currently Round 29 transliteration improvements. Its remaining production-log checks and persisted-model cleanup require a real-library run. `DESIGN_CHECKLIST.md` tracks the desktop UI refresh and its remaining visual runtime check.

@@ -1,6 +1,6 @@
 import assert from 'assert';
 import { readFileSync } from 'fs';
-import { candidateConfirmPayload, candidateSearchPayload, fixPayload, reviewCounts, reviewReasonLabel, mediaTypeLabel, candidateTMDBURL, formatRuntime, formatTMDBRating, createRequestGate, candidateStatus, scanLifecycleTransition, cacheEditorValue, floatingPopoverPosition } from './editor-state.js';
+import { candidateConfirmPayload, candidateSearchPayload, fixPayload, reviewCounts, reviewReasonLabel, mediaTypeLabel, candidateTMDBURL, formatRuntime, formatTMDBRating, createRequestGate, createAsyncVisibilityGate, candidateStatus, scanLifecycleTransition, cacheEditorValue, floatingPopoverPosition } from './editor-state.js';
 
 assert.deepStrictEqual(candidateSearchPayload('a.mkv', {'a.mkv': 'The Bureau'}, {'a.mkv': 'tv'}), {filename: 'a.mkv', title: 'The Bureau', media_type: 'tv'});
 assert.strictEqual(reviewReasonLabel('identity_conflict'), 'відхилено автоматичну заміну ідентичності');
@@ -22,6 +22,11 @@ assert.strictEqual(gate.begin('a.mkv'), true);
 assert.strictEqual(gate.begin('a.mkv'), false);
 gate.end('a.mkv');
 assert.strictEqual(gate.begin('a.mkv'), true);
+const visibility = createAsyncVisibilityGate();
+visibility.activate();
+assert.strictEqual(visibility.isActive(), true);
+visibility.deactivate();
+assert.strictEqual(visibility.isActive(), false);
 assert.deepStrictEqual(candidateStatus([]), {kind: 'empty', text: 'Нічого не знайдено'});
 assert.strictEqual(candidateStatus(null, 'network').kind, 'error');
 assert.strictEqual(candidateStatus([{}]).kind, 'ready');

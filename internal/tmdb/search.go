@@ -382,7 +382,7 @@ func (c *Client) SearchWithFallbacks(
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	attempts := buildAttempts(parsed, originalFilename, c.mediaRoot)
+	attempts := buildAttempts(parsed, originalFilename, c.mediaRootPath())
 
 	for _, a := range attempts {
 		if err := ctx.Err(); err != nil {

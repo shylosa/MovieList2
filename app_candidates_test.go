@@ -222,12 +222,24 @@ func TestConfirmCandidateReturnsBeforeBackgroundTranslation(t *testing.T) {
 }
 
 func TestBackgroundTranslationRejectsStaleCandidate(t *testing.T) {
-	movies := map[string]storage.Movie{"Film.mkv": {Filename: "Film.mkv", TmdbID: 22}}
-	if _, ok := translationTargetCurrent(movies, "Film.mkv", 11); ok {
+	movies := map[string]storage.Movie{"Film.mkv": {Filename: "Film.mkv", TmdbID: 22, MediaType: "tv"}}
+	if _, ok := translationTargetCurrent(movies, "Film.mkv", 11, "tv"); ok {
 		t.Fatal("translation for replaced TMDB candidate was accepted")
 	}
-	if movie, ok := translationTargetCurrent(movies, "Film.mkv", 22); !ok || movie.TmdbID != 22 {
+	if _, ok := translationTargetCurrent(movies, "Film.mkv", 22, "movie"); ok {
+		t.Fatal("translation for a different media type with the same numeric ID was accepted")
+	}
+	if movie, ok := translationTargetCurrent(movies, "Film.mkv", 22, "tv"); !ok || movie.TmdbID != 22 {
 		t.Fatalf("current translation target rejected: movie=%+v ok=%v", movie, ok)
+	}
+}
+
+func TestExplicitMediaTypeWithoutHintUsesDirectFixPath(t *testing.T) {
+	if !fixRequestUsesDirectPath(FixRequest{Filename: "Unknown.mkv", MediaType: "tv"}, nil) {
+		t.Fatal("explicit TV type without a hint was routed to the untyped Gemini batch")
+	}
+	if fixRequestUsesDirectPath(FixRequest{Filename: "Unknown.mkv", MediaType: "auto"}, nil) {
+		t.Fatal("auto request without a hint should retain the batch fallback")
 	}
 }
 

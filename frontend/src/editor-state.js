@@ -51,6 +51,15 @@ export function createRequestGate() {
     };
 }
 
+export function createAsyncVisibilityGate() {
+    let active = false;
+    return {
+        activate() { active = true; },
+        deactivate() { active = false; },
+        isActive() { return active; },
+    };
+}
+
 export function candidateStatus(candidates, error = null) {
     if (error) return {kind: 'error', text: `Помилка пошуку: ${error}`};
     if (!candidates || candidates.length === 0) return {kind: 'empty', text: 'Нічого не знайдено'};

@@ -170,6 +170,48 @@ func TestSaveMoviesBatchUnresolvedDoesNotDowngradeRecognized(t *testing.T) {
 	}
 }
 
+func TestSaveMoviesBatchIdentityReplacementClearsOldMetadata(t *testing.T) {
+	ctx := context.Background()
+	db, err := New(filepath.Join(t.TempDir(), "movies.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.InitSchema(ctx); err != nil {
+		t.Fatal(err)
+	}
+	filename := "Collision.mkv"
+	old := Movie{Filename: filename, TmdbID: 1, MediaType: "movie", TitleUA: "Стара назва", TitleEN: "Old", Year: "2020", Plot: "Old plot", Genres: "Old genres", Cast: "Old cast", PosterURL: "old.jpg", LocalPosterPath: "old-local.jpg", VoteAverage: 8.5, VoteCount: 100}
+	if err := db.SaveMoviesBatch(ctx, []Movie{old}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SaveMoviesBatch(ctx, []Movie{{Filename: filename, TmdbID: 2, MediaType: "tv", TitleEN: "New"}}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := db.GetMovieByFilename(ctx, filename)
+	if err != nil || got == nil {
+		t.Fatalf("replacement lookup: movie=%+v err=%v", got, err)
+	}
+	if got.TmdbID != 2 || got.MediaType != "tv" || got.TitleEN != "New" {
+		t.Fatalf("replacement identity not saved: %+v", got)
+	}
+	if got.TitleUA != "" || got.Year != "" || got.Plot != "" || got.Genres != "" || got.Cast != "" || got.PosterURL != "" || got.LocalPosterPath != "" || got.VoteAverage != 0 || got.VoteCount != 0 {
+		t.Fatalf("old identity metadata leaked into replacement: %+v", got)
+	}
+
+	got.Plot = "Fresh plot"
+	if err := db.SaveMoviesBatch(ctx, []Movie{*got}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SaveMoviesBatch(ctx, []Movie{{Filename: filename, TmdbID: 2, MediaType: "tv", TitleEN: "New"}}); err != nil {
+		t.Fatal(err)
+	}
+	got, err = db.GetMovieByFilename(ctx, filename)
+	if err != nil || got == nil || got.Plot != "Fresh plot" {
+		t.Fatalf("same identity should merge missing metadata: movie=%+v err=%v", got, err)
+	}
+}
+
 func TestPatchMovie_MergesNonEmptyFields(t *testing.T) {
 	ctx := context.Background()
 

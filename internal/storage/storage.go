@@ -69,32 +69,36 @@ const movieUpsertQuery = `
 		tmdb_id = CASE WHEN excluded.tmdb_id != 0 THEN excluded.tmdb_id ELSE movies.tmdb_id END,
 		title_ua = CASE
 			WHEN excluded.tmdb_id = 0 AND movies.tmdb_id > 0 THEN movies.title_ua
+			WHEN excluded.tmdb_id > 0 AND (excluded.tmdb_id != movies.tmdb_id OR (movies.media_type != '' AND excluded.media_type != '' AND excluded.media_type != movies.media_type)) THEN excluded.title_ua
 			ELSE COALESCE(NULLIF(excluded.title_ua, ''), movies.title_ua)
 		END,
 		title_en = CASE
 			WHEN excluded.tmdb_id = 0 AND movies.tmdb_id > 0 THEN movies.title_en
+			WHEN excluded.tmdb_id > 0 AND (excluded.tmdb_id != movies.tmdb_id OR (movies.media_type != '' AND excluded.media_type != '' AND excluded.media_type != movies.media_type)) THEN excluded.title_en
 			ELSE COALESCE(NULLIF(excluded.title_en, ''), movies.title_en)
 		END,
 		year = CASE
 			WHEN excluded.tmdb_id = 0 AND movies.tmdb_id > 0 THEN movies.year
+			WHEN excluded.tmdb_id > 0 AND (excluded.tmdb_id != movies.tmdb_id OR (movies.media_type != '' AND excluded.media_type != '' AND excluded.media_type != movies.media_type)) THEN excluded.year
 			ELSE COALESCE(NULLIF(excluded.year, ''), movies.year)
 		END,
-		genres = COALESCE(NULLIF(excluded.genres, ''), movies.genres),
-		"cast" = COALESCE(NULLIF(excluded."cast", ''), movies."cast"),
-		plot = COALESCE(NULLIF(excluded.plot, ''), movies.plot),
-		poster_url = COALESCE(NULLIF(excluded.poster_url, ''), movies.poster_url),
-		local_poster_path = COALESCE(NULLIF(excluded.local_poster_path, ''), movies.local_poster_path),
+		genres = CASE WHEN excluded.tmdb_id > 0 AND (excluded.tmdb_id != movies.tmdb_id OR (movies.media_type != '' AND excluded.media_type != '' AND excluded.media_type != movies.media_type)) THEN excluded.genres ELSE COALESCE(NULLIF(excluded.genres, ''), movies.genres) END,
+		"cast" = CASE WHEN excluded.tmdb_id > 0 AND (excluded.tmdb_id != movies.tmdb_id OR (movies.media_type != '' AND excluded.media_type != '' AND excluded.media_type != movies.media_type)) THEN excluded."cast" ELSE COALESCE(NULLIF(excluded."cast", ''), movies."cast") END,
+		plot = CASE WHEN excluded.tmdb_id > 0 AND (excluded.tmdb_id != movies.tmdb_id OR (movies.media_type != '' AND excluded.media_type != '' AND excluded.media_type != movies.media_type)) THEN excluded.plot ELSE COALESCE(NULLIF(excluded.plot, ''), movies.plot) END,
+		poster_url = CASE WHEN excluded.tmdb_id > 0 AND (excluded.tmdb_id != movies.tmdb_id OR (movies.media_type != '' AND excluded.media_type != '' AND excluded.media_type != movies.media_type)) THEN excluded.poster_url ELSE COALESCE(NULLIF(excluded.poster_url, ''), movies.poster_url) END,
+		local_poster_path = CASE WHEN excluded.tmdb_id > 0 AND (excluded.tmdb_id != movies.tmdb_id OR (movies.media_type != '' AND excluded.media_type != '' AND excluded.media_type != movies.media_type)) THEN excluded.local_poster_path ELSE COALESCE(NULLIF(excluded.local_poster_path, ''), movies.local_poster_path) END,
 		media_type = COALESCE(NULLIF(excluded.media_type, ''), movies.media_type),
 		recognition_source = CASE
 			WHEN excluded.tmdb_id = 0 AND movies.tmdb_id > 0 THEN movies.recognition_source
+			WHEN excluded.tmdb_id > 0 AND (excluded.tmdb_id != movies.tmdb_id OR (movies.media_type != '' AND excluded.media_type != '' AND excluded.media_type != movies.media_type)) THEN excluded.recognition_source
 			ELSE COALESCE(NULLIF(excluded.recognition_source, ''), movies.recognition_source)
 		END,
 		recognition_confidence = CASE WHEN excluded.tmdb_id = 0 AND movies.tmdb_id > 0 THEN movies.recognition_confidence ELSE excluded.recognition_confidence END,
 		verification_score = CASE WHEN excluded.tmdb_id = 0 AND movies.tmdb_id > 0 THEN movies.verification_score ELSE excluded.verification_score END,
 		needs_review = CASE WHEN excluded.tmdb_id = 0 AND movies.tmdb_id > 0 THEN movies.needs_review ELSE excluded.needs_review END,
 		review_reason = CASE WHEN excluded.tmdb_id = 0 AND movies.tmdb_id > 0 THEN movies.review_reason ELSE excluded.review_reason END,
-		vote_average = CASE WHEN excluded.vote_average > 0 THEN excluded.vote_average ELSE movies.vote_average END,
-		vote_count = CASE WHEN excluded.vote_count > 0 THEN excluded.vote_count ELSE movies.vote_count END
+		vote_average = CASE WHEN excluded.tmdb_id > 0 AND (excluded.tmdb_id != movies.tmdb_id OR (movies.media_type != '' AND excluded.media_type != '' AND excluded.media_type != movies.media_type)) THEN excluded.vote_average WHEN excluded.vote_average > 0 THEN excluded.vote_average ELSE movies.vote_average END,
+		vote_count = CASE WHEN excluded.tmdb_id > 0 AND (excluded.tmdb_id != movies.tmdb_id OR (movies.media_type != '' AND excluded.media_type != '' AND excluded.media_type != movies.media_type)) THEN excluded.vote_count WHEN excluded.vote_count > 0 THEN excluded.vote_count ELSE movies.vote_count END
 `
 
 func New(dbPath string) (*DB, error) {

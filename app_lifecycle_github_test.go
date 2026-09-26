@@ -192,7 +192,7 @@ func TestSyncToGitHubCommandOrderAndMobileOutput(t *testing.T) {
 	if !success {
 		t.Fatal(msg)
 	}
-	want := []string{"git rev-parse --show-toplevel", "git add -f index.html", "git commit -m Update mobile showcase", "git push origin pages-test"}
+	want := []string{"git rev-parse --show-toplevel", "git add -f index.html", "git commit --only -m Update mobile showcase", "git push origin pages-test"}
 	if len(calls) != len(want) {
 		t.Fatalf("calls = %v", calls)
 	}
@@ -201,6 +201,9 @@ func TestSyncToGitHubCommandOrderAndMobileOutput(t *testing.T) {
 			t.Fatalf("call[%d] = %q; want prefix %q", i, calls[i], want[i])
 		}
 	}
+	if !strings.HasSuffix(calls[2], "-- index.html") {
+		t.Fatalf("showcase commit is not path-limited: %q", calls[2])
+	}
 	content, err := os.ReadFile(filepath.Join(repo, "index.html"))
 	if err != nil {
 		t.Fatal(err)
@@ -208,6 +211,35 @@ func TestSyncToGitHubCommandOrderAndMobileOutput(t *testing.T) {
 	html := string(content)
 	if !strings.Contains(html, "https://image.example/enemy.jpg") || strings.Contains(html, "posters/local.jpg") {
 		t.Fatal("mobile showcase did not use the TMDB CDN poster URL")
+	}
+}
+
+func TestSetMediaFolderAppliesAndPersistsSelection(t *testing.T) {
+	a, _ := newTestAppDB(t, nil)
+	mediaDir := t.TempDir()
+	got, err := a.setMediaFolder(mediaDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != filepath.Clean(mediaDir) || a.cfg.MediaFolderPath != got {
+		t.Fatalf("selected folder not applied: got=%q cfg=%q", got, a.cfg.MediaFolderPath)
+	}
+	if saved := a.db.GetState(context.Background(), "media_folder_path"); saved != got {
+		t.Fatalf("selected folder not persisted: got %q want %q", saved, got)
+	}
+	a.cfg.MediaFolderPath = "from-env"
+	a.restoreMediaFolder(context.Background())
+	if a.cfg.MediaFolderPath != got {
+		t.Fatalf("persisted folder not restored: got %q want %q", a.cfg.MediaFolderPath, got)
+	}
+}
+
+func TestFixSelectedCompletionTreatsCancellationAsFailure(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	message, success := fixSelectedCompletion(ctx, 2, 1)
+	if success || !strings.Contains(message, "перервано") {
+		t.Fatalf("cancelled completion: message=%q success=%v", message, success)
 	}
 }
 

@@ -139,6 +139,49 @@ func TestUpdateMovieAuthoritativeManualTitleNeverCallsGemini(t *testing.T) {
 	}
 }
 
+func TestMergeGeminiWithTMDBStrictTypeUsesOnlyRequestedEndpoint(t *testing.T) {
+	ctx := context.Background()
+	movieCalled := false
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/search/movie"):
+			movieCalled = true
+			io.WriteString(w, `{"results":[{"id":802663,"title":"The Bureau","original_title":"The Bureau","release_date":"2020-01-01"}]}`)
+		case strings.HasSuffix(r.URL.Path, "/search/tv"):
+			io.WriteString(w, `{"results":[{"id":62476,"name":"The Bureau","original_name":"Le Bureau des légendes","first_air_date":"2015-04-27","popularity":35}]}`)
+		case strings.HasSuffix(r.URL.Path, "/tv/62476"):
+			io.WriteString(w, `{"id":62476,"name":"The Bureau","original_name":"Le Bureau des légendes","first_air_date":"2015-04-27"}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	u, _ := url.Parse(server.URL)
+	cfg := &config.Config{TMDBAPIKey: "fake", PostersDir: t.TempDir(), MediaFolderPath: t.TempDir()}
+	client := tmdb.NewClient(cfg)
+	defer client.Close()
+	client.SetTransport(&mockTransport{base: http.DefaultTransport, scheme: u.Scheme, host: u.Host})
+	app := NewApp()
+	app.ctx, app.cfg, app.tmdbClient = ctx, cfg, client
+	app.eventEmitter = func(context.Context, string, ...interface{}) {}
+	year := 2015
+	got := app.mergeGeminiWithTMDBForType(ctx, filepath.Join(cfg.MediaFolderPath, "The.Bureau.2015.mkv"), ai.RecognizedTitle{ENTitle: "The Bureau", Year: &year, MediaType: "tv", Status: "resolved", Confidence: 1}, true)
+	if movieCalled || got.TmdbID != 62476 || got.MediaType != "tv" {
+		t.Fatalf("strict type lookup: movieCalled=%v movie=%+v", movieCalled, got)
+	}
+}
+
+func TestSameMovieIdentityRequiresTypeAndID(t *testing.T) {
+	existing := &storage.Movie{TmdbID: 22, MediaType: "movie"}
+	if !sameMovieIdentity(existing, storage.Movie{TmdbID: 22, MediaType: "movie"}) {
+		t.Fatal("same identity was not recognized")
+	}
+	if sameMovieIdentity(existing, storage.Movie{TmdbID: 22, MediaType: "tv"}) || sameMovieIdentity(existing, storage.Movie{TmdbID: 23, MediaType: "movie"}) {
+		t.Fatal("different identity was treated as the same movie")
+	}
+}
+
 func TestMergeGeminiWithTMDBAcceptsTVWhenGeminiSaysMovie(t *testing.T) {
 	ctx := context.Background()
 	year := 2025
