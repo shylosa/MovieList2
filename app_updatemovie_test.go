@@ -208,6 +208,18 @@ func TestSameMovieIdentityRequiresTypeAndID(t *testing.T) {
 	}
 }
 
+func TestNeedsStoredLocalizationSkipsMissingPlotWithUkrainianTitle(t *testing.T) {
+	if needsStoredLocalization("Майстер і Маргарита", "") {
+		t.Fatal("a missing plot alone must not trigger another AI call on every scan")
+	}
+	if !needsStoredLocalization("", "") {
+		t.Fatal("a missing Ukrainian title still needs localization")
+	}
+	if !needsStoredLocalization("Майстер і Маргарита", "A story about a writer in Moscow.") {
+		t.Fatal("an existing English plot still needs translation")
+	}
+}
+
 func TestMergeGeminiWithTMDBAcceptsTVWhenGeminiSaysMovie(t *testing.T) {
 	ctx := context.Background()
 	year := 2025

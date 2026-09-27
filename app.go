@@ -132,7 +132,9 @@ func (a *App) getDiskFiles(ctx context.Context) ([]string, error) {
 
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
-	a.cfg = config.Load()
+	if a.cfg == nil {
+		a.cfg = config.Load()
+	}
 
 	var err error
 	a.db, err = storage.New(a.cfg.DBPath)
@@ -2729,33 +2731,30 @@ func (a *App) localizeStoredMovies(ctx context.Context, attempted []string) {
 	if a.aiClient == nil || ctx.Err() != nil {
 		return
 	}
-	movies, err := a.db.GetAllMovies(ctx)
-	if err != nil {
-		utils.LoggerWithTrace(ctx).Warn("localization_backfill_read_failed", slog.Any("error", err))
-		return
-	}
 	excluded := make(map[string]struct{}, len(attempted))
 	for _, filename := range attempted {
 		excluded[filename] = struct{}{}
 	}
 	var queue []string
-	for _, movie := range movies {
-		if ctx.Err() != nil {
-			return
+	err := a.db.ForEachRecognizedLocalization(ctx, func(filename, titleUA, plot string) error {
+		if _, skip := excluded[filename]; !skip && needsStoredLocalization(titleUA, plot) {
+			queue = append(queue, filename)
 		}
-		if movie.TmdbID <= 0 {
-			continue
+		return nil
+	})
+	if err != nil {
+		if ctx.Err() == nil {
+			utils.LoggerWithTrace(ctx).Warn("localization_backfill_read_failed", slog.Any("error", err))
 		}
-		if _, skip := excluded[movie.Filename]; skip {
-			continue
-		}
-		if movie.TitleUA == "" || needsTranslation(movie.TitleUA) || movie.Plot == "" || needsTranslation(movie.Plot) {
-			queue = append(queue, movie.Filename)
-		}
+		return
 	}
 	if len(queue) > 0 {
 		a.processTranslationQueue(ctx, queue, a.aiClient, nil)
 	}
+}
+
+func needsStoredLocalization(titleUA, plot string) bool {
+	return titleUA == "" || needsTranslation(titleUA) || (plot != "" && needsTranslation(plot))
 }
 
 // needsTranslation повертає true, якщо текст треба перекласти (англійська або підозріла кирилиця)

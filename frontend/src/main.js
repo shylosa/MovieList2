@@ -57,7 +57,7 @@ document.querySelector('#app').innerHTML = `
         </div>
 
         <div class="sidebar-footer">
-            © 2026 <a href="#" onclick="window.go.main.App.OpenGitHubRepo(); return false;">shylosa</a>
+            © 2026 <a href="#" id="sidebar-author-link">shylosa</a>
         </div>
     </div>
     <div class="main-area library-active">
@@ -307,6 +307,10 @@ if (btnOpenProject) {
         OpenGitHubRepo();
     };
 }
+document.getElementById('sidebar-author-link').addEventListener('click', event => {
+    event.preventDefault();
+    OpenGitHubRepo();
+});
 
 const btnOpenPage = document.getElementById('btn-open-page');
 if (btnOpenPage) {

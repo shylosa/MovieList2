@@ -141,13 +141,13 @@ func TestSaveMoviesBatchUnresolvedDoesNotDowngradeRecognized(t *testing.T) {
 	}
 
 	if err := db.SaveMoviesBatch(ctx, []Movie{
-		{Filename: "Series/episode01.mkv", TmdbID: 101, TitleUA: "Pilot UA", TitleEN: "Pilot"},
+		{Filename: "Series/episode01.mkv", TmdbID: 101, MediaType: "movie", TitleUA: "Pilot UA", TitleEN: "Pilot"},
 	}); err != nil {
 		t.Fatalf("initial SaveMoviesBatch() error = %v", err)
 	}
 
 	if err := db.SaveMoviesBatch(ctx, []Movie{
-		{Filename: "Series/episode01.mkv", TmdbID: 0, TitleUA: "Series/episode01.mkv", TitleEN: "Unresolved: Series/episode01.mkv"},
+		{Filename: "Series/episode01.mkv", TmdbID: 0, MediaType: "tv", TitleUA: "Series/episode01.mkv", TitleEN: "Unresolved: Series/episode01.mkv"},
 	}); err != nil {
 		t.Fatalf("unresolved SaveMoviesBatch() error = %v", err)
 	}
@@ -161,6 +161,9 @@ func TestSaveMoviesBatchUnresolvedDoesNotDowngradeRecognized(t *testing.T) {
 	}
 	if kept.TmdbID != 101 {
 		t.Fatalf("TmdbID = %d, want 101", kept.TmdbID)
+	}
+	if kept.MediaType != "movie" {
+		t.Fatalf("MediaType = %q, want movie", kept.MediaType)
 	}
 	if kept.TitleUA != "Pilot UA" {
 		t.Fatalf("TitleUA = %q, want %q", kept.TitleUA, "Pilot UA")
@@ -209,6 +212,69 @@ func TestSaveMoviesBatchIdentityReplacementClearsOldMetadata(t *testing.T) {
 	got, err = db.GetMovieByFilename(ctx, filename)
 	if err != nil || got == nil || got.Plot != "Fresh plot" {
 		t.Fatalf("same identity should merge missing metadata: movie=%+v err=%v", got, err)
+	}
+}
+
+func TestSaveMoviesBatchTypeChangeWithSameTMDBID(t *testing.T) {
+	ctx := context.Background()
+	db, err := New(filepath.Join(t.TempDir(), "movies.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.InitSchema(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SaveMoviesBatch(ctx, []Movie{{Filename: "SameID.mkv", TmdbID: 42, MediaType: "movie", TitleEN: "Old", Plot: "Old plot"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SaveMoviesBatch(ctx, []Movie{{Filename: "SameID.mkv", TmdbID: 42, MediaType: "tv", TitleEN: "New"}}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := db.GetMovieByFilename(ctx, "SameID.mkv")
+	if err != nil || got == nil || got.MediaType != "tv" || got.TitleEN != "New" || got.Plot != "" {
+		t.Fatalf("type replacement kept stale metadata: movie=%+v err=%v", got, err)
+	}
+	if err := db.SaveMoviesBatch(ctx, []Movie{{Filename: "SameID.mkv", TmdbID: 43, TitleEN: "Unknown type"}}); err != nil {
+		t.Fatal(err)
+	}
+	got, err = db.GetMovieByFilename(ctx, "SameID.mkv")
+	if err != nil || got == nil || got.TmdbID != 43 || got.MediaType != "" {
+		t.Fatalf("new ID inherited stale media type: movie=%+v err=%v", got, err)
+	}
+}
+
+func TestForEachRecognizedLocalization(t *testing.T) {
+	ctx := context.Background()
+	db, err := New(filepath.Join(t.TempDir(), "movies.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := db.InitSchema(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.SaveMoviesBatch(ctx, []Movie{
+		{Filename: "recognized.mkv", TmdbID: 42, TitleUA: "Українська назва", Plot: "Опис українською", Cast: "Large unrelated cast"},
+		{Filename: "unresolved.mkv", TitleUA: "Unresolved"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var visited []string
+	err = db.ForEachRecognizedLocalization(ctx, func(filename, titleUA, plot string) error {
+		visited = append(visited, filename)
+		if titleUA != "Українська назва" || plot != "Опис українською" {
+			t.Fatalf("unexpected localization fields: %q %q", titleUA, plot)
+		}
+		return nil
+	})
+	if err != nil || len(visited) != 1 || visited[0] != "recognized.mkv" {
+		t.Fatalf("visited=%v err=%v", visited, err)
+	}
+	cancelled, cancel := context.WithCancel(ctx)
+	cancel()
+	if err := db.ForEachRecognizedLocalization(cancelled, func(string, string, string) error { t.Fatal("called after cancellation"); return nil }); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancellation error = %v", err)
 	}
 }
 

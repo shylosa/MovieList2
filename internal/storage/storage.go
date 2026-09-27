@@ -60,7 +60,7 @@ const filenameChunkSize = 500
 
 // movieUpsertQuery inserts a row or merges non-empty incoming fields into an existing row.
 // Avoids INSERT OR REPLACE, which deletes the old row and wipes metadata when partial structs are saved.
-const movieUpsertQuery = `
+const movieUpsertTemplate = `
 	INSERT INTO movies
 		(filename, tmdb_id, title_ua, title_en, year, genres, "cast", plot, poster_url, local_poster_path, media_type,
 		 recognition_source, recognition_confidence, verification_score, needs_review, review_reason, vote_average, vote_count)
@@ -69,37 +69,58 @@ const movieUpsertQuery = `
 		tmdb_id = CASE WHEN excluded.tmdb_id != 0 THEN excluded.tmdb_id ELSE movies.tmdb_id END,
 		title_ua = CASE
 			WHEN excluded.tmdb_id = 0 AND movies.tmdb_id > 0 THEN movies.title_ua
-			WHEN excluded.tmdb_id > 0 AND (excluded.tmdb_id != movies.tmdb_id OR (movies.media_type != '' AND excluded.media_type != '' AND excluded.media_type != movies.media_type)) THEN excluded.title_ua
+			WHEN {{identity_change}} THEN excluded.title_ua
 			ELSE COALESCE(NULLIF(excluded.title_ua, ''), movies.title_ua)
 		END,
 		title_en = CASE
 			WHEN excluded.tmdb_id = 0 AND movies.tmdb_id > 0 THEN movies.title_en
-			WHEN excluded.tmdb_id > 0 AND (excluded.tmdb_id != movies.tmdb_id OR (movies.media_type != '' AND excluded.media_type != '' AND excluded.media_type != movies.media_type)) THEN excluded.title_en
+			WHEN {{identity_change}} THEN excluded.title_en
 			ELSE COALESCE(NULLIF(excluded.title_en, ''), movies.title_en)
 		END,
 		year = CASE
 			WHEN excluded.tmdb_id = 0 AND movies.tmdb_id > 0 THEN movies.year
-			WHEN excluded.tmdb_id > 0 AND (excluded.tmdb_id != movies.tmdb_id OR (movies.media_type != '' AND excluded.media_type != '' AND excluded.media_type != movies.media_type)) THEN excluded.year
+			WHEN {{identity_change}} THEN excluded.year
 			ELSE COALESCE(NULLIF(excluded.year, ''), movies.year)
 		END,
-		genres = CASE WHEN excluded.tmdb_id > 0 AND (excluded.tmdb_id != movies.tmdb_id OR (movies.media_type != '' AND excluded.media_type != '' AND excluded.media_type != movies.media_type)) THEN excluded.genres ELSE COALESCE(NULLIF(excluded.genres, ''), movies.genres) END,
-		"cast" = CASE WHEN excluded.tmdb_id > 0 AND (excluded.tmdb_id != movies.tmdb_id OR (movies.media_type != '' AND excluded.media_type != '' AND excluded.media_type != movies.media_type)) THEN excluded."cast" ELSE COALESCE(NULLIF(excluded."cast", ''), movies."cast") END,
-		plot = CASE WHEN excluded.tmdb_id > 0 AND (excluded.tmdb_id != movies.tmdb_id OR (movies.media_type != '' AND excluded.media_type != '' AND excluded.media_type != movies.media_type)) THEN excluded.plot ELSE COALESCE(NULLIF(excluded.plot, ''), movies.plot) END,
-		poster_url = CASE WHEN excluded.tmdb_id > 0 AND (excluded.tmdb_id != movies.tmdb_id OR (movies.media_type != '' AND excluded.media_type != '' AND excluded.media_type != movies.media_type)) THEN excluded.poster_url ELSE COALESCE(NULLIF(excluded.poster_url, ''), movies.poster_url) END,
-		local_poster_path = CASE WHEN excluded.tmdb_id > 0 AND (excluded.tmdb_id != movies.tmdb_id OR (movies.media_type != '' AND excluded.media_type != '' AND excluded.media_type != movies.media_type)) THEN excluded.local_poster_path ELSE COALESCE(NULLIF(excluded.local_poster_path, ''), movies.local_poster_path) END,
-		media_type = COALESCE(NULLIF(excluded.media_type, ''), movies.media_type),
+		genres = CASE WHEN {{identity_change}} THEN excluded.genres ELSE COALESCE(NULLIF(excluded.genres, ''), movies.genres) END,
+		"cast" = CASE WHEN {{identity_change}} THEN excluded."cast" ELSE COALESCE(NULLIF(excluded."cast", ''), movies."cast") END,
+		plot = CASE WHEN {{identity_change}} THEN excluded.plot ELSE COALESCE(NULLIF(excluded.plot, ''), movies.plot) END,
+		poster_url = CASE WHEN {{identity_change}} THEN excluded.poster_url ELSE COALESCE(NULLIF(excluded.poster_url, ''), movies.poster_url) END,
+		local_poster_path = CASE WHEN {{identity_change}} THEN excluded.local_poster_path ELSE COALESCE(NULLIF(excluded.local_poster_path, ''), movies.local_poster_path) END,
+		media_type = CASE
+			WHEN excluded.tmdb_id = 0 AND movies.tmdb_id > 0 THEN movies.media_type
+			WHEN excluded.tmdb_id > 0 AND excluded.tmdb_id != movies.tmdb_id THEN excluded.media_type
+			ELSE COALESCE(NULLIF(excluded.media_type, ''), movies.media_type)
+		END,
 		recognition_source = CASE
 			WHEN excluded.tmdb_id = 0 AND movies.tmdb_id > 0 THEN movies.recognition_source
-			WHEN excluded.tmdb_id > 0 AND (excluded.tmdb_id != movies.tmdb_id OR (movies.media_type != '' AND excluded.media_type != '' AND excluded.media_type != movies.media_type)) THEN excluded.recognition_source
+			WHEN {{identity_change}} THEN excluded.recognition_source
 			ELSE COALESCE(NULLIF(excluded.recognition_source, ''), movies.recognition_source)
 		END,
 		recognition_confidence = CASE WHEN excluded.tmdb_id = 0 AND movies.tmdb_id > 0 THEN movies.recognition_confidence ELSE excluded.recognition_confidence END,
 		verification_score = CASE WHEN excluded.tmdb_id = 0 AND movies.tmdb_id > 0 THEN movies.verification_score ELSE excluded.verification_score END,
 		needs_review = CASE WHEN excluded.tmdb_id = 0 AND movies.tmdb_id > 0 THEN movies.needs_review ELSE excluded.needs_review END,
 		review_reason = CASE WHEN excluded.tmdb_id = 0 AND movies.tmdb_id > 0 THEN movies.review_reason ELSE excluded.review_reason END,
-		vote_average = CASE WHEN excluded.tmdb_id > 0 AND (excluded.tmdb_id != movies.tmdb_id OR (movies.media_type != '' AND excluded.media_type != '' AND excluded.media_type != movies.media_type)) THEN excluded.vote_average WHEN excluded.vote_average > 0 THEN excluded.vote_average ELSE movies.vote_average END,
-		vote_count = CASE WHEN excluded.tmdb_id > 0 AND (excluded.tmdb_id != movies.tmdb_id OR (movies.media_type != '' AND excluded.media_type != '' AND excluded.media_type != movies.media_type)) THEN excluded.vote_count WHEN excluded.vote_count > 0 THEN excluded.vote_count ELSE movies.vote_count END
+		vote_average = CASE WHEN {{identity_change}} THEN excluded.vote_average WHEN excluded.vote_average > 0 THEN excluded.vote_average ELSE movies.vote_average END,
+		vote_count = CASE WHEN {{identity_change}} THEN excluded.vote_count WHEN excluded.vote_count > 0 THEN excluded.vote_count ELSE movies.vote_count END
 `
+
+const identityChangeSQL = `excluded.tmdb_id > 0 AND (excluded.tmdb_id != movies.tmdb_id OR (movies.media_type != '' AND excluded.media_type != '' AND excluded.media_type != movies.media_type))`
+
+var movieUpsertQuery = buildMovieUpsertQuery()
+
+func buildMovieUpsertQuery() string {
+	parts := strings.Split(movieUpsertTemplate, "{{identity_change}}")
+	var b strings.Builder
+	b.Grow(len(movieUpsertTemplate) + (len(parts)-1)*len(identityChangeSQL))
+	for i, part := range parts {
+		if i > 0 {
+			b.WriteString(identityChangeSQL)
+		}
+		b.WriteString(part)
+	}
+	return b.String()
+}
 
 func New(dbPath string) (*DB, error) {
 	// Ensure the SQLite DSN contains busy timeout and WAL journal mode to
@@ -255,6 +276,32 @@ func (db *DB) GetAllMovies(ctx context.Context) ([]Movie, error) {
 		movies = []Movie{}
 	}
 	return movies, nil
+}
+
+// ForEachRecognizedLocalization streams only the fields needed to find stored
+// movies requiring localization. The callback must not issue another DB query.
+func (db *DB) ForEachRecognizedLocalization(ctx context.Context, visit func(filename, titleUA, plot string) error) error {
+	rows, err := db.db.QueryContext(ctx, `SELECT filename, title_ua, plot FROM movies WHERE tmdb_id > 0 ORDER BY rowid ASC`)
+	if err != nil {
+		return fmt.Errorf("localization candidates query failed: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		var filename, titleUA, plot string
+		if err := rows.Scan(&filename, &titleUA, &plot); err != nil {
+			return fmt.Errorf("localization candidate scan failed: %w", err)
+		}
+		if err := visit(filename, titleUA, plot); err != nil {
+			return err
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("localization candidates iteration failed: %w", err)
+	}
+	return ctx.Err()
 }
 
 func (db *DB) SaveMovie(ctx context.Context, m Movie) error {
