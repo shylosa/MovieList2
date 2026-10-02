@@ -182,7 +182,7 @@ Examples: `Vrag` → `Враг`, `Nochnoj Rejs` → `Ночной Рейс`.
 ## Environment Configuration
 
 ```env
-APP_VERSION=2.7.1
+APP_VERSION=2.8.1
 GEMINI_API_KEY=
 GEMINI_MODELS=gemini-2.5-flash,gemini-flash-lite-latest
 GROK_API_KEY=
@@ -198,15 +198,17 @@ GITHUB_PAGES_BRANCH=main
 
 ---
 
-## Active Work — MovieList 2.7.1
+## Active Work — MovieList 2.8.1
 
 The project-scoped `reviewer` custom agent is defined in `.codex/agents/reviewer.toml`. Run it only when the user explicitly requests a review; it is read-only and reports actionable findings without changing files.
 
-`APP_VERSION=2.7.1` is the current release value. `internal/config/config.go` supplies the default; a local `.env` or process environment can override it. Keep the Wails window title, frontend HTML title, npm package metadata, `.env.example`, README and release notes aligned when changing the version.
+`APP_VERSION=2.8.1` is the current release value. `internal/config/config.go` supplies the default; a local `.env` or process environment can override it. Keep the Wails window title, `wails.json` product version, frontend HTML title, npm package metadata, `.env.example`, README and release notes aligned when changing the version.
 
-The active recognition specification is `CHECKLIST.md` (gitignored by design), currently Round 29 transliteration improvements. Its remaining production-log checks and persisted-model cleanup require a real-library run. `DESIGN_CHECKLIST.md` tracks the desktop UI refresh and its remaining visual runtime check.
+The active recognition specification is `CHECKLIST.md` (gitignored by design), now containing only remaining production checks after the 2026-10-02 log fixes. Real TMDB checks confirmed Ted 72105, Road Trip 9285 and folder rescue TV 284725/241882; the persisted model selection contains no gemini-2.0-flash. A fresh complete production scan and manual UI scenarios remain required. `DESIGN_CHECKLIST.md` tracks the remaining visual runtime checks.
 
-The 2.7 desktop UI opens on the poster library. A card opens a dedicated detail screen; editing navigates to the matching filename in the editor. The editor has a compact list, selection inspector, batch correction, TMDB candidates and an explicit search clear button with Escape shortcut. Movie ratings link to TMDB. The detail screen uses existing `GetMovies()` data and TMDB CDN poster URLs, with a local no-poster fallback.
+The 2.8 desktop UI opens on the poster library. A card opens a dedicated detail screen; editing navigates to the matching filename in the editor. The editor has a compact list, selection inspector, batch correction, TMDB candidates and an explicit search clear button with Escape shortcut. Movie ratings link to TMDB. The detail screen uses existing `GetMovies()` data and TMDB CDN poster URLs, with a local no-poster fallback.
+
+Metadata Repair is available only through the lightning icon beside TMDB in the editor inspector. It fetches the stored entity without filename parsing, search or identification; `tmdb_id`, `media_type` and recognition/verification state stay unchanged. The transactional batch upsert rejects concurrent record changes. Description and cast use local-data hover/focus popovers that can be pinned by clicking. Refreshing data preserves the active inspector when a resolved record leaves the review/unresolved list. The library review statistic opens the editor review filter with cleared search. Editor added sorting preserves the backend insertion order, with newer catalog records at the bottom.
 
 Round 29 exclusions: migration framework, database backup/restore, file fingerprints/rename tracking and SQLite FTS. Do not expand scope into these items.
 
@@ -389,7 +391,7 @@ shutdown) — рівно один app_closed в кінці сесії. FIX-17 (f
 
 ---
 
-## Current State Summary (станом на 2026-09-25)
+## Current State Summary (станом на 2026-10-02)
 
 | Area | Status |
 |------|--------|
@@ -406,10 +408,12 @@ shutdown) — рівно один app_closed в кінці сесії. FIX-17 (f
 | Manual title correction | ✅ Authoritative exact title with `Авто / Фільм / Серіал`; strict mode limits typed endpoint. |
 | Automatic ambiguity | ✅ Exact movie+TV disambiguation before fuzzy Gemini merge; `The Bureau` regression selects TV 62476. |
 | Scan metrics | ✅ `processed_total` is distinct from complete collection `disk_total`. |
-| Active Round 29 | 🧪 Transliteration and release cleanup implemented; production runtime verification remains. |
-| Version | ✅ Default, local `.env`, Wails/HTML titles and npm metadata aligned to 2.7.1. |
+| Recognition follow-up | ✅ Localized rescue, release cleanup, Lovelace movie type and per-pipeline fallback deduplication tested; four real TMDB identities verified. Full production scan remains open. |
+| Version | ✅ Default, local `.env`, Wails/HTML titles and npm metadata aligned to 2.8.1. |
 | Desktop UI | ✅ Poster library, dedicated detail screen, editor clear search, scan progress; final visual check remains in `DESIGN_CHECKLIST.md`. |
+| Metadata navigation and Repair | ✅ Clickable genres/cast/year, editor lightning action with immutable TMDB identity, local description/cast popovers; production visual check remains open. |
 | Candidate confirmation | ✅ TMDB selection saves in foreground; poster/localization finish in a guarded `App.wg` task and emit `movie-updated`. |
-| Tests | ✅ Automated Round 29 verification is maintained in `CHECKLIST.md`; runtime-only checks require a fresh production log. |
+| Diagnostics | ✅ Startup version, Repair before/after fields and localization sources; idle HTTP 400 reproduced and logged without raw remote content. Historical provider remains unknown. |
+| Tests | ✅ Automated Go/frontend checks and opt-in live TMDB/model checks; remaining runtime checks are in `CHECKLIST.md` and require a fresh production log. |
 
 > For full change history see [CHANGELOG.md](./CHANGELOG.md).

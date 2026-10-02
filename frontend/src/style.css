@@ -194,6 +194,11 @@ html {
     flex-shrink: 0;
 }
 
+.library-toolbar { gap: 4px; padding-right: 8px; }
+.library-toolbar > #btn-library { margin-right: 0; }
+.library-toolbar > .sidebar-scan { width: 32px; min-width: 32px; height: 32px; border: 0; border-radius: 7px; background: transparent; font: inherit; }
+.sidebar-scan:focus-visible { outline: 2px solid var(--blue-text); outline-offset: 2px; }
+
 .github-toolbar {
     gap: 4px;
 }
@@ -487,9 +492,33 @@ html {
 .inspector-meta .inspector-status.status-review { color: #ffd183; border-color: #8d6d36; }
 .inspector-meta .inspector-status.status-unresolved { color: #ffaaaa; border-color: #98515c; }
 .inspector-meta .inspector-rating { color: #ffc867; }
+.inspector-tmdb-tools { display: inline-flex; align-items: center; gap: 6px; }
+.inspector-tmdb-tools .inspector-rating { padding: 5px 8px; border: 1px solid #40576f; border-radius: 6px; font-size: 11px; }
+.inspector-repair-icon { display: inline-flex; align-items: center; justify-content: center; flex: none; width: 27px; height: 27px; padding: 4px; border: 1px solid #40576f; border-radius: 6px; background: #1b2a3a; color: #ffc867; cursor: pointer; }
+.inspector-repair-icon svg { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linejoin: round; }
+.inspector-repair-icon:hover:not(:disabled) { border-color: #ffc867; background: #46371f; }
+.inspector-repair-icon:focus-visible { outline: 2px solid var(--blue-text); outline-offset: 2px; }
+.inspector-repair-icon:disabled { opacity: .45; cursor: default; }
+.inspector-repair-icon[aria-busy="true"] { opacity: 1; cursor: wait; }
+.inspector-repair-icon[aria-busy="true"] svg { animation: repair-pulse 1s ease-in-out infinite alternate; }
+@keyframes repair-pulse { to { opacity: .3; } }
+@media (prefers-reduced-motion: reduce) { .inspector-repair-icon[aria-busy="true"] svg { animation: none; } }
 .inspector-meta a.inspector-rating { cursor: pointer; }
 .inspector-meta a.inspector-rating:hover { border-color: #ffc867; background: #584523; color: #ffe4a5; }
 .inspector-meta a.inspector-rating:focus-visible { outline: 2px solid var(--blue-text); outline-offset: 2px; }
+.inspector-metadata-controls { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.inspector-metadata-trigger { padding: 4px 8px; border: 1px solid #40576f; border-radius: 6px; background: #1b2a3a; color: #c6d8e9; font: inherit; font-size: 11px; cursor: pointer; }
+.inspector-metadata-trigger:hover, .inspector-metadata-trigger[aria-expanded="true"] { background: var(--nav-hover); color: var(--blue-text); border-color: var(--blue-text); }
+.inspector-metadata-trigger:focus-visible { outline: 2px solid var(--blue-text); outline-offset: 2px; }
+.inspector-metadata-popover { position: fixed; z-index: 1200; width: 380px; max-width: calc(100vw - 16px); padding: 12px; border: 1px solid #55718d; border-radius: 9px; background: #1b2b3b; color: var(--text-primary); box-shadow: 0 14px 30px #0009; }
+.inspector-metadata-popover-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 8px; font-size: 13px; }
+.inspector-metadata-popover-header button { padding: 2px 5px; border: 0; border-radius: 4px; background: transparent; color: var(--text-muted); font: inherit; cursor: pointer; }
+.inspector-metadata-popover-header button:hover { background: var(--nav-hover); color: var(--text-primary); }
+.inspector-metadata-popover-header button:focus-visible { outline: 2px solid var(--blue-text); }
+.inspector-metadata-popover-text { max-height: min(360px, calc(100vh - 100px)); overflow-y: auto; white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.55; font-size: 13px; }
+.inspector-repair-feedback { margin: 9px 0 0; color: var(--text-muted); font-size: 12px; line-height: 1.5; }
+.inspector-repair-feedback[hidden] { display: none; }
+.inspector-actions button:disabled { opacity: .55; cursor: default; }
 .inspector-file { display: grid; gap: 7px; padding: 12px; border: 1px solid var(--sidebar-brd); border-radius: 8px; background: #162433; }
 .inspector-file strong { overflow-wrap: anywhere; color: #d4e6f7; font-family: Consolas, monospace; font-size: 11px; font-weight: 400; }
 .inspector-fields { display: grid; grid-template-columns: minmax(105px, 34%) minmax(0, 1fr); gap: 10px; margin-top: 20px; }
@@ -676,6 +705,9 @@ html {
 .library-stat span { display: block; color: var(--text-muted); font-size: 12px; }
 .library-stat strong { display: block; margin-top: 2px; font-size: 19px; line-height: 1.1; }
 .library-stat.review-stat strong { color: #e9ae4a; }
+button.review-stat { color: var(--text-primary); font: inherit; text-align: left; cursor: pointer; }
+button.review-stat:hover { border-color: var(--warn-yellow); background: var(--nav-hover); }
+button.review-stat:focus-visible { outline: 2px solid var(--warn-yellow); outline-offset: 2px; }
 #panel-library.library-scrolled .library-stat { display: flex; align-items: center; justify-content: space-between; gap: 8px; height: 40px; padding: 5px 12px; }
 #panel-library.library-scrolled .library-stat span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #panel-library.library-scrolled .library-stat strong { flex: none; margin-top: 0; font-size: 17px; }
@@ -695,6 +727,10 @@ html {
 .library-grid { display: grid; flex: 1 1 auto; grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); grid-auto-rows: max-content; align-content: start; gap: 14px; min-height: 0; overflow-y: auto; padding: 1px 4px 12px 1px; }
 .library-movie { display: flex; flex-direction: column; min-width: 0; height: max-content; padding: 0 0 10px; overflow: hidden; border: 1px solid var(--sidebar-brd); border-radius: 9px; background: var(--stat-bg); color: var(--text-primary); text-align: left; font: inherit; cursor: pointer; }
 .library-movie:hover, .library-movie:focus-visible { border-color: #5aa8ff; outline: none; transform: translateY(-2px); }
+.library-open { display: flex; flex-direction: column; width: 100%; padding: 0; border: 0; background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.library-open:focus-visible { outline: 2px solid var(--blue-text); outline-offset: -2px; }
+.library-movie .metadata-link { border: 0; background: transparent; color: inherit; font: inherit; padding: 0; }
+.library-movie button.library-movie-meta { color: var(--text-muted); font-size: 11px; }
 .library-poster { position: relative; flex: none; width: 100%; aspect-ratio: 2 / 3; overflow: hidden; background: #263448; }
 .library-poster img { display: block; width: 100%; height: 100%; object-fit: cover; }
 .library-review-badge { position: absolute; top: 8px; right: 8px; padding: 5px 7px; border-radius: 5px; background: #e9ae4a; color: #192534; font-size: 10px; font-weight: 700; }
@@ -726,7 +762,13 @@ html {
 .movie-view-info h1 { margin: 0; font-size: clamp(28px, 3.2vw, 46px); line-height: 1.12; overflow-wrap: anywhere; }
 .movie-original-title { margin: 9px 0 0; color: var(--text-muted); font-size: 16px; }
 .movie-facts { display: flex; flex-wrap: wrap; gap: 8px; margin: 20px 0 30px; }
-.movie-facts span, .movie-facts a { padding: 7px 11px; border: 1px solid #42546a; border-radius: 7px; background: #1b2a3a; color: #dce8f5; font-size: 12px; }
+.movie-facts span, .movie-facts a, .movie-facts button { padding: 7px 11px; border: 1px solid #42546a; border-radius: 7px; background: #1b2a3a; color: #dce8f5; font-size: 12px; }
+.metadata-link { font: inherit; cursor: pointer; text-decoration: none; transition: color .15s ease, background-color .15s ease, border-color .15s ease; }
+.metadata-link:hover { text-decoration: none; }
+.movie-facts .metadata-link:hover { border-color: var(--blue-text); background: var(--nav-hover); color: var(--blue-text); }
+.library-movie .metadata-link:hover, .movie-cast-link:hover { color: var(--blue-text); }
+.metadata-link:focus-visible { outline: 2px solid var(--blue-text); outline-offset: 2px; }
+.movie-cast-link { border: 0; background: transparent; color: inherit; padding: 0; margin: 0 12px 6px 0; }
 .movie-facts .movie-fact-type { border-color: #376b91; background: #193b55; color: #9bd5ff; }
 .movie-facts .movie-fact-year { border-color: #52677d; background: #253547; color: #d5e2ee; }
 .movie-facts .movie-fact-rating { border-color: #8a7041; background: #46371f; color: #ffd47a; }

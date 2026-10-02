@@ -4,7 +4,10 @@ import { GetAppVersion, GetMovies, GetStats, RunScan, StopScan, GetAIModelCatalo
 import { Quit, WindowMinimise, WindowToggleMaximise, EventsOn } from '../wailsjs/runtime/runtime.js';
 import logoUrl from './assets/images/appicon.png';
 import noPosterUrl from './assets/images/no-poster.jpg';
-import { candidateConfirmPayload, candidateSearchPayload, fixPayload, reviewReasonLabel, mediaTypeLabel, candidateTMDBURL, formatRuntime, formatTMDBRating, candidateStatus, scanLifecycleTransition, cacheEditorValue, filterAndSortEditorMovies, updateEditorSelection as changeEditorSelection } from './editor-state.js';
+import { metadataValues, matchesCollectionSearch } from './metadata.js';
+import { createMetadataPopover } from './metadata-popover.js';
+import { RepairMetadata } from '../wailsjs/go/main/App.js';
+import { candidateConfirmPayload, candidateSearchPayload, fixPayload, reviewReasonLabel, mediaTypeLabel, candidateTMDBURL, formatRuntime, formatTMDBRating, candidateStatus, scanLifecycleTransition, cacheEditorValue, filterAndSortEditorMovies, shouldKeepEditorInspector, updateEditorSelection as changeEditorSelection } from './editor-state.js';
 
 document.querySelector('#app').innerHTML = `
   <div class="titlebar">
@@ -26,11 +29,13 @@ document.querySelector('#app').innerHTML = `
         </div>
 
         <div style="padding-top: 10px; flex-grow: 1;">
-            <div class="nav-btn active" id="btn-library"><span class="nav-icon">▦</span> Бібліотека</div>
-            <div class="nav-btn" id="btn-overview"><span class="nav-icon">◫</span> Огляд і журнал</div>
-            <div class="nav-btn" id="btn-scan"><span class="nav-icon">⟳</span> Сканувати</div>
-            <div class="sidebar-section">Інструменти</div>
+            <div class="toolbar-row library-toolbar">
+                <div class="nav-btn active" id="btn-library"><span class="nav-icon">▦</span> Бібліотека</div>
+                <button class="nav-btn icon-btn sidebar-scan" id="btn-scan" type="button" title="Сканувати бібліотеку" aria-label="Сканувати бібліотеку" aria-busy="false"><span class="nav-icon" aria-hidden="true">⟳</span></button>
+            </div>
+            <div class="nav-btn" id="btn-overview"><span class="nav-icon">◫</span> Журнал</div>
             <div class="nav-btn" id="btn-editor"><span class="nav-icon">✎</span> Редактор</div>
+            <div class="nav-btn" id="btn-models"><span class="nav-icon">✦</span> Моделі ШІ</div>
             <div class="toolbar-row">
                 <div class="nav-btn" id="btn-sync"><span class="nav-icon">☁</span> Google Sheets</div>
                 <div class="nav-btn icon-btn" id="btn-open-sheet" title="Відкрити таблицю">
@@ -51,7 +56,6 @@ document.querySelector('#app').innerHTML = `
             </div>
             <div class="nav-btn" id="btn-showcase"><span class="nav-icon">▣</span> Вітрина</div>
 
-            <div class="nav-btn" id="btn-models"><span class="nav-icon">✦</span> Моделі ШІ</div>
             <div class="nav-btn" id="btn-select-folder"><span class="nav-icon">▱</span> Вибрати папку</div>
             <div class="nav-btn" id="btn-logs"><span class="nav-icon">☷</span> Папка з логами</div>
         </div>
@@ -73,7 +77,7 @@ document.querySelector('#app').innerHTML = `
                 <div class="library-stat"><span>Усього</span><strong id="library-total">—</strong></div>
                 <div class="library-stat"><span>Фільми</span><strong id="library-movies">—</strong></div>
                 <div class="library-stat"><span>Серіали</span><strong id="library-series">—</strong></div>
-                <div class="library-stat review-stat"><span>Потребують перевірки</span><strong id="library-review">—</strong></div>
+                <button id="library-review-open" class="library-stat review-stat" type="button" title="Відкрити проблемні файли в Редакторі"><span>Потребують перевірки</span><strong id="library-review">—</strong></button>
             </div>
             <div id="library-scan-status" class="library-scan-status" hidden>
                 <div class="library-scan-copy"><strong id="library-scan-label">Сканування…</strong><span id="library-scan-file">Пошук файлів і метаданих…</span></div>
@@ -165,7 +169,7 @@ document.querySelector('#app').innerHTML = `
                     <input type="text" id="search-input" placeholder="Назва або файл…" aria-label="Пошук у редакторі" />
                     <button id="search-clear" type="button" aria-label="Очистити пошук" title="Очистити пошук" hidden>✕</button>
                 </div>
-                <label class="editor-sort-label">Сортувати <select id="editor-sort"><option value="title">За назвою</option><option value="year">За роком</option><option value="rating">За рейтингом</option><option value="filename">За файлом</option></select></label>
+                <label class="editor-sort-label">Сортувати <select id="editor-sort"><option value="title">За назвою</option><option value="year">За роком</option><option value="rating">За рейтингом</option><option value="filename">За файлом</option><option value="added">За додаванням</option></select></label>
             </div>
             <div class="editor-filters" role="group" aria-label="Фільтр редактора">
                 <button class="editor-filter active" data-filter="all" type="button">Усі</button>
@@ -207,6 +211,13 @@ const libraryScan = document.getElementById('library-scan');
 // ЗАМОК: Змінна, що стежить, чи йде зараз сканування
 let isScanning = false;
 
+function setSidebarScanState(active) {
+    btnScan.disabled = active;
+    btnScan.classList.toggle('disabled', active);
+    btnScan.setAttribute('aria-busy', String(active));
+    btnScan.title = active ? 'Сканування триває…' : 'Сканувати бібліотеку';
+}
+
 function setStopButtonState(state) {
     if (btnStop) btnStop.className = `stop-btn ${state}`;
 }
@@ -237,7 +248,7 @@ btnScan.addEventListener('click', async (e) => {
 
     if (isScanning) return; // КРИТИЧНО: Захист від подвійного запуску
     isScanning = true;
-    btnScan.classList.add('disabled');
+    setSidebarScanState(true);
 
     switchTab('library', 'Бібліотека');
     setStopButtonState('active'); // Стає червоною
@@ -249,7 +260,7 @@ btnScan.addEventListener('click', async (e) => {
     } catch (err) {
         console.error("Помилка сканування:", err);
         isScanning = false;
-        btnScan.classList.remove('disabled');
+        setSidebarScanState(false);
         setStopButtonState('disabled');
     }
 });
@@ -261,6 +272,7 @@ document.getElementById('btn-close').onclick = Quit;
 
 // --- НАВІГАЦІЯ ТА КНОПКИ ---
 const switchTab = (tab, title) => {
+    inspectorMetadataPopover.hide();
     document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
     document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
 
@@ -276,7 +288,7 @@ const switchTab = (tab, title) => {
 
 // Прив'язка кнопок
 document.getElementById('btn-library').onclick = () => { switchTab('library', 'Бібліотека'); loadMovies(); };
-document.getElementById('btn-overview').onclick = () => switchTab('overview', 'Огляд');
+document.getElementById('btn-overview').onclick = () => switchTab('overview', 'Журнал');
 document.getElementById('btn-sync').onclick = () => {
     switchTab('overview', 'Sync Sheets');
     SyncToCloud();
@@ -328,6 +340,13 @@ document.getElementById('btn-editor').onclick = () => {
     closeEditorInspector();
     switchTab('editor', 'Редактор');
     loadMovies();
+};
+document.getElementById('library-review-open').onclick = () => {
+    editorFilter = 'review';
+    document.getElementById('search-input').value = '';
+    closeEditorInspector();
+    switchTab('editor', 'Редактор');
+    renderFilteredMovies();
 };
 
 document.getElementById('btn-logs').onclick = OpenLogs;
@@ -424,8 +443,7 @@ EventsOn('scan-started', () => {
     const btnStop = document.getElementById('btn-stop-scan');
     if (btnStop) btnStop.className = "stop-btn active";
 
-    document.getElementById('btn-scan').style.pointerEvents = "none";
-    document.getElementById('btn-scan').style.opacity = "0.5";
+    setSidebarScanState(true);
 });
 
 EventsOn('scan-progress', (data) => {
@@ -468,10 +486,7 @@ EventsOn('scan-finished', (msg) => {
     // 🟢 ЗМІНА 4: Робимо кнопку СТОП знову сірою після завершення (або скасування)
     const btnStop = document.getElementById('btn-stop-scan');
     if (btnStop) btnStop.className = "stop-btn disabled";
-	document.getElementById('btn-scan').classList.remove('disabled');
-
-    document.getElementById('btn-scan').style.pointerEvents = "auto";
-    document.getElementById('btn-scan').style.opacity = "1";
+    setSidebarScanState(false);
     loadStats(); // Оновлюємо картки
     loadMovies();
 });
@@ -536,6 +551,26 @@ function safePosterURL(value) {
 
 let activeMovieFilename = '';
 let movieReturnTab = 'library';
+let repairingFilename = '';
+const metadataRepairFeedback = new Map();
+const inspectorMetadataPopover = createMetadataPopover();
+
+function metadataButton(value, className) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = `metadata-link ${className}`;
+    button.textContent = value;
+    button.title = `Знайти у бібліотеці: ${value}`;
+    button.onclick = event => {
+        event.stopPropagation();
+        document.getElementById('library-search').value = value;
+        libraryFilter = 'all';
+        document.querySelectorAll('.filter-chip').forEach(chip => chip.classList.toggle('active', chip.dataset.filter === 'all'));
+        switchTab('library', 'Бібліотека');
+        renderLibrary();
+    };
+    return button;
+}
 
 function renderMovieView(movie) {
     const title = movie.title_ua || movie.title_en || movie.file_label || 'Невідомий запис';
@@ -556,16 +591,16 @@ function renderMovieView(movie) {
     facts.replaceChildren();
     const items = [
         {text: movie.media_type === 'tv' ? 'TV' : movie.media_type === 'movie' ? 'Фільм' : 'Тип невідомий', kind: 'type'},
-        {text: movie.year || 'Рік невідомий', kind: 'year'},
+        {text: movie.year || 'Рік невідомий', kind: 'year', clickable: !!movie.year},
     ];
     const tmdbURL = candidateTMDBURL(movie);
     if (movie.vote_count > 0 || tmdbURL) {
         items.push({text: movie.vote_count > 0 ? `★ ${Number(movie.vote_average).toFixed(1)} TMDB ↗` : 'TMDB ↗', kind: 'rating', url: tmdbURL});
     }
-    if (movie.genres) items.push({text: movie.genres, kind: 'genres'});
+    for (const genre of metadataValues(movie.genres)) items.push({text: genre, kind: 'genres', clickable: true});
     for (const item of items) {
-        const chip = document.createElement(item.url ? 'a' : 'span');
-        chip.className = `movie-fact-${item.kind}`;
+        const chip = item.clickable ? metadataButton(item.text, `movie-fact-${item.kind}`) : document.createElement(item.url ? 'a' : 'span');
+        if (!item.clickable) chip.className = `movie-fact-${item.kind}`;
         chip.textContent = item.text;
         if (item.url) {
             chip.href = item.url;
@@ -578,7 +613,7 @@ function renderMovieView(movie) {
     document.querySelector('.movie-section h2').textContent = movie.media_type === 'tv' ? 'Про серіал' : 'Про фільм';
     document.getElementById('movie-plot').textContent = movie.plot || 'Опис поки що відсутній.';
     const cast = document.getElementById('movie-cast-section');
-    document.getElementById('movie-cast').textContent = movie.cast || '';
+    document.getElementById('movie-cast').replaceChildren(...metadataValues(movie.cast).map(actor => metadataButton(actor, 'movie-cast-link')));
     cast.hidden = !movie.cast;
     document.getElementById('movie-file-path').textContent = movie.filename;
 }
@@ -595,6 +630,32 @@ function showMovieView(movie, returnTab = 'library') {
 }
 
 document.getElementById('movie-back').onclick = () => switchTab(movieReturnTab, movieReturnTab === 'editor' ? 'Редактор' : 'Бібліотека');
+function refreshRepairViews() {
+    const current = allMovies.find(item => item.filename === activeMovieFilename);
+    if (current) renderMovieView(current);
+    if (document.getElementById('editor-inspector').classList.contains('open')) renderEditorInspector();
+}
+
+async function repairMovieMetadata(filename) {
+    if (repairingFilename) return;
+    const movie = allMovies.find(item => item.filename === filename);
+    if (!movie) return;
+    repairingFilename = filename;
+    metadataRepairFeedback.set(filename, 'Оновлюємо метадані…');
+    refreshRepairViews();
+    try {
+        const result = await RepairMetadata(filename);
+        allMovies = allMovies.map(item => item.filename === filename ? result.movie : item);
+        metadataRepairFeedback.set(filename, result.warning ? `Метадані оновлено частково. ${result.warning}` : 'Метадані оновлено.');
+        renderLibrary();
+        renderFilteredMovies(true);
+    } catch (error) {
+        metadataRepairFeedback.set(filename, `Не вдалося оновити метадані: ${error}`);
+    } finally {
+        repairingFilename = '';
+        refreshRepairViews();
+    }
+}
 document.getElementById('movie-edit').onclick = () => {
     editorFilter = 'all';
     editorActiveFilename = activeMovieFilename;
@@ -611,8 +672,7 @@ function renderLibrary() {
     const query = document.getElementById('library-search').value.trim().toLocaleLowerCase('uk-UA');
     const movies = allMovies.filter(movie => {
         const matchesType = libraryFilter === 'all' || (libraryFilter === 'no-poster' ? !movie.poster_url : movie.media_type === libraryFilter);
-        const haystack = [movie.title_ua, movie.title_en, movie.filename, movie.file_label, movie.year].join(' ').toLocaleLowerCase('uk-UA');
-        return matchesType && haystack.includes(query);
+        return matchesType && matchesCollectionSearch(movie, query);
     });
     const sort = document.getElementById('library-sort').value;
     if (sort === 'title') movies.sort((a, b) => (a.title_ua || a.title_en || a.file_label || '').localeCompare(b.title_ua || b.title_en || b.file_label || '', 'uk'));
@@ -628,10 +688,13 @@ function renderLibrary() {
         return;
     }
     for (const movie of movies) {
-        const card = document.createElement('button');
-        card.type = 'button';
+        const card = document.createElement('article');
         card.className = 'library-movie';
         card.title = `${movie.file_label || movie.filename} — переглянути`;
+        const open = document.createElement('button');
+        open.type = 'button';
+        open.className = 'library-open';
+        open.setAttribute('aria-label', `Переглянути: ${movie.title_ua || movie.title_en || movie.file_label || movie.filename}`);
         const poster = document.createElement('img');
         poster.src = safePosterURL(movie.poster_url);
         poster.alt = '';
@@ -648,8 +711,8 @@ function renderLibrary() {
         }
         const title = document.createElement('strong');
         title.textContent = movie.title_ua || movie.title_en || movie.file_label || 'Невідомий запис';
-        const meta = document.createElement('span');
-        meta.className = 'library-movie-meta';
+        const meta = movie.year ? metadataButton(movie.year, 'library-movie-meta') : document.createElement('span');
+        if (!movie.year) meta.className = 'library-movie-meta';
         meta.textContent = movie.year || 'Рік невідомий';
         const metaRow = document.createElement('div');
         metaRow.className = 'library-movie-meta-row';
@@ -668,9 +731,15 @@ function renderLibrary() {
         }
         const genres = document.createElement('span');
         genres.className = 'library-movie-genres';
-        genres.textContent = movie.genres || 'Жанр не вказано';
+        const genreValues = metadataValues(movie.genres);
+        if (!genreValues.length) genres.textContent = 'Жанр не вказано';
+        genreValues.forEach((genre, index) => {
+            if (index) genres.append(document.createTextNode(', '));
+            genres.append(metadataButton(genre, 'library-genre-link'));
+        });
         if (movie.genres) genres.title = movie.genres;
-        card.append(art, title, metaRow, genres);
+        open.append(art, title);
+        card.append(open, metaRow, genres);
         card.onclick = () => showMovieView(movie);
         grid.appendChild(card);
     }
@@ -706,8 +775,6 @@ async function loadMovies(focusFilename = '') {
     try {
         allMovies = await GetMovies();
 		checkedCache = new Set([...checkedCache].filter(filename => allMovies.some(movie => movie.filename === filename)));
-		if (focusFilename && document.getElementById('editor-inspector').classList.contains('open')) editorActiveFilename = focusFilename;
-		if (editorActiveFilename && !allMovies.some(movie => movie.filename === editorActiveFilename)) editorActiveFilename = '';
 		if (document.getElementById('panel-movie').classList.contains('active')) {
 			const current = allMovies.find(movie => movie.filename === activeMovieFilename);
 			if (current) renderMovieView(current);
@@ -715,9 +782,9 @@ async function loadMovies(focusFilename = '') {
 		document.getElementById('library-movies').textContent = allMovies.filter(movie => movie.media_type === 'movie').length.toLocaleString('uk-UA');
 		document.getElementById('library-series').textContent = allMovies.filter(movie => movie.media_type === 'tv').length.toLocaleString('uk-UA');
 		renderLibrary();
-		renderFilteredMovies();
+		renderFilteredMovies(true);
 		if (editorActiveFilename) renderEditorInspector();
-		if (focusFilename) {
+		if (focusFilename && focusFilename === editorActiveFilename) {
 			requestAnimationFrame(() => {
 				const row = Array.from(document.querySelectorAll('.movie-row')).find(item => item.dataset.filename === focusFilename);
 				if (row) { row.scrollIntoView({block: 'center'}); row.classList.add('movie-row-focused'); setTimeout(() => row.classList.remove('movie-row-focused'), 1600); }
@@ -920,6 +987,7 @@ function selectEditorMovie(filename) {
 }
 
 function closeEditorInspector() {
+    inspectorMetadataPopover.hide();
     editorActiveFilename = '';
     document.getElementById('editor-inspector').classList.remove('open');
     document.querySelector('.editor-workspace').classList.remove('has-selection');
@@ -928,6 +996,7 @@ function closeEditorInspector() {
 }
 
 function renderEditorInspector() {
+    inspectorMetadataPopover.hide();
     editorCandidateRequest++;
     const content = document.getElementById('editor-inspector-content');
     content.replaceChildren();
@@ -964,6 +1033,7 @@ function renderEditorInspector() {
     meta.appendChild(editorElement('span', '', movie.year || 'Рік невідомий'));
     if (movie.media_type === 'tv') meta.appendChild(editorElement('span', '', 'TV'));
     const tmdbURL = candidateTMDBURL(movie);
+    const tmdbTools = editorElement('div', 'inspector-tmdb-tools');
     if (movie.vote_count > 0 || tmdbURL) {
         const ratingText = movie.vote_count > 0 ? `★ ${Number(movie.vote_average).toFixed(1)} TMDB ↗` : 'TMDB ↗';
         const rating = editorElement(tmdbURL ? 'a' : 'span', 'inspector-rating', ratingText);
@@ -973,9 +1043,34 @@ function renderEditorInspector() {
             rating.setAttribute('aria-label', `${ratingText.replace(' ↗', '')}. Відкрити в TMDB`);
             rating.onclick = event => { event.preventDefault(); OpenURL(tmdbURL); };
         }
-        meta.appendChild(rating);
+        tmdbTools.appendChild(rating);
     }
+    const repairButton = editorElement('button', 'inspector-repair-icon');
+    repairButton.type = 'button';
+    const repairBusy = repairingFilename === movie.filename;
+    repairButton.disabled = !!repairingFilename || !(movie.tmdb_id > 0 && ['movie', 'tv'].includes(movie.media_type));
+    repairButton.title = repairBusy ? 'Оновлення метаданих…' : movie.tmdb_id > 0 ? 'Оновити метадані' : 'Спочатку оберіть запис TMDB';
+    repairButton.setAttribute('aria-label', 'Оновити метадані');
+    repairButton.setAttribute('aria-busy', String(repairBusy));
+    const bolt = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    bolt.setAttribute('viewBox', '0 0 24 24');
+    bolt.setAttribute('aria-hidden', 'true');
+    const boltPath = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+    boltPath.setAttribute('d', 'M13 2 4 14h7l-1 8L20 9h-7V2Z');
+    bolt.append(boltPath);
+    repairButton.append(bolt);
+    repairButton.onclick = () => repairMovieMetadata(movie.filename);
+    tmdbTools.append(repairButton);
+    meta.append(tmdbTools);
     heroDetails.appendChild(meta);
+    const metadataControls = editorElement('div', 'inspector-metadata-controls');
+    for (const [label, value, empty] of [['Опис', movie.plot, 'Опис відсутній.'], ['Актори', movie.cast, 'Актори не вказані.']]) {
+        const trigger = editorElement('button', 'inspector-metadata-trigger', label);
+        trigger.type = 'button';
+        inspectorMetadataPopover.attach(trigger, label, value || empty);
+        metadataControls.append(trigger);
+    }
+    heroDetails.append(metadataControls);
     hero.append(poster, heroDetails);
     content.appendChild(hero);
     const path = editorElement('div', 'inspector-file');
@@ -1003,6 +1098,8 @@ function renderEditorInspector() {
     candidatesButton.type = 'button';
     const fixButton = editorElement('button', 'inspector-secondary', '✦ Виправити запис');
     fixButton.type = 'button';
+    candidatesButton.disabled = !!repairingFilename;
+    fixButton.disabled = !!repairingFilename;
     fixButton.onclick = () => runEditorFix([movie.filename]);
     const remove = editorElement('button', 'inspector-delete', 'Видалити');
     remove.type = 'button';
@@ -1011,6 +1108,11 @@ function renderEditorInspector() {
     remove.setAttribute('aria-expanded', 'false');
     actions.append(candidatesButton, fixButton, remove);
     content.appendChild(actions);
+    const repairFeedback = editorElement('p', 'inspector-repair-feedback', metadataRepairFeedback.get(movie.filename) || '');
+    repairFeedback.setAttribute('role', 'status');
+    repairFeedback.setAttribute('aria-live', 'polite');
+    repairFeedback.hidden = !repairFeedback.textContent;
+    content.append(repairFeedback);
     const deletePanel = editorElement('section', 'inspector-delete-confirm');
     deletePanel.id = 'inspector-delete-confirm';
     deletePanel.hidden = true;
@@ -1133,12 +1235,12 @@ function renderEditorCandidate(filename, candidate) {
     return item;
 }
 
-function renderFilteredMovies() {
+function renderFilteredMovies(preserveInspector = false) {
     const query = document.getElementById('search-input').value;
     document.getElementById('search-clear').hidden = query.length === 0;
     const sort = document.getElementById('editor-sort').value;
     visibleEditorMovies = filterAndSortEditorMovies(allMovies, query, editorFilter, sort);
-    if (editorActiveFilename && !visibleEditorMovies.some(movie => movie.filename === editorActiveFilename)) closeEditorInspector();
+    if (editorActiveFilename && !shouldKeepEditorInspector(editorActiveFilename, allMovies, visibleEditorMovies, preserveInspector === true)) closeEditorInspector();
     document.querySelectorAll('.editor-filter').forEach(button => button.classList.toggle('active', button.dataset.filter === editorFilter));
     document.getElementById('editor-count').textContent = `${visibleEditorMovies.length} із ${allMovies.length}`;
     renderMovies(visibleEditorMovies);

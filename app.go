@@ -60,6 +60,11 @@ type App struct {
 	eventEmitter               func(context.Context, string, ...interface{})
 	diskFileScanner            func(context.Context) ([]string, error)
 	candidateTranslationRunner func(context.Context, []string, map[string]int)
+	repairMutex                sync.Mutex
+	repairCancel               context.CancelFunc
+	repairClosing              bool
+	repairDetailsFetcher       func(context.Context, tmdb.MediaType, int) (*tmdb.MovieInfo, error)
+	repairTranslator           func(context.Context, []ai.BulkTranslateItem) ([]ai.BulkTranslateItem, error)
 }
 
 type scanResult struct {
@@ -135,6 +140,7 @@ func (a *App) startup(ctx context.Context) {
 	if a.cfg == nil {
 		a.cfg = config.Load()
 	}
+	slog.Info("app_started", slog.String("version", a.cfg.AppVersion))
 
 	var err error
 	a.db, err = storage.New(a.cfg.DBPath)
@@ -169,6 +175,12 @@ func (a *App) restoreMediaFolder(ctx context.Context) {
 
 func (a *App) shutdown(ctx context.Context) {
 	slog.Info("app_closed")
+	a.repairMutex.Lock()
+	a.repairClosing = true
+	if a.repairCancel != nil {
+		a.repairCancel()
+	}
+	a.repairMutex.Unlock()
 	a.cancelScan() // спочатку сигналізуємо зупинку всім горутинам
 	a.wg.Wait()    // потім чекаємо graceful завершення
 	if a.tmdbClient != nil {
@@ -1685,8 +1697,11 @@ func (a *App) rescueEmptyGeminiWithFolder(ctx context.Context, filePath string) 
 		}
 
 		jw := maxTitleSimilarity(candidate, tmdbInfo)
-		if jw < geminiTMDBVerifyMinJW {
+		if jw < geminiTMDBVerifyMinJW || tmdbInfo.AmbiguousExact || tmdbInfo.TMDBID <= 0 || (tmdbInfo.MediaType != tmdb.MediaTypeMovie && tmdbInfo.MediaType != tmdb.MediaTypeTV) {
 			logger.Warn("gemini_empty_rescue_post_verify_rejected",
+				slog.Int("tmdb_id", tmdbInfo.TMDBID),
+				slog.String("tmdb_media_type", string(tmdbInfo.MediaType)),
+				slog.Bool("ambiguous", tmdbInfo.AmbiguousExact),
 				slog.String("candidate", candidate),
 				slog.String("tmdb_title", tmdbInfo.TitleEN),
 				slog.String("search_title", tmdbInfo.SearchTitle),

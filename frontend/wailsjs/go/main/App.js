@@ -66,6 +66,10 @@ export function OpenURL(arg1) {
   return window['go']['main']['App']['OpenURL'](arg1);
 }
 
+export function RepairMetadata(arg1) {
+  return window['go']['main']['App']['RepairMetadata'](arg1);
+}
+
 export function RunScan() {
   return window['go']['main']['App']['RunScan']();
 }

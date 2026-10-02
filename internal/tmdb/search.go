@@ -155,6 +155,7 @@ type scoredResult struct {
 	year          int
 	matchedAlias  string
 	alternatives  []string
+	ambiguous     bool
 }
 
 // SearchExactTitle resolves an authoritative title supplied by the user.
@@ -382,11 +383,15 @@ func (c *Client) SearchWithFallbacks(
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	ctx = withSearchAttempts(ctx)
 	attempts := buildAttempts(parsed, originalFilename, c.mediaRootPath())
 
 	for _, a := range attempts {
 		if err := ctx.Err(); err != nil {
 			return nil, err
+		}
+		if !claimSearchAttempt(ctx, a.query, a.queryYear, a.targetYear, a.mediaType) {
+			continue
 		}
 		logger := utils.LoggerWithTrace(ctx).With(slog.String("component", "tmdb_search"))
 		logger.Info("search_attempt",
@@ -416,7 +421,7 @@ func (c *Client) SearchWithFallbacks(
 				return nil, err
 			}
 			latinQuery := cyrillicToLatin(a.query)
-			if latinQuery != a.query {
+			if latinQuery != a.query && claimSearchAttempt(ctx, latinQuery, a.queryYear, a.targetYear, a.mediaType) {
 				logger.Info("folder_en_fallback",
 					slog.String("cyrillic", a.query),
 					slog.String("latin", latinQuery),
@@ -688,6 +693,9 @@ LANG_LOOP:
 	}
 
 	info, err := c.GetDetails(ctx, detailType, bestGlobal.result.ID, originalFilename)
+	if err == nil && info != nil && (info.TMDBID != bestGlobal.result.ID || info.MediaType != detailType) {
+		return nil, fmt.Errorf("TMDB details identity differs from selected %s:%d", detailType, bestGlobal.result.ID)
+	}
 
 	if err == nil && info != nil {
 		info.VerificationScore = deterministicVerificationScore(bestGlobal.score)
@@ -698,9 +706,12 @@ LANG_LOOP:
 		} else if info.VerificationScore < ReviewVerificationThreshold {
 			info.NeedsReview, info.ReviewReason = true, "low_verification_score"
 		}
-		if !hasCyrillicChars(query) {
+		// Keep the returned title, never the query. Cyrillic titles are trusted
+		// as verification aliases only after an exact TMDB response match.
+		if !hasCyrillicChars(query) || normalizeForCompare(query) == normalizeForCompare(coalesce(bestGlobal.result.Title, bestGlobal.result.Name)) {
 			info.SearchTitle = coalesce(bestGlobal.result.Title, bestGlobal.result.Name)
 		}
+		info.AmbiguousExact = bestGlobal.ambiguous
 		if bestGlobal.matchedAlias != "" {
 			info.MatchedAlias = bestGlobal.matchedAlias
 		}
@@ -793,6 +804,9 @@ func (c *Client) rankResults(
 	for _, candidate := range ranked {
 		if candidate.result.ID == best.result.ID {
 			continue
+		}
+		if abs(candidate.identityScore-best.identityScore) <= IdentityTieWindow && abs(candidate.score-best.score) <= 10 {
+			best.ambiguous = true
 		}
 		best.alternatives = append(best.alternatives, coalesce(candidate.result.Title, candidate.result.Name))
 		if len(best.alternatives) == 2 {
@@ -1017,20 +1031,54 @@ func fuzzyMatchScoreJW(a, b string) int {
 // --- РОЗУМНИЙ ПАРСИНГ ТА ГЕНЕРАЦІЯ КАНДИДАТІВ ---
 
 var (
-	reQuality           = regexp.MustCompile(`(?i)\b(1080p|720p|2160p|4k|8k|HDRip|BDRip|WEB-DLRip|WEB-DL|WEBRip|HDTV|HDTVRip|CAMRip|TS|DVDScr|DVDRip|BluRay|HDRezka|Line|\d{3,4}Mb)\b`)
-	reCodec             = regexp.MustCompile(`(?i)\b(x264|x265|h264|h265|HEVC|AV1|AVC|XviD)\b`)
-	reAudio             = regexp.MustCompile(`(?i)\b(AAC|DTS|AC3|DDP5\.1|Atmos|Dub|UkrDub|RusDub|MVO|DUB|AVO|L1|L2)\b`)
-	reRelease           = regexp.MustCompile(`(?i)(-?seleZen|-?ivanes|-?RG[[:alnum:]]*|-?NNMClub|\bUkr\b|\bRus\b|\bEng\b|\[TC\])`)
-	reReleaseByMarker   = regexp.MustCompile(`(?i)(?:^|[ ._-])by[ ._-]+`)
-	reReleaseGroupTail  = regexp.MustCompile(`(?i)[._\s]+-[[:alnum:]][[:alnum:]_-]*$`)
-	reTerminalPartOne   = regexp.MustCompile(`(?:^|\s)1$`)
-	reExt               = regexp.MustCompile(`(?i)\.(mkv|mp4|avi|mov)$`)
-	reBrackets          = regexp.MustCompile(`\[.*?\]|\(.*?\)`)
-	rePunct             = regexp.MustCompile(`[\._]`)
-	reSpaces            = regexp.MustCompile(`\s{2,}`)
-	reSeries            = regexp.MustCompile(`(?i)(\d{1,2}\s*сезон|сезон\s*\d{1,2}|серия\s*\d{1,3}|серии\s*\d{1,3}-\d{1,3}|Часть\s*\d)`)
-	reExactContextNoise = regexp.MustCompile(`(?i)\b(?:mkv|mp4|avi|mov|HDTVRip|HDTV|WEB-DLRip|WEB-DL|WEBRip|HDRip|BDRip|BluRay|DVDRip|GeneralFilm|1080p|720p|2160p|x26[45]|h26[45]|HEVC|\d{1,3})\b`)
+	reQuality             = regexp.MustCompile(`(?i)\b(1080p|720p|2160p|4k|8k|HDRip|BDRip|WEB-DLRip|WEB-DL|WEBRip|HDTV|HDTVRip|CAMRip|TS|DVDScr|DVDRip|BluRay|HDRezka|Line|\d{3,4}Mb)\b`)
+	reCodec               = regexp.MustCompile(`(?i)\b(x264|x265|h264|h265|HEVC|AV1|AVC|XviD)\b`)
+	reAudio               = regexp.MustCompile(`(?i)\b(AAC|DTS|AC3|DDP5\.1|Atmos|Dub|UkrDub|RusDub|MVO|DUB|AVO|L1|L2)\b`)
+	reRelease             = regexp.MustCompile(`(?i)(-?seleZen|-?ivanes|-?RG[[:alnum:]]*|-?NNMClub|\bUkr\b|\bRus\b|\bEng\b|\[TC\])`)
+	reReleaseByMarker     = regexp.MustCompile(`(?i)(?:^|[ ._-])by[ ._-]+`)
+	reReleaseGroupTail    = regexp.MustCompile(`(?i)[._\s]+-[[:alnum:]][[:alnum:]_-]*$`)
+	reTerminalPartOne     = regexp.MustCompile(`(?:^|\s)1$`)
+	reExt                 = regexp.MustCompile(`(?i)\.(mkv|mp4|avi|mov)$`)
+	reBrackets            = regexp.MustCompile(`\[.*?\]|\(.*?\)`)
+	rePunct               = regexp.MustCompile(`[\._]`)
+	reSpaces              = regexp.MustCompile(`\s{2,}`)
+	reSeries              = regexp.MustCompile(`(?i)(\d{1,2}\s*сезон|сезон\s*\d{1,2}|серия\s*\d{1,3}|серии\s*\d{1,3}-\d{1,3}|Часть\s*\d)`)
+	reExactContextNoise   = regexp.MustCompile(`(?i)\b(?:mkv|mp4|avi|mov|HDTVRip|HDTV|WEB-DLRip|WEB-DL|WEBRip|HDRip|BDRip|BluRay|DVDRip|GeneralFilm|1080p|720p|2160p|x26[45]|h26[45]|HEVC|\d{1,3})\b`)
+	reEmptyBrackets       = regexp.MustCompile(`\(\s*\)|\[\s*\]`)
+	reObservedReleaseTail = regexp.MustCompile(`(?i)(?:[ ._-]+)(?:andre90|TRIPLE)\s*$`)
+	reMetadataReleaseTag  = regexp.MustCompile(`(?i)\b(?:19|20)\d{2}[\s()_-]+(?:TRIPLE|andre90)\b`)
 )
+
+// Only strip a release tail when the filename contains both a year and
+// technical release markers. Title words such as "Triple" remain intact.
+func cleanReleaseTitle(title, filename string) string {
+	stem := reExt.ReplaceAllString(filename, "")
+	// A title at the beginning of the original filename is not a release
+	// tag, even if its final word happens to be "Triple".
+	titlePrefix := strings.HasPrefix(normalizeForCompare(stem)+" ", normalizeForCompare(title)+" ")
+	if hasReleaseEvidence(filename) && (reObservedReleaseTail.MatchString(stem) || reMetadataReleaseTag.MatchString(cleanString(stem))) && !titlePrefix {
+		title = reObservedReleaseTail.ReplaceAllString(title, "")
+	}
+	return cleanString(reEmptyBrackets.ReplaceAllString(title, ""))
+}
+
+// Metadata after the first technical marker following a release year is
+// unnecessary for title/episode parsing and may look like an episode (andre90).
+func trimTechnicalReleaseTail(filename string) string {
+	s := cleanString(filename)
+	year := reYear.FindStringIndex(s)
+	if year == nil {
+		return filename
+	}
+	if marker := reQuality.FindStringIndex(s[year[1]:]); marker != nil {
+		if reSeason.MatchString(s[year[1]+marker[0]:]) {
+			return filename
+		}
+		prefix := strings.TrimSpace(s[:year[1]+marker[0]])
+		return strings.TrimSpace(reObservedReleaseTail.ReplaceAllString(prefix, ""))
+	}
+	return filename
+}
 
 // cleanString замінює крапки/підкреслення на пробіли і прибирає зайві пробіли
 func cleanString(s string) string {
@@ -1072,9 +1120,10 @@ func generateTitleCandidates(ptnTitle, filename string) []string {
 		}
 	}
 
-	add(cleanString(ptnTitle))
+	add(cleanReleaseTitle(ptnTitle, filename))
 
 	s := reExt.ReplaceAllString(filename, "")
+	s = trimTechnicalReleaseTail(s)
 	s = trimReleaseByTail(s)
 	if hasReleaseEvidence(s) {
 		s = reReleaseGroupTail.ReplaceAllString(s, "")
@@ -1101,7 +1150,7 @@ func generateTitleCandidates(ptnTitle, filename string) []string {
 	}
 
 	soft := reYear.ReplaceAllString(s, "")
-	soft = cleanString(soft)
+	soft = cleanReleaseTitle(soft, filename)
 	add(soft)
 
 	return candidates

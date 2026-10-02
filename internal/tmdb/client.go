@@ -348,6 +348,7 @@ func (c *Client) FetchByCleanTitle(ctx context.Context, title, year string, medi
 
 // runPipeline — повний каскад для сирого файлу
 func (c *Client) runPipeline(ctx context.Context, parsed ParsedFile, originalFilename string) (*MovieInfo, error) {
+	ctx = withSearchAttempts(ctx)
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}

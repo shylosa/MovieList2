@@ -1,4 +1,22 @@
 import assert from 'assert';
+import './metadata-popover.test.mjs';
+import { metadataValues, matchesCollectionSearch } from './metadata.js';
+import { shouldKeepEditorInspector } from './editor-state.js';
+
+assert.deepStrictEqual(metadataValues('Драма'), ['Драма']);
+assert.deepStrictEqual(metadataValues('Драма, Фантастика · Трилер'), ['Драма', 'Фантастика', 'Трилер']);
+assert.deepStrictEqual(metadataValues('Gary Oldman, Tom Hardy'), ['Gary Oldman', 'Tom Hardy']);
+assert.deepStrictEqual(metadataValues(null), []);
+for (const media_type of ['movie', 'tv']) {
+    const movie = {media_type, title_ua: 'Український фільм', filename: 'Folder/file.mkv', genres: 'Драма, Фантастика', cast: 'Gary Oldman, Tom Hardy', year: '2014'};
+    for (const query of ['драма', 'ФАНТАСТИКА', 'Gary Oldman', 'Tom Hardy', '2014', 'український', 'file.mkv', '']) {
+        assert.strictEqual(matchesCollectionSearch(movie, query), true);
+        assert.strictEqual(matchesCollectionSearch(movie, query), true);
+    }
+    assert.strictEqual(matchesCollectionSearch(movie, 'невідомий актор'), false);
+    assert.strictEqual(matchesCollectionSearch(movie, ''), true);
+}
+assert.strictEqual(matchesCollectionSearch({}, 'Tom Hardy'), false);
 import { candidateConfirmPayload, candidateSearchPayload, fixPayload, reviewCounts, reviewReasonLabel, mediaTypeLabel, candidateTMDBURL, formatRuntime, formatTMDBRating, candidateStatus, scanLifecycleTransition, cacheEditorValue, filterAndSortEditorMovies, updateEditorSelection } from './editor-state.js';
 
 assert.deepStrictEqual(candidateSearchPayload('a.mkv', {'a.mkv': 'The Bureau'}, {'a.mkv': 'tv'}), {filename: 'a.mkv', title: 'The Bureau', media_type: 'tv'});
@@ -31,10 +49,31 @@ const editorMovies = [
     {filename: 'A.mkv', title_ua: 'Альфа', year: 2020, tmdb_id: 2, needs_review: true, vote_average: 7.8},
     {filename: 'C.mkv', file_label: 'Невідомий', year: 2019, tmdb_id: 0, needs_review: false, vote_average: 0},
 ];
+const repairedMovies = editorMovies.map(movie => movie.filename === 'C.mkv' ? {...movie, tmdb_id: 42, title_ua: 'Визначений фільм'} : movie);
+for (const filter of ['review', 'unresolved']) {
+    const before = filterAndSortEditorMovies(editorMovies, '', filter);
+    const after = filterAndSortEditorMovies(repairedMovies, '', filter);
+    assert.strictEqual(shouldKeepEditorInspector('C.mkv', editorMovies, before), true);
+    assert.strictEqual(after.some(movie => movie.filename === 'C.mkv'), false);
+    assert.strictEqual(shouldKeepEditorInspector('C.mkv', repairedMovies, after, true), true);
+    assert.strictEqual(shouldKeepEditorInspector('C.mkv', repairedMovies, after), false);
+}
+// The last problem can disappear while its updated inspector remains open.
+assert.strictEqual(shouldKeepEditorInspector('C.mkv', repairedMovies, [], true), true);
+// Background updates keep the record the user is currently inspecting.
+assert.strictEqual(shouldKeepEditorInspector('A.mkv', repairedMovies, [], true), true);
+// A deleted record must close its inspector even during a data refresh.
+assert.strictEqual(shouldKeepEditorInspector('C.mkv', repairedMovies.filter(movie => movie.filename !== 'C.mkv'), [], true), false);
+assert.strictEqual(shouldKeepEditorInspector('C.mkv', repairedMovies, filterAndSortEditorMovies(repairedMovies, 'інший запит')), false);
 assert.deepStrictEqual(filterAndSortEditorMovies(editorMovies, '', 'all', 'title').map(movie => movie.filename), ['A.mkv', 'B.mkv', 'C.mkv']);
 assert.deepStrictEqual(filterAndSortEditorMovies(editorMovies, '', 'review', 'year').map(movie => movie.filename), ['A.mkv', 'C.mkv']);
 assert.deepStrictEqual(filterAndSortEditorMovies(editorMovies, 'невідомий', 'unresolved').map(movie => movie.filename), ['C.mkv']);
 assert.deepStrictEqual(filterAndSortEditorMovies(editorMovies, '', 'all', 'rating').map(movie => movie.filename), ['A.mkv', 'B.mkv', 'C.mkv']);
+assert.deepStrictEqual(filterAndSortEditorMovies(editorMovies, '', 'all', 'added').map(movie => movie.filename), ['B.mkv', 'A.mkv', 'C.mkv']);
+assert.deepStrictEqual(filterAndSortEditorMovies(editorMovies, '', 'review', 'added').map(movie => movie.filename), ['A.mkv', 'C.mkv']);
+assert.deepStrictEqual(filterAndSortEditorMovies(editorMovies, 'mkv', 'unresolved', 'added').map(movie => movie.filename), ['C.mkv']);
+const withNewMovie = [...editorMovies, {filename: 'AA-new.mkv', title_ua: 'Аа', tmdb_id: 3}];
+assert.deepStrictEqual(filterAndSortEditorMovies(withNewMovie, '', 'all', 'added').map(movie => movie.filename), ['B.mkv', 'A.mkv', 'C.mkv', 'AA-new.mkv']);
 assert.deepStrictEqual(editorMovies.map(movie => movie.filename), ['B.mkv', 'A.mkv', 'C.mkv']);
 let selection = updateEditorSelection(new Set(), ['A.mkv', 'B.mkv'], true);
 selection = updateEditorSelection(selection, ['B.mkv'], false);

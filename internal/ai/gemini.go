@@ -607,6 +607,24 @@ func (c *Client) TranslateBulk(ctx context.Context, items []BulkTranslateItem) (
 	prompt := fmt.Sprintf(`Localize each item to official Ukrainian title (and plot when provided). Keep "filename" unchanged. Use original_title (when provided) as context to find the correct official Ukrainian title. If no official UA title exists, keep original_title in "title". Input:
 %s
 Return ONLY a raw JSON array.`, string(inputJSON))
+	return c.translateBulkPrompt(ctx, prompt)
+}
+
+// TranslateMetadata localizes supplied fields only; it cannot identify entities.
+func (c *Client) TranslateMetadata(ctx context.Context, items []BulkTranslateItem) ([]BulkTranslateItem, error) {
+	if len(items) == 0 {
+		return nil, nil
+	}
+	inputJSON, _ := json.Marshal(items)
+	prompt := fmt.Sprintf(`Translate supplied non-empty fields into Ukrainian. This is metadata repair for already identified entities, not movie identification. Keep filename unchanged. Leave empty title/plot fields empty. Translate plot faithfully without inventing facts or creatively rewriting it. Do not generate a plot when the input plot is empty. For title use only a known official Ukrainian title; if unknown preserve original_title, never invent a localized title. Do not translate person names. Return ONLY a raw JSON array with filename, title, plot. Input:
+%s`, string(inputJSON))
+	return c.translateBulkPrompt(ctx, prompt)
+}
+
+func (c *Client) translateBulkPrompt(ctx context.Context, prompt string) ([]BulkTranslateItem, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 
 	// Quota locked: skip Gemini cascade entirely and go straight to Grok.
 	if c.quotaLocked.Load() {

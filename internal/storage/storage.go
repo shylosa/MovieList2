@@ -391,6 +391,33 @@ func normalizedNeedsReview(m Movie) bool { return m.TmdbID == 0 || m.NeedsReview
 
 // SaveMoviesBatch — масовий запис через єдину транзакцію
 func (db *DB) SaveMoviesBatch(ctx context.Context, movies []Movie) error {
+	return db.saveMoviesBatch(ctx, movies, nil)
+}
+
+// SaveRepairedMovie uses the batch transaction and rejects concurrent changes.
+// Identity and recognition state belong to identification, never metadata repair.
+func (db *DB) SaveRepairedMovie(ctx context.Context, before, after Movie) error {
+	if before.TmdbID <= 0 || before.Filename != after.Filename || before.TmdbID != after.TmdbID || before.MediaType != after.MediaType {
+		return fmt.Errorf("repair cannot change identity")
+	}
+	after.RecognitionSource = before.RecognitionSource
+	after.RecognitionConfidence = before.RecognitionConfidence
+	after.VerificationScore = before.VerificationScore
+	after.NeedsReview = before.NeedsReview
+	after.ReviewReason = before.ReviewReason
+	return db.saveMoviesBatch(ctx, []Movie{after}, func(tx *sql.Tx) error {
+		current, err := getMovieByFilename(ctx, tx, before.Filename)
+		if err != nil {
+			return err
+		}
+		if current == nil || *current != before {
+			return fmt.Errorf("запис змінився під час оновлення; повторіть дію")
+		}
+		return nil
+	})
+}
+
+func (db *DB) saveMoviesBatch(ctx context.Context, movies []Movie, guard func(*sql.Tx) error) error {
 	if len(movies) == 0 {
 		return nil
 	}
@@ -401,6 +428,11 @@ func (db *DB) SaveMoviesBatch(ctx context.Context, movies []Movie) error {
 		return fmt.Errorf("begin tx failed: %w", err)
 	}
 	defer tx.Rollback() // safe no-op if Commit succeeds
+	if guard != nil {
+		if err := guard(tx); err != nil {
+			return err
+		}
+	}
 
 	// Prepare statement for performance
 	stmt, err := tx.PrepareContext(ctx, movieUpsertQuery)
@@ -433,9 +465,17 @@ func (db *DB) SaveMoviesBatch(ctx context.Context, movies []Movie) error {
 }
 
 func (db *DB) GetMovieByFilename(ctx context.Context, filename string) (*Movie, error) {
+	return getMovieByFilename(ctx, db.db, filename)
+}
+
+type movieQueryer interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+func getMovieByFilename(ctx context.Context, queryer movieQueryer, filename string) (*Movie, error) {
 	query := `SELECT rowid, filename, COALESCE(tmdb_id, 0), title_ua, title_en, year, genres, "cast", plot, poster_url, local_poster_path, COALESCE(media_type, ''), COALESCE(recognition_source, ''), COALESCE(recognition_confidence, 0), COALESCE(verification_score, 0), COALESCE(needs_review, 0), COALESCE(review_reason, ''), COALESCE(vote_average, 0), COALESCE(vote_count, 0)
 			  FROM movies WHERE filename = ?`
-	row := db.db.QueryRowContext(ctx, query, filename)
+	row := queryer.QueryRowContext(ctx, query, filename)
 	var m Movie
 	err := row.Scan(
 		&m.ID, &m.Filename, &m.TmdbID, &m.TitleUA, &m.TitleEN, &m.Year,

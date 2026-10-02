@@ -6,6 +6,9 @@
   "frontend:build": "npm run build",
   "frontend:dev:watcher": "npm run dev",
   "frontend:dev:serverUrl": "auto",
+  "info": {
+    "productVersion": "2.8.1"
+  },
   "author": {
     "name": "Serhii Shylo",
     "email": "shilkas2@gmail.com"

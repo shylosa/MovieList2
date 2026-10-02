@@ -36,6 +36,8 @@ export function OpenShowcase():Promise<void>;
 
 export function OpenURL(arg1:string):Promise<void>;
 
+export function RepairMetadata(arg1:string):Promise<main.MetadataRepairResult>;
+
 export function RunScan():Promise<void>;
 
 export function SearchTMDBCandidates(arg1:main.CandidateSearchRequest):Promise<Array<tmdb.TMDBCandidate>>;
