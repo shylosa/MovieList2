@@ -1305,25 +1305,25 @@ document.getElementById('btn-delete-selected').onclick = async (e) => {
 
     if (selected.length === 0) {
         // Замість alert можемо просто блимнути кнопкою або змінити текст на секунду
-        const origText = btn.innerText;
-        btn.innerText = "👀 Нічого не вибрано";
-        setTimeout(() => btn.innerText = origText, 1500);
+        const origText = btn.textContent;
+        btn.textContent = "👀 Нічого не вибрано";
+        setTimeout(() => btn.textContent = origText, 1500);
         return;
     }
 
     // КРОК 1: Запит підтвердження (перший клік)
     if (!isConfirmingDelete) {
         isConfirmingDelete = true;
-        const originalText = btn.innerHTML;
+        const originalText = btn.textContent;
 
-        btn.innerHTML = `⚠️ Точно видалити (${selected.length})?`;
+        btn.textContent = `⚠️ Точно видалити (${selected.length})?`;
         btn.style.backgroundColor = "#8b0000"; // Робимо колір більш темним/тривожним
         btn.style.borderColor = "#8b0000";
 
         // Скидаємо стан через 3 секунди, якщо користувач передумав
         deleteConfirmTimeout = setTimeout(() => {
             isConfirmingDelete = false;
-            btn.innerHTML = originalText;
+            btn.textContent = originalText;
             btn.style.backgroundColor = "#d11a2a"; // Повертаємо оригінальний червоний
             btn.style.borderColor = "#b2070f";
         }, 3000);
@@ -1334,7 +1334,7 @@ document.getElementById('btn-delete-selected').onclick = async (e) => {
     clearTimeout(deleteConfirmTimeout);
     isConfirmingDelete = false;
 
-    btn.innerHTML = "⏳ Видалення...";
+    btn.textContent = "⏳ Видалення...";
     btn.style.pointerEvents = "none";
     btn.style.backgroundColor = "#d11a2a";
 
@@ -1349,7 +1349,7 @@ document.getElementById('btn-delete-selected').onclick = async (e) => {
         await loadMovies();
         await loadStats();
         // Відновлюємо кнопку після завершення
-        btn.innerHTML = "Видалити вибрані";
+        btn.textContent = "Видалити вибрані";
         btn.style.pointerEvents = "auto";
     }
 };
