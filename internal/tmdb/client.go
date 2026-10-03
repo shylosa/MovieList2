@@ -87,6 +87,7 @@ type Client struct {
 	apiKey      string
 	postersDir  string
 	mediaRoot   string
+	mediaRoots  []string
 	mediaRootMu sync.RWMutex
 	rateLimiter *rate.Limiter
 
@@ -124,6 +125,7 @@ func NewClient(cfg *config.Config) *Client {
 		apiKey:     cfg.TMDBAPIKey,
 		postersDir: cfg.PostersDir,
 		mediaRoot:  cfg.MediaFolderPath,
+		mediaRoots: append(append([]string(nil), cfg.ScanRoots()...), cfg.MediaSources...),
 		// 🟡 ХІРУРГІЧНЕ ВТРУЧАННЯ: 20 req/s (1 запит кожні 50мс), burst 5.
 		// Ідеальний баланс між швидкістю і безпекою від 429 помилок.
 		rateLimiter: rate.NewLimiter(rate.Every(50*time.Millisecond), 5),
@@ -143,7 +145,26 @@ func (c *Client) SetTransport(tr http.RoundTripper) {
 func (c *Client) SetMediaRoot(root string) {
 	c.mediaRootMu.Lock()
 	c.mediaRoot = root
+	c.mediaRoots = []string{root}
 	c.mediaRootMu.Unlock()
+}
+
+func (c *Client) SetMediaRoots(anchor string, roots []string) {
+	c.mediaRootMu.Lock()
+	defer c.mediaRootMu.Unlock()
+	c.mediaRoot = anchor
+	c.mediaRoots = append([]string(nil), roots...)
+}
+
+func (c *Client) mediaRootForFile(path string) string {
+	c.mediaRootMu.RLock()
+	defer c.mediaRootMu.RUnlock()
+	for _, root := range c.mediaRoots {
+		if config.PathWithin(root, path) {
+			return root
+		}
+	}
+	return c.mediaRoot
 }
 
 func (c *Client) mediaRootPath() string {

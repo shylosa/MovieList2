@@ -1,6 +1,8 @@
 import './style.css';
+import { bindSettingsMenu } from './settings-menu.js';
+import { createFolderTables } from './folder-tables.js';
 
-import { GetAppVersion, GetMovies, GetStats, RunScan, StopScan, GetAIModelCatalog, SetAIModels, OpenLogs, FixSelected, SearchTMDBCandidates, ConfirmTMDBCandidate, GetTMDBCandidateDetails, SyncToCloud, SyncToGitHub, OpenShowcase, OpenSheet, OpenGoogleSheet, OpenGitHubRepo, OpenGitHubPage, OpenURL, DeleteMovie, SelectMediaFolder } from '../wailsjs/go/main/App.js';
+import { GetAppVersion, GetMovies, GetStats, RunScan, StopScan, GetAIModelCatalog, SetAIModels, OpenLogs, FixSelected, SearchTMDBCandidates, ConfirmTMDBCandidate, GetTMDBCandidateDetails, SyncToCloud, SyncToGitHub, OpenShowcase, OpenSheet, OpenGoogleSheet, OpenGitHubRepo, OpenGitHubPage, OpenURL, DeleteMovie, GetScanFolders, SetScanFolders, SelectScanFolder, SelectExcludedFolder, SetExcludedFolders } from '../wailsjs/go/main/App.js';
 import { Quit, WindowMinimise, WindowToggleMaximise, EventsOn } from '../wailsjs/runtime/runtime.js';
 import logoUrl from './assets/images/appicon.png';
 import noPosterUrl from './assets/images/no-poster.jpg';
@@ -28,40 +30,26 @@ document.querySelector('#app').innerHTML = `
             <div class="header-flag" id="current-page-title">MovieList</div>
         </div>
 
-        <div style="padding-top: 10px; flex-grow: 1;">
+        <nav class="sidebar-primary" aria-label="Основна навігація">
             <div class="toolbar-row library-toolbar">
-                <div class="nav-btn active" id="btn-library"><span class="nav-icon">▦</span> Бібліотека</div>
+                <button type="button" class="nav-btn active" id="btn-library"><span class="nav-icon">▦</span> Бібліотека</button>
                 <button class="nav-btn icon-btn sidebar-scan" id="btn-scan" type="button" title="Сканувати бібліотеку" aria-label="Сканувати бібліотеку" aria-busy="false"><span class="nav-icon" aria-hidden="true">⟳</span></button>
             </div>
-            <div class="nav-btn" id="btn-overview"><span class="nav-icon">◫</span> Журнал</div>
-            <div class="nav-btn" id="btn-editor"><span class="nav-icon">✎</span> Редактор</div>
-            <div class="nav-btn" id="btn-models"><span class="nav-icon">✦</span> Моделі ШІ</div>
-            <div class="toolbar-row">
-                <div class="nav-btn" id="btn-sync"><span class="nav-icon">☁</span> Google Sheets</div>
-                <div class="nav-btn icon-btn" id="btn-open-sheet" title="Відкрити таблицю">
-                    <span class="nav-icon">📊</span>
+            <button type="button" class="nav-btn" id="btn-overview"><span class="nav-icon">◫</span> Активність<span id="activity-indicator" hidden aria-label="Виконується операція">●</span></button>
+            <button type="button" class="nav-btn" id="btn-editor"><span class="nav-icon">✎</span> Редактор</button>
+        </nav>
+        <div class="sidebar-bottom">
+            <button type="button" class="nav-btn" id="btn-folders"><span class="nav-icon">▱</span> Папки сканування</button>
+            <div class="settings-anchor">
+                <div id="settings-menu" class="settings-menu" hidden>
+                    <button type="button" id="btn-models">✦ Моделі ШІ</button>
+                    <button type="button" id="btn-exports">↗ Експорт і синхронізація</button>
+                    <button type="button" id="btn-logs">☷ Відкрити папку з логами</button>
+                    <hr>
+                    <button type="button" id="btn-about">Про MovieList</button>
                 </div>
+                <button type="button" class="nav-btn" id="btn-settings" aria-expanded="false" aria-controls="settings-menu"><span class="nav-icon">⚙</span> Налаштування<span class="settings-chevron">⌃</span></button>
             </div>
-            <div class="toolbar-row github-toolbar">
-                <div class="nav-btn" id="btn-sync-github">
-                    <span class="nav-icon">↗</span><span class="nav-label">GitHub Pages</span>
-                    <span class="nav-spinner" aria-hidden="true"></span>
-                </div>
-                <div class="nav-btn icon-btn" id="btn-open-project" title="Відкрити репозиторій">
-                    <span class="nav-icon">💻</span>
-                </div>
-                <div class="nav-btn icon-btn" id="btn-open-page" title="Відкрити GitHub Pages">
-                    <span class="nav-icon">🌐</span>
-                </div>
-            </div>
-            <div class="nav-btn" id="btn-showcase"><span class="nav-icon">▣</span> Вітрина</div>
-
-            <div class="nav-btn" id="btn-select-folder"><span class="nav-icon">▱</span> Вибрати папку</div>
-            <div class="nav-btn" id="btn-logs"><span class="nav-icon">☷</span> Папка з логами</div>
-        </div>
-
-        <div class="sidebar-footer">
-            © 2026 <a href="#" id="sidebar-author-link">shylosa</a>
         </div>
     </div>
     <div class="main-area library-active">
@@ -119,23 +107,8 @@ document.querySelector('#app').innerHTML = `
             </div>
         </div>
         <div id="panel-overview" class="panel">
-            <div class="cards">
-                <div class="card">
-                    <div class="card-title">ФАЙЛІВ У БАЗІ</div>
-                    <div class="card-val" id="val-total">—</div>
-                    <div class="card-sub">у базі даних</div>
-                </div>
-                <div class="card">
-                    <div class="card-title">СТАТУС</div>
-                    <div class="card-val" id="val-unrec">—</div>
-                    <div class="card-sub" id="sub-unrec">Завантаження...</div>
-                </div>
-                <div class="card">
-                    <div class="card-title">ОСТАННІЙ СКАН</div>
-                    <div class="card-val" id="val-last">—</div>
-                </div>
-            </div>
-
+            <h1>Активність</h1>
+            <p class="section-description">Перебіг сканування, виправлень та експорту.</p>
             <div id="scan-progress-area" class="scan-progress-area">
                 <div class="progress-wrap" id="progress-wrap">
                     <div id="progress-bar" class="progress-bar"></div>
@@ -151,7 +124,7 @@ document.querySelector('#app').innerHTML = `
 
             <div class="console-outer">
                 <div class="console-header">
-                    <span>Консоль виконання</span>
+                    <span>Перебіг операцій</span>
                     <div style="display: flex; gap: 10px; align-items: center;">
                         <span id="scan-timer" style="font-family: monospace; font-size: 14px; color: #4ade80;">00:00</span>
                         <span id="console-status">Очікування...</span>
@@ -161,6 +134,37 @@ document.querySelector('#app').innerHTML = `
             </div>
         </div>
 
+        <div id="panel-folders" class="panel settings-panel">
+            <h1>Папки сканування</h1>
+            <p class="section-description">Зміни зберігаються автоматично й застосовуються під час наступного сканування. Видалення зі списку не видаляє файли з диска.</p>
+            <div class="folder-columns">
+                <section class="folder-column" aria-labelledby="scan-folders-heading">
+                    <div class="folder-column-heading"><h2 id="scan-folders-heading">Сканувати <span id="scan-count">0</span></h2><button type="button" id="add-scan-folder" class="primary-button">+ Додати папку</button></div>
+                    <div class="folder-table-scroll"><table class="folder-table" aria-label="Папки для сканування"><thead><tr><th scope="col">Папка</th><th scope="col"><span class="sr-only">Дії</span></th></tr></thead><tbody id="scan-rows"></tbody></table></div>
+                </section>
+                <section class="folder-column" aria-labelledby="excluded-folders-heading">
+                    <div class="folder-column-heading"><h2 id="excluded-folders-heading">Виключити <span id="excluded-count">0</span></h2><button type="button" id="add-excluded-folder" class="primary-button">+ Додати папку</button></div>
+                    <div class="folder-table-scroll"><table class="folder-table" aria-label="Виключені папки"><thead><tr><th scope="col">Папка</th><th scope="col"><span class="sr-only">Дії</span></th></tr></thead><tbody id="excluded-rows"></tbody></table></div>
+                </section>
+            </div>
+            <p id="folders-status" role="status"></p>
+        </div>
+        <div id="panel-exports" class="panel settings-panel">
+            <h1>Експорт і синхронізація</h1>
+            <p class="section-description">Передайте каталог у таблицю або відкрийте його як HTML-вітрину.</p>
+            <section class="settings-card"><h2>Google Sheets</h2><p>Каталог у Google Таблицях.</p>
+                <div class="settings-actions"><button type="button" id="btn-sync" class="primary-button">Синхронізувати</button><button type="button" id="btn-open-sheet">Відкрити таблицю</button></div>
+            </section>
+            <section class="settings-card"><h2>GitHub Pages</h2><p>Публікація мобільної HTML-вітрини.</p>
+                <div class="settings-actions"><button type="button" id="btn-sync-github" class="primary-button"><span class="nav-label">Опублікувати</span><span class="nav-spinner" aria-hidden="true"></span></button><button type="button" id="btn-open-page">Відкрити сайт</button><button type="button" id="btn-open-project">Репозиторій</button></div>
+            </section>
+            <section class="settings-card"><h2>Локальна HTML-вітрина</h2><p>Окремий HTML-каталог із локальними постерами, створений після обробки бібліотеки.</p>
+                <button type="button" id="btn-showcase">Відкрити вітрину</button>
+            </section>
+            <p id="exports-status" role="status"></p>
+        </div>
+        <div id="panel-models" class="panel settings-panel"><h1>Моделі ШІ</h1><p id="models-status" role="status"></p><div id="models-content"></div></div>
+        <div id="panel-about" class="panel settings-panel"><h1>Про MovieList</h1><section class="settings-card"><h2>MovieList <span id="about-version"></span></h2><p>Каталог локальної колекції фільмів і серіалів.</p><a href="#" id="sidebar-author-link">© 2026 shylosa</a></section></div>
         <div id="panel-editor" class="panel">
             <div class="editor-toolbar">
                 <div class="editor-heading"><h1>Редактор</h1><span id="editor-count">—</span></div>
@@ -212,6 +216,8 @@ const libraryScan = document.getElementById('library-scan');
 let isScanning = false;
 
 function setSidebarScanState(active) {
+    document.getElementById('activity-indicator').hidden = !(active || isGitHubSyncing);
+    folderTables.setScanning(active);
     btnScan.disabled = active;
     btnScan.classList.toggle('disabled', active);
     btnScan.setAttribute('aria-busy', String(active));
@@ -278,6 +284,12 @@ const switchTab = (tab, title) => {
 
     document.getElementById(`panel-${tab}`).classList.add('active');
     document.getElementById(`btn-${tab}`)?.classList.add('active');
+    document.getElementById('btn-settings').classList.toggle('active', ['models', 'exports', 'about'].includes(tab));
+    if (['models', 'exports', 'about', 'folders'].includes(tab)) {
+        const heading = document.querySelector(`#panel-${tab} h1`);
+        heading.tabIndex = -1;
+        heading.focus();
+    }
     document.querySelector('.main-area').classList.toggle('library-active', tab === 'library');
 
     document.getElementById('current-page-title').innerText = title;
@@ -288,10 +300,9 @@ const switchTab = (tab, title) => {
 
 // Прив'язка кнопок
 document.getElementById('btn-library').onclick = () => { switchTab('library', 'Бібліотека'); loadMovies(); };
-document.getElementById('btn-overview').onclick = () => switchTab('overview', 'Журнал');
+document.getElementById('btn-overview').onclick = () => switchTab('overview', 'Активність');
 document.getElementById('btn-sync').onclick = () => {
-    switchTab('overview', 'Sync Sheets');
-    SyncToCloud();
+    runExport('Синхронізація Google Sheets', SyncToCloud, document.getElementById('btn-sync'));
 };
 
 const btnSyncGitHub = document.getElementById('btn-sync-github');
@@ -300,14 +311,15 @@ let isGitHubSyncing = false;
 function setGitHubSyncBusy(busy) {
     isGitHubSyncing = busy;
     if (!btnSyncGitHub) return;
+    btnSyncGitHub.disabled = busy;
+    document.getElementById('activity-indicator').hidden = !(busy || isScanning);
     btnSyncGitHub.classList.toggle('disabled', busy);
     btnSyncGitHub.classList.toggle('syncing', busy);
 }
 
 btnSyncGitHub.onclick = () => {
     if (isGitHubSyncing) return;
-    switchTab('overview', 'GitHub Pages');
-    SyncToGitHub();
+    runExport('Публікація GitHub Pages', SyncToGitHub, btnSyncGitHub);
 };
 document.getElementById('btn-open-sheet').onclick = () => {
     OpenGoogleSheet();
@@ -332,8 +344,7 @@ if (btnOpenPage) {
 }
 
 document.getElementById('btn-showcase').onclick = () => {
-    switchTab('overview', 'Вітрина');
-    OpenShowcase();
+    runExport('Локальна HTML-вітрина', OpenShowcase, document.getElementById('btn-showcase'));
 };
 document.getElementById('btn-editor').onclick = () => {
     editorFilter = 'all';
@@ -351,25 +362,37 @@ document.getElementById('library-review-open').onclick = () => {
 
 document.getElementById('btn-logs').onclick = OpenLogs;
 
-document.getElementById('btn-select-folder').onclick = async () => {
-    try {
-        const path = await SelectMediaFolder();
-        if (path) {
-            logToConsole(`📁 Вибрана папка: ${path}`, "log-info");
-        }
-    } catch (err) {
-        logToConsole(`❌ Помилка вибору папки: ${err}`, "log-error");
-    }
+const settingsButton = document.getElementById('btn-settings');
+const settingsMenu = document.getElementById('settings-menu');
+bindSettingsMenu(settingsButton, settingsMenu);
+document.getElementById('btn-exports').onclick = () => switchTab('exports', 'Експорт і синхронізація');
+document.getElementById('btn-about').onclick = () => switchTab('about', 'Про MovieList');
+
+async function runExport(label, action, button) {
+    const status = document.getElementById('exports-status');
+    button.disabled = true;
+    status.textContent = `${label}…`;
+    try { await action(); if (button !== btnSyncGitHub) status.textContent = `${label}: перебіг і результат — в Активності.`; }
+    catch (error) { status.textContent = `${label}: ${error}`; }
+    finally { button.disabled = button === btnSyncGitHub ? isGitHubSyncing : false; }
+}
+
+const folderTables = createFolderTables({api: {GetScanFolders, SetScanFolders, SetExcludedFolders, SelectScanFolder, SelectExcludedFolder}});
+document.getElementById('btn-folders').onclick = async () => {
+    switchTab('folders', 'Папки сканування');
+    try { await folderTables.load(); }
+    catch (error) { document.getElementById('folders-status').textContent = String(error); }
 };
 
 document.getElementById('btn-models').onclick = async () => {
-    switchTab('overview', 'Моделі ШІ');
-	consoleBody.replaceChildren();
-    document.getElementById('console-status').innerText = "Запит до API...";
-	const loading = document.createElement('div'); loading.textContent = 'Отримання списку моделей Gemini…'; consoleBody.appendChild(loading);
+    switchTab('models', 'Моделі ШІ');
+    const modelsBody = document.getElementById('models-content');
+	modelsBody.replaceChildren();
+    document.getElementById('models-status').innerText = "Запит до API...";
+	const loading = document.createElement('div'); loading.textContent = 'Отримання списку моделей Gemini…'; modelsBody.appendChild(loading);
     try {
 		const catalog = await GetAIModelCatalog();
-		consoleBody.replaceChildren();
+		modelsBody.replaceChildren();
 		const currentTitle = document.createElement('h3'); currentTitle.textContent = 'Поточні моделі';
 		const currentList = document.createElement('div'); currentList.className = 'model-current-list';
 		for (const name of catalog.current || []) { const item = document.createElement('div'); item.textContent = name; currentList.appendChild(item); }
@@ -385,14 +408,14 @@ document.getElementById('btn-models').onclick = async () => {
 		const save = document.createElement('button'); save.type = 'button'; save.textContent = 'Зберегти вибір'; save.className = 'model-save';
 		save.onclick = async () => {
 			const selected = Array.from(form.querySelectorAll('input:checked'), input => input.value);
-			try { await SetAIModels(selected); document.getElementById('console-status').innerText = 'Вибір збережено'; }
-			catch (error) { document.getElementById('console-status').innerText = `Помилка: ${error}`; }
+			try { await SetAIModels(selected); document.getElementById('models-status').innerText = 'Вибір збережено'; }
+			catch (error) { document.getElementById('models-status').innerText = `Помилка: ${error}`; }
 		};
-		consoleBody.append(currentTitle, currentList, availableTitle, form, save);
-        document.getElementById('console-status').innerText = "Готово";
+		modelsBody.append(currentTitle, currentList, availableTitle, form, save);
+        document.getElementById('models-status').innerText = "Готово";
     } catch (e) {
-        logToConsole("❌ Помилка: " + e, "log-warn");
-        document.getElementById('console-status').innerText = "Помилка";
+        document.getElementById('models-status').textContent = `Помилка: ${e}`;
+
     }
 };
 
@@ -403,12 +426,15 @@ const pbArea = document.getElementById('scan-progress-area');
 const pb = document.getElementById('progress-bar');
 const cStatus = document.getElementById('console-status');
 
+let followActivity = true;
+consoleBody.addEventListener('scroll', () => { followActivity = consoleBody.scrollHeight - consoleBody.scrollTop - consoleBody.clientHeight < 40; });
+
 function logToConsole(text, className = "") {
     const line = document.createElement('div');
     if (className) line.className = className;
     line.innerText = text;
     consoleBody.appendChild(line);
-    consoleBody.scrollTop = consoleBody.scrollHeight;
+    if (followActivity) consoleBody.scrollTop = consoleBody.scrollHeight;
 }
 
 // --- ПРИЙОМ ПОДІЙ ВІД GO (МАГІЯ WAILS) ---
@@ -422,6 +448,7 @@ EventsOn('scan-started', () => {
     document.getElementById('library-scan-file').textContent = 'Пошук файлів і метаданих…';
     document.getElementById('library-progress-fill').style.width = '0%';
     libraryScan.disabled = true;
+    followActivity = true;
     consoleBody.innerHTML = ""; // Чистимо консоль
     logToConsole("🚀 Запуск процесу...");
 
@@ -461,8 +488,8 @@ EventsOn('log-message', (msg) => {
 });
 
 EventsOn('github-sync-started', () => {
-    switchTab('overview', 'GitHub Pages');
     setGitHubSyncBusy(true);
+    document.getElementById('exports-status').textContent = 'Публікація GitHub Pages…';
     cStatus.innerText = 'GitHub Pages...';
     logToConsole('📱 Синхронізація мобільної вітрини...');
 });
@@ -471,6 +498,7 @@ EventsOn('github-sync-finished', (data) => {
     setGitHubSyncBusy(false);
     const success = data && data.success;
     const message = (data && data.message) ? data.message : (success ? '✅ Готово' : '❌ Помилка синхронізації');
+    document.getElementById('exports-status').textContent = message;
     logToConsole(message, success ? 'log-success' : 'log-warn');
     cStatus.innerText = success ? 'Готово' : 'Помилка';
 });
@@ -505,28 +533,6 @@ async function loadStats() {
         const stats = await GetStats();
         console.log("📊 Статистика отримана:", stats);
 
-        document.getElementById('val-total').innerText = stats.total;
-
-        // ⬅️ ДОДАНО: Спочатку перевіряємо, чи є взагалі файли
-        if (stats.total === 0 || stats.total === "0") {
-            document.getElementById('val-unrec').innerText = "📭 База порожня";
-            document.getElementById('val-unrec').style.color = "var(--text-dim)"; // Робимо текст сірим
-            document.getElementById('sub-unrec').innerText = "Оновіть базу";
-        }
-        // Якщо файли є, але є нерозпізнані
-        else if (stats.unrec > 0) {
-            document.getElementById('val-unrec').innerText = `⚠ ${stats.unrec}`;
-            document.getElementById('val-unrec').style.color = "var(--warn-yellow)";
-            document.getElementById('sub-unrec').innerText = `Нерозпізнані: ${stats.unrec}; сумнівні: ${stats.suspicious || 0}`;
-        }
-        // Якщо файли є і всі розпізнані успішно
-        else {
-            document.getElementById('val-unrec').innerText = "✓ Всі розпізнані";
-            document.getElementById('val-unrec').style.color = "var(--ok-green)";
-            document.getElementById('sub-unrec').innerText = "База актуальна";
-        }
-
-        document.getElementById('val-last').innerText = stats.last;
         document.getElementById('library-total').textContent = Number(stats.total || 0).toLocaleString('uk-UA');
         const reviewCount = Number(stats.unrec || 0) + Number(stats.suspicious || 0);
         document.getElementById('library-review').textContent = reviewCount.toLocaleString('uk-UA');
@@ -615,7 +621,7 @@ function renderMovieView(movie) {
     const cast = document.getElementById('movie-cast-section');
     document.getElementById('movie-cast').replaceChildren(...metadataValues(movie.cast).map(actor => metadataButton(actor, 'movie-cast-link')));
     cast.hidden = !movie.cast;
-    document.getElementById('movie-file-path').textContent = movie.filename;
+    document.getElementById('movie-file-path').textContent = movie.file_path || movie.filename;
 }
 
 function showMovieView(movie, returnTab = 'library') {
@@ -864,7 +870,7 @@ function renderEditorBatchPanel() {
         const identity = editorElement('div', 'editor-batch-identity');
         identity.appendChild(editorElement('strong', '', movie.title_ua || movie.title_en || 'Не розпізнано'));
         const filename = editorElement('span', '', movie.file_label || movie.filename);
-        filename.title = movie.filename;
+        filename.title = movie.file_path || movie.filename;
         identity.appendChild(filename);
         const typeLabel = editorElement('label', '', 'Тип');
         const type = editorElement('select', 'editor-batch-type');
@@ -939,7 +945,7 @@ function renderMovies(movies) {
         const titleCell = editorElement('div', 'col-file');
         titleCell.appendChild(editorElement('strong', 'editor-row-title', movie.title_ua || movie.title_en || 'Не розпізнано'));
         const file = editorElement('span', 'editor-row-file', movie.file_label || movie.filename);
-        file.title = movie.filename;
+        file.title = movie.file_path || movie.filename;
         titleCell.appendChild(file);
         const yearCell = editorElement('span', 'col-year', movie.year || '—');
         const typeCell = editorElement('span', 'col-type', movie.media_type === 'tv' ? 'Серіал' : movie.media_type === 'movie' ? 'Фільм' : '—');
@@ -1075,7 +1081,7 @@ function renderEditorInspector() {
     content.appendChild(hero);
     const path = editorElement('div', 'inspector-file');
     path.appendChild(editorElement('span', 'inspector-label', 'ФАЙЛ'));
-    path.appendChild(editorElement('strong', '', movie.filename));
+    path.appendChild(editorElement('strong', '', movie.file_path || movie.filename));
     content.appendChild(path);
     const fields = editorElement('div', 'inspector-fields');
     const typeLabel = editorElement('label', '', 'Тип для пошуку');
@@ -1366,6 +1372,7 @@ async function loadAppVersion() {
         const welcomeEl = document.getElementById('welcome-message');
         if (versionEl && version) {
             versionEl.innerText = version;
+            document.getElementById('about-version').textContent = version;
         }
         if (welcomeEl && version) {
             welcomeEl.innerText = `Вітаю у MovieList ${version}! Система готова до роботи.`;

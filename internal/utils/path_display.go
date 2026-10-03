@@ -11,6 +11,11 @@ import (
 // relativePath — значення movies.filename (відносний шлях від media folder).
 func DisplayFileLabel(relativePath string) string {
 	cleanPath := filepath.ToSlash(relativePath)
+	if strings.HasPrefix(cleanPath, "source:") {
+		if _, suffix, found := strings.Cut(cleanPath, "/"); found {
+			cleanPath = suffix
+		}
+	}
 	parts := strings.SplitN(cleanPath, "/", 2)
 	if len(parts) == 2 {
 		return parts[0] // є каталог — повертаємо сиру назву папки

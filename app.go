@@ -154,6 +154,8 @@ func (a *App) startup(ctx context.Context) {
 		os.Exit(1)
 	}
 	a.restoreMediaFolder(ctx)
+	a.restoreExcludedFolders()
+	a.restoreScanFolders()
 	a.tmdbClient = tmdb.NewClient(a.cfg)
 	a.aiClient = ai.NewClient(a.cfg)
 	if err := a.auditDuplicateMovieIdentities(ctx); err != nil {
@@ -242,8 +244,16 @@ func (a *App) GetMovies() ([]storage.Movie, error) {
 	if movies == nil {
 		return []storage.Movie{}, nil
 	}
+	a.scanMutex.Lock()
+	defer a.scanMutex.Unlock()
 	for i := range movies {
+		if err := a.ctx.Err(); err != nil {
+			return nil, err
+		}
 		movies[i].FileLabel = utils.DisplayFileLabel(movies[i].Filename)
+		if a.cfg != nil {
+			movies[i].FilePath = a.cfg.ResolveMediaPath(movies[i].Filename)
+		}
 	}
 	return movies, nil
 }
@@ -334,7 +344,15 @@ func (a *App) setMediaFolder(path string) (string, error) {
 	if err := a.db.SetState(a.ctx, "media_folder_path", path); err != nil {
 		return "", fmt.Errorf("save selected media folder: %w", err)
 	}
+	state, err := json.Marshal(savedScanFolders{Root: path, Folders: []string{path}, Sources: a.cfg.MediaSources})
+	if err != nil {
+		return "", err
+	}
+	if err := a.db.SetState(a.ctx, "scan_folders", string(state)); err != nil {
+		return "", err
+	}
 	a.cfg.MediaFolderPath = path
+	a.cfg.MediaFolders = []string{path}
 	if a.tmdbClient != nil {
 		a.tmdbClient.SetMediaRoot(path)
 	}
@@ -1638,7 +1656,7 @@ func (a *App) rescueEmptyGeminiWithFolder(ctx context.Context, filePath string) 
 	}
 
 	parsed := tmdb.ParseFilename(filePath)
-	parentTitle := cleanRescueParentTitle(filePath, a.cfg.MediaFolderPath, parsed.ParentDir)
+	parentTitle := cleanRescueParentTitle(filePath, a.cfg.RootForPath(filePath), parsed.ParentDir)
 	if parentTitle == "" {
 		logger.Warn("gemini_empty_rescue_skipped_no_parent_title")
 		return storage.Movie{Filename: fname}
@@ -2229,7 +2247,7 @@ func (a *App) FixSelected(selected []FixRequest) {
 		if fixRequestUsesDirectPath(s, existing) {
 			withHint = append(withHint, s)
 		} else {
-			geminiQueue = append(geminiQueue, filepath.Join(a.cfg.MediaFolderPath, s.Filename))
+			geminiQueue = append(geminiQueue, a.cfg.ResolveMediaPath(s.Filename))
 		}
 	}
 
@@ -2481,7 +2499,7 @@ func (a *App) updateMovieWithMediaType(ctx context.Context, filename, hint, requ
 	} else {
 		rec = preserveRecognizedContext(rec, existing)
 	}
-	movie := a.mergeGeminiWithTMDBForType(ctx, filepath.Join(a.cfg.MediaFolderPath, filename), rec, strictMediaType)
+	movie := a.mergeGeminiWithTMDBForType(ctx, a.cfg.ResolveMediaPath(filename), rec, strictMediaType)
 	if !strictMediaType && identityReplacementConflicts(existing, movie) {
 		utils.LoggerWithTrace(ctx).Warn("identity_replacement_rejected",
 			slog.String("file", filename), slog.Int("old_tmdb_id", existing.TmdbID), slog.String("old_media_type", existing.MediaType), slog.String("old_year", existing.Year),
@@ -2556,11 +2574,7 @@ func sameMovieIdentity(existing *storage.Movie, replacement storage.Movie) bool 
 
 // getFileIdentifier повертає відносний шлях до файлу (захищає від колізій імен файлів)
 func (a *App) getFileIdentifier(p string) string {
-	rel, err := filepath.Rel(a.cfg.MediaFolderPath, p)
-	if err != nil || strings.HasPrefix(rel, "..") {
-		return filepath.Base(p) // Фоллбек, якщо файл поза медіатекою
-	}
-	return filepath.ToSlash(rel)
+	return a.cfg.MediaIdentifier(p)
 }
 
 // filterUnprocessed повертає файли яких немає в БД або які нерозпізнані

@@ -30,6 +30,10 @@ export function GetMovies() {
   return window['go']['main']['App']['GetMovies']();
 }
 
+export function GetScanFolders() {
+  return window['go']['main']['App']['GetScanFolders']();
+}
+
 export function GetStats() {
   return window['go']['main']['App']['GetStats']();
 }
@@ -78,12 +82,28 @@ export function SearchTMDBCandidates(arg1) {
   return window['go']['main']['App']['SearchTMDBCandidates'](arg1);
 }
 
+export function SelectExcludedFolder() {
+  return window['go']['main']['App']['SelectExcludedFolder']();
+}
+
 export function SelectMediaFolder() {
   return window['go']['main']['App']['SelectMediaFolder']();
 }
 
+export function SelectScanFolder() {
+  return window['go']['main']['App']['SelectScanFolder']();
+}
+
 export function SetAIModels(arg1) {
   return window['go']['main']['App']['SetAIModels'](arg1);
+}
+
+export function SetExcludedFolders(arg1) {
+  return window['go']['main']['App']['SetExcludedFolders'](arg1);
+}
+
+export function SetScanFolders(arg1) {
+  return window['go']['main']['App']['SetScanFolders'](arg1);
 }
 
 export function StopScan() {

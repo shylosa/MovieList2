@@ -802,3 +802,52 @@ button.review-stat:focus-visible { outline: 2px solid var(--warn-yellow); outlin
     .library-controls { align-items: flex-start; flex-direction: column; }
     .library-sort-label { width: 100%; justify-content: space-between; }
 }
+
+/* Sidebar navigation and settings */
+.sidebar-primary { padding-top: 10px; flex: 1; overflow-y: auto; }
+button.nav-btn { border: 0; background: transparent; font-family: inherit; text-align: left; }
+.sidebar-primary > .nav-btn, .sidebar-bottom > .nav-btn, #btn-settings { width: calc(100% - 16px); }
+.sidebar-bottom { padding: 8px 0; }
+.settings-anchor { position: relative; border-top: 1px solid var(--sidebar-brd); margin-top: 8px; padding-top: 8px; }
+.settings-chevron { margin-left: auto; }
+.settings-menu { position: absolute; bottom: calc(100% + 6px); left: 8px; right: 8px; background: var(--sidebar-bg); border: 1px solid var(--sidebar-brd); border-radius: 12px; padding: 6px; z-index: 30; box-shadow: 0 8px 24px #0006; }
+.settings-menu[hidden], #activity-indicator[hidden] { display: none; }
+.settings-menu button { display: block; width: 100%; padding: 12px 8px; border: 0; border-radius: 7px; background: transparent; color: var(--text-primary); text-align: left; font: inherit; cursor: pointer; }
+.settings-menu button:hover, .settings-menu button:focus-visible { background: var(--nav-hover); }
+.settings-menu hr { border: 0; border-top: 1px solid var(--sidebar-brd); }
+#activity-indicator { margin-left: auto; color: var(--ok-green); font-size: 10px; }
+.settings-panel { overflow-y: auto; }
+.settings-panel h1, #panel-overview h1 { font-size: 24px; margin: 0 0 12px; }
+.section-description { color: var(--text-muted); line-height: 1.6; }
+.settings-card { flex-shrink: 0; border: 1px solid var(--sidebar-brd); border-radius: 12px; padding: 20px; margin: 18px 0; max-width: 760px; }
+.settings-card h2 { font-size: 17px; margin: 0 0 12px; }
+.settings-actions { display: flex; gap: 10px; flex-wrap: wrap; }
+.settings-panel button { cursor: pointer; }
+.settings-panel button:not(.primary-button) { background: var(--sidebar-bg); color: var(--text-primary); border: 1px solid var(--sidebar-brd); border-radius: 8px; padding: 10px 14px; font: inherit; }
+.settings-panel button:disabled { opacity: .5; cursor: default; }
+.folder-path { overflow-wrap: anywhere; line-height: 1.6; }
+#excluded-folders { display: block; box-sizing: border-box; width: 100%; resize: vertical; margin: 10px 0 16px; padding: 12px; border: 1px solid var(--sidebar-brd); border-radius: 8px; color: var(--text-primary); background: var(--sidebar-bg); font: inherit; }
+button:focus-visible, textarea:focus-visible { outline: 2px solid var(--blue-text); outline-offset: 2px; }
+button.nav-btn:hover { background: var(--nav-hover); }
+button.nav-btn.active { background: var(--nav-active); }
+.settings-card .nav-spinner { display: none; }
+.settings-card .syncing .nav-spinner { display: inline-block; }
+#btn-sync-github.syncing .nav-label { display: inline; }
+#btn-sync-github .nav-spinner { width: 14px; height: 14px; margin-left: 8px; border: 2px solid var(--text-dim); border-top-color: var(--blue-text); border-radius: 50%; animation: nav-spin .8s linear infinite; vertical-align: middle; }
+.settings-menu { max-height: calc(100vh - 180px); overflow-y: auto; }
+.folder-columns { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 20px; flex: 1; min-height: 260px; }
+.folder-column { display: flex; flex-direction: column; min-width: 0; min-height: 0; border: 1px solid var(--sidebar-brd); background: var(--stat-bg); border-radius: 12px; overflow: hidden; }
+.folder-column-heading { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between; padding: 18px; border-bottom: 1px solid var(--sidebar-brd); }
+.folder-column-heading h2 { margin: 0; font-size: 17px; }
+.folder-column-heading h2 span { font-size: 13px; color: var(--text-dim); margin-left: 6px; }
+.folder-table-scroll { overflow: auto; flex: 1; }
+.folder-table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+.folder-table th, .folder-table td { padding: 12px 16px; text-align: left; border-bottom: 1px solid var(--sidebar-brd); }
+.folder-table th { font-size: 12px; color: var(--text-dim); font-weight: 500; }
+.folder-table th:last-child, .folder-table td:last-child { width: 56px; padding: 8px; }
+.folder-table td.folder-table-path { overflow-wrap: anywhere; font-size: 13px; line-height: 1.5; }
+.folder-table td.folders-empty { width: auto; padding: 28px 16px; color: var(--text-dim); text-align: center; }
+.settings-panel .folder-remove { padding: 4px 10px !important; font-size: 21px !important; background: transparent !important; border: 0 !important; color: var(--text-dim) !important; }
+.settings-panel .folder-remove:hover { color: var(--warn-yellow) !important; }
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; }
+@media (max-width: 850px) { .folder-columns { grid-template-columns: 1fr; flex: none; } .folder-column { min-height: 240px; max-height: 400px; } }

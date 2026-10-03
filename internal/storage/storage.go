@@ -20,6 +20,7 @@ type Movie struct {
 	ID                    int     `json:"id"`
 	Filename              string  `json:"filename"`
 	FileLabel             string  `json:"file_label,omitempty"` // computed for UI; not stored in SQLite
+	FilePath              string  `json:"file_path,omitempty"`  // resolved source path for UI; not stored in SQLite
 	TmdbID                int     `json:"tmdb_id"`
 	TitleUA               string  `json:"title_ua"`
 	TitleEN               string  `json:"title_en"`

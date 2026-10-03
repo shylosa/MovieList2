@@ -16,6 +16,8 @@ type Config struct {
 	GithubURL          string
 	GithubPageURL      string
 	MediaFolderPath    string
+	MediaFolders       []string
+	MediaSources       []string
 	ExcludeFolders     []string
 	GeminiAPIKey       string
 	GeminiModels       []string

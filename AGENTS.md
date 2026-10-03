@@ -25,6 +25,15 @@ MovieList App — desktop application for cataloging local movie/TV collections.
 | `internal/utils/` | Logging, language helpers, path display |
 | `internal/web/` | Static showcase generator |
 
+### Multiple scan sources
+
+* `Config.MediaFolders` is the active source list; nil preserves the legacy `MediaFolderPath` default. An explicitly empty list aborts scanning before catalog cleanup.
+* `MediaFolderPath` remains the original identifier anchor. Existing relative `movies.filename` keys are preserved. Additional sources outside that anchor use `source:<SHA-256 of normalized root>/<full relative media path>` to avoid collisions across folders and drives. This is the explicit extension of the filename key format for multiple sources; it does not rewrite existing records or introduce rowid identifiers.
+* `Config.MediaIdentifier` and `ResolveMediaPath` provide round-trip source mapping. Saved source history resolves records until the next catalog cleanup; removal or reordering of sources never changes remaining identifiers.
+* `scan_folders` and `excluded_folders` persist through `app_state`. Sources cannot overlap. Any unavailable source aborts the disk scan before cleanup. Absolute exclusions skip the complete selected subtree; legacy bare names retain first-level semantics.
+* Recognition uses the corresponding source root as the boundary for parent-directory rescue. `DisplayFileLabel` strips the source namespace before computing the raw folder/file navigation label.
+* `Movie.FilePath` is computed by `GetMovies()` for displaying the actual source path; it is not stored and never replaces `Filename` as the record key.
+
 ### Showcase & GitHub Pages
 
 | File | Role |

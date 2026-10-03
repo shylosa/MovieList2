@@ -29,14 +29,44 @@ func (s *Scanner) GetDiskFiles(ctx context.Context) ([]string, error) {
 		return nil, err
 	}
 
-	root := s.cfg.MediaFolderPath
+	roots := s.cfg.ScanRoots()
+	if len(roots) == 0 {
+		return nil, fmt.Errorf("Не вибрано жодної папки для сканування")
+	}
+	for _, root := range roots {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		files, err := s.scanRoot(ctx, root)
+		if err != nil {
+			return nil, err
+		}
+		results = append(results, files...)
+	}
+	slog.Info("disk_scan_completed", slog.Int("total_files", len(results)))
+	return results, nil
+}
+
+func (s *Scanner) excluded(path string, matchNames bool) bool {
+	for _, folder := range s.cfg.ExcludeFolders {
+		if filepath.IsAbs(folder) {
+			if config.PathWithin(folder, path) {
+				return true
+			}
+		} else if matchNames && strings.EqualFold(folder, filepath.Base(path)) {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Scanner) scanRoot(ctx context.Context, root string) ([]string, error) {
+	var results []string
 	if _, err := os.Stat(root); os.IsNotExist(err) {
 		return nil, err
 	}
-
-	excludeMap := make(map[string]bool)
-	for _, folder := range s.cfg.ExcludeFolders {
-		excludeMap[strings.ToLower(folder)] = true
+	if s.excluded(root, false) {
+		return results, nil
 	}
 
 	entries, err := os.ReadDir(root)
@@ -51,7 +81,7 @@ func (s *Scanner) GetDiskFiles(ctx context.Context) ([]string, error) {
 		name := entry.Name()
 		fullPath := filepath.Join(root, name)
 
-		if excludeMap[strings.ToLower(name)] {
+		if s.excluded(fullPath, true) {
 			continue
 		}
 
@@ -71,7 +101,6 @@ func (s *Scanner) GetDiskFiles(ctx context.Context) ([]string, error) {
 		}
 	}
 
-	slog.Info("disk_scan_completed", slog.Int("total_files", len(results)))
 	return results, nil
 }
 
@@ -85,6 +114,9 @@ func (s *Scanner) getLargestVideoInDir(ctx context.Context, dirPath string) (str
 		}
 		if err != nil {
 			return err
+		}
+		if d.IsDir() && s.excluded(path, false) {
+			return filepath.SkipDir
 		}
 		if !d.IsDir() {
 			ext := strings.ToLower(filepath.Ext(path))

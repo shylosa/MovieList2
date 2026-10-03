@@ -65,17 +65,17 @@ export namespace main {
 	export class MetadataRepairResult {
 	    movie: storage.Movie;
 	    warning?: string;
-
+	
 	    static createFrom(source: any = {}) {
 	        return new MetadataRepairResult(source);
 	    }
-
+	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
 	        this.movie = this.convertValues(source["movie"], storage.Movie);
 	        this.warning = source["warning"];
 	    }
-
+	
 		convertValues(a: any, classs: any, asMap: boolean = false): any {
 		    if (!a) {
 		        return a;
@@ -94,6 +94,22 @@ export namespace main {
 		    return a;
 		}
 	}
+	export class ScanFolders {
+	    root: string;
+	    folders: string[];
+	    excluded: string[];
+	
+	    static createFrom(source: any = {}) {
+	        return new ScanFolders(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.root = source["root"];
+	        this.folders = source["folders"];
+	        this.excluded = source["excluded"];
+	    }
+	}
 
 }
 
@@ -103,6 +119,7 @@ export namespace storage {
 	    id: number;
 	    filename: string;
 	    file_label?: string;
+	    file_path?: string;
 	    tmdb_id: number;
 	    title_ua: string;
 	    title_en: string;
@@ -130,6 +147,7 @@ export namespace storage {
 	        this.id = source["id"];
 	        this.filename = source["filename"];
 	        this.file_label = source["file_label"];
+	        this.file_path = source["file_path"];
 	        this.tmdb_id = source["tmdb_id"];
 	        this.title_ua = source["title_ua"];
 	        this.title_en = source["title_en"];

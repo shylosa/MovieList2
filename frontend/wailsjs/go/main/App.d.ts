@@ -18,6 +18,8 @@ export function GetAppVersion():Promise<string>;
 
 export function GetMovies():Promise<Array<storage.Movie>>;
 
+export function GetScanFolders():Promise<main.ScanFolders>;
+
 export function GetStats():Promise<Record<string, any>>;
 
 export function GetTMDBCandidateDetails(arg1:main.CandidateConfirmRequest):Promise<tmdb.CandidateDetails>;
@@ -42,9 +44,17 @@ export function RunScan():Promise<void>;
 
 export function SearchTMDBCandidates(arg1:main.CandidateSearchRequest):Promise<Array<tmdb.TMDBCandidate>>;
 
+export function SelectExcludedFolder():Promise<void>;
+
 export function SelectMediaFolder():Promise<string>;
 
+export function SelectScanFolder():Promise<void>;
+
 export function SetAIModels(arg1:Array<string>):Promise<void>;
+
+export function SetExcludedFolders(arg1:Array<string>):Promise<void>;
+
+export function SetScanFolders(arg1:Array<string>):Promise<void>;
 
 export function StopScan():Promise<void>;
 
