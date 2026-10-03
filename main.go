@@ -8,6 +8,7 @@ import (
 
 	"movielist-app/internal/config"
 	"movielist-app/internal/utils"
+	"movielist-app/internal/version"
 
 	"github.com/wailsapp/wails/v2"
 	"github.com/wailsapp/wails/v2/pkg/options"
@@ -38,7 +39,7 @@ func main() {
 	app.cfg = config.Load()
 
 	err := wails.Run(&options.App{
-		Title:     "MovieList " + app.cfg.AppVersion,
+		Title:     "MovieList " + version.Current,
 		Width:     1100,
 		Height:    650,
 		MinWidth:  860,

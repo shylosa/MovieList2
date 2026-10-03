@@ -12,6 +12,7 @@ import (
 	"movielist-app/internal/config"
 	"movielist-app/internal/storage"
 	"movielist-app/internal/tmdb"
+	"movielist-app/internal/version"
 )
 
 func captureDiagnostics(t *testing.T) *bytes.Buffer {
@@ -24,9 +25,10 @@ func captureDiagnostics(t *testing.T) *bytes.Buffer {
 }
 
 func TestStartupLogsVersion(t *testing.T) {
+	t.Setenv("APP_VERSION", "runtime-override-must-be-ignored")
 	output := captureDiagnostics(t)
 	a := NewApp()
-	a.cfg = &config.Config{AppVersion: "2.8.1", DBPath: filepath.Join(t.TempDir(), "movies.db"), PostersDir: t.TempDir()}
+	a.cfg = &config.Config{DBPath: filepath.Join(t.TempDir(), "movies.db"), PostersDir: t.TempDir()}
 	a.startup(context.Background())
 	defer a.db.Close()
 	defer a.tmdbClient.Close()
@@ -34,8 +36,15 @@ func TestStartupLogsVersion(t *testing.T) {
 	if err := json.Unmarshal(bytes.Split(output.Bytes(), []byte("\n"))[0], &event); err != nil {
 		t.Fatal(err)
 	}
-	if event["msg"] != "app_started" || event["version"] != "2.8.1" {
+	if event["msg"] != "app_started" || event["version"] != version.Current {
 		t.Fatal(event)
+	}
+}
+
+func TestGetAppVersionWithoutRuntimeConfig(t *testing.T) {
+	t.Setenv("APP_VERSION", "runtime-override-must-be-ignored")
+	if NewApp().GetAppVersion() != version.Current {
+		t.Fatal("API does not use embedded release version")
 	}
 }
 

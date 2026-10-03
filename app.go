@@ -31,6 +31,7 @@ import (
 	"movielist-app/internal/storage"
 	"movielist-app/internal/tmdb"
 	"movielist-app/internal/utils"
+	"movielist-app/internal/version"
 	"movielist-app/internal/web"
 
 	"github.com/google/uuid"
@@ -44,9 +45,12 @@ type App struct {
 	tmdbClient                 *tmdb.Client
 	aiClient                   *ai.Client
 	aiModelsCache              []string
+	discoveredGrokModels       []string
+	discoveredGroqModels       []string
 	discoveredAIModels         []string
 	aiModelsHTTPClient         *http.Client
 	modelsMutex                sync.RWMutex
+	configFileMutex            sync.Mutex
 	modelsGroup                singleflight.Group
 	scanCancel                 context.CancelFunc
 	isScanning                 bool
@@ -140,7 +144,7 @@ func (a *App) startup(ctx context.Context) {
 	if a.cfg == nil {
 		a.cfg = config.Load()
 	}
-	slog.Info("app_started", slog.String("version", a.cfg.AppVersion))
+	slog.Info("app_started", slog.String("version", version.Current))
 
 	var err error
 	a.db, err = storage.New(a.cfg.DBPath)
@@ -277,7 +281,7 @@ func (a *App) GetStats() map[string]interface{} {
 }
 
 func (a *App) GetAppVersion() string {
-	return a.cfg.AppVersion
+	return version.Current
 }
 
 func (a *App) DeleteMovie(filename string) error {
@@ -557,57 +561,55 @@ func (a *App) GetAIModels() ([]string, error) {
 // GetAIModelCatalog refreshes Gemini's model list and returns configured models
 // separately from every compatible model reported by the API.
 func (a *App) GetAIModelCatalog() (AIModelCatalog, error) {
-	a.modelsMutex.Lock()
-	a.aiModelsCache = nil
-	a.discoveredAIModels = nil
-	a.modelsMutex.Unlock()
-	current, err := a.fetchAIModels(a.ctx)
-	a.modelsMutex.RLock()
-	available := append([]string(nil), a.discoveredAIModels...)
-	a.modelsMutex.RUnlock()
-	return AIModelCatalog{Current: current, Available: available}, err
+	current := a.configuredGeminiModels()
+	if a.cfg.GeminiAPIKey == "" {
+		return AIModelCatalog{Current: current}, fmt.Errorf("GEMINI_API_KEY not configured")
+	}
+	value, err, _ := a.modelsGroup.Do("gemini_catalog", func() (interface{}, error) {
+		ctx := a.ctx
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		defer cancel()
+		client := a.aiModelsHTTPClient
+		if client == nil {
+			client = &http.Client{Timeout: 15 * time.Second}
+		}
+		genClient, err := genai.NewClient(ctx, &genai.ClientConfig{APIKey: a.cfg.GeminiAPIKey, Backend: genai.BackendGeminiAPI, HTTPClient: client})
+		if err != nil {
+			return nil, fmt.Errorf("Gemini catalog initialization failed")
+		}
+		available := []string{}
+		for model, listErr := range genClient.Models.All(ctx) {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			if listErr != nil {
+				return nil, fmt.Errorf("Gemini catalog request failed")
+			}
+			name := strings.TrimPrefix(model.Name, "models/")
+			if isUsableGeminiModel(name, model.SupportedActions) {
+				available = append(available, name)
+			}
+		}
+		sort.Strings(available)
+		a.modelsMutex.Lock()
+		a.discoveredAIModels = append([]string(nil), available...)
+		a.modelsMutex.Unlock()
+		if a.aiClient != nil {
+			a.aiClient.RefreshModelAvailability()
+		}
+		return available, nil
+	})
+	if err != nil {
+		return AIModelCatalog{Current: current}, err
+	}
+	return AIModelCatalog{Current: current, Available: value.([]string)}, nil
 }
 
 func (a *App) SetAIModels(names []string) error {
-	if len(names) == 0 {
-		return fmt.Errorf("select at least one Gemini model")
-	}
-	catalog, err := a.GetAIModelCatalog()
-	if err != nil {
-		return err
-	}
-	available := make(map[string]bool, len(catalog.Available))
-	for _, name := range catalog.Available {
-		available[name] = true
-	}
-	selected := make([]string, 0, len(names))
-	seen := make(map[string]bool, len(names))
-	for _, name := range names {
-		name = strings.TrimSpace(name)
-		if !available[name] || seen[name] {
-			continue
-		}
-		seen[name] = true
-		selected = append(selected, name)
-	}
-	if len(selected) == 0 {
-		return fmt.Errorf("selected models are not available for generateContent")
-	}
-	encoded, err := json.Marshal(selected)
-	if err != nil {
-		return err
-	}
-	if err := a.db.SetState(a.ctx, "selected_gemini_models", string(encoded)); err != nil {
-		return err
-	}
-	if a.aiClient != nil {
-		a.aiClient.SetModels(selected)
-	}
-	a.modelsMutex.Lock()
-	a.aiModelsCache = append([]string(nil), selected...)
-	a.modelsMutex.Unlock()
-	slog.Info("ai_models_selection_updated", slog.Int("selected", len(selected)))
-	return nil
+	return a.SetProviderModels("gemini", names)
 }
 
 func (a *App) configuredGeminiModels() []string {
@@ -621,99 +623,55 @@ func (a *App) configuredGeminiModels() []string {
 }
 
 // fetchAIModels is the internal implementation that accepts a context.
-// This allows internal callers (like RunScan warmup) to pass their
-// scan-specific context while keeping the exported signature RPC-friendly.
+// Discovery shares the same singleflight request as the settings catalog.
 func (a *App) fetchAIModels(ctx context.Context) ([]string, error) {
-	if ctx == nil {
-		ctx = context.Background()
+	if ctx != nil && ctx.Err() != nil {
+		return nil, ctx.Err()
 	}
-	// Grok-only mode: if Gemini key is absent but Grok is configured — report Grok as available.
 	if a.cfg.GeminiAPIKey == "" {
-		if a.cfg.GrokAPIKey != "" {
-			return []string{"grok-3-mini"}, nil
+		if a.cfg.GroqAPIKey != "" {
+			return a.configuredGroqModels(), nil
 		}
-		return nil, fmt.Errorf("no AI API key configured (set GEMINI_API_KEY or GROK_API_KEY in .env)")
+		if a.cfg.GrokAPIKey != "" {
+			return a.configuredGrokModels(), nil
+		}
+		return nil, fmt.Errorf("no AI API key configured")
 	}
 	a.modelsMutex.RLock()
-	if len(a.aiModelsCache) > 0 {
-		cache := append([]string(nil), a.aiModelsCache...)
-		a.modelsMutex.RUnlock()
-		return cache, nil
-	}
+	cached := append([]string(nil), a.aiModelsCache...)
 	a.modelsMutex.RUnlock()
-
-	// safe to ignore: singleflight shared flag is not needed by callers.
-	value, err, _ := a.modelsGroup.Do("ai_models", func() (interface{}, error) {
-		client := a.aiModelsHTTPClient
-		if client == nil {
-			client = &http.Client{Timeout: 10 * time.Second}
-		}
-		genClient, err := genai.NewClient(ctx, &genai.ClientConfig{
-			APIKey: a.cfg.GeminiAPIKey, Backend: genai.BackendGeminiAPI, HTTPClient: client,
-		})
-		if err != nil {
-			return nil, err
-		}
-		discovered := make(map[string]bool)
-		for model, listErr := range genClient.Models.All(ctx) {
-			if listErr != nil {
-				return nil, listErr
-			}
-			name := strings.TrimPrefix(model.Name, "models/")
-			if isUsableGeminiModel(name, model.SupportedActions) {
-				discovered[name] = true
-			}
-		}
-		discoveredNames := make([]string, 0, len(discovered))
-		for name := range discovered {
-			discoveredNames = append(discoveredNames, name)
-		}
-		sort.Strings(discoveredNames)
-		names := selectConfiguredGeminiModels(a.configuredGeminiModels(), discovered)
-		if len(names) == 0 {
-			return nil, fmt.Errorf("no configured Gemini generateContent models are available")
-		}
-
-		if a.aiClient != nil {
-			a.aiClient.SetModels(names) // SetModels receives only Gemini models — correct.
-		}
-
-		// Append Grok as a known fallback model if configured.
-		if a.cfg.GrokAPIKey != "" {
-			names = append(names, "grok-3-mini (fallback)")
-		}
-
-		// Cache includes Grok suffix so all callers see a consistent list.
-		a.modelsMutex.Lock()
-		a.aiModelsCache = append([]string(nil), names...)
-		a.discoveredAIModels = append([]string(nil), discoveredNames...)
-		a.modelsMutex.Unlock()
-
-		return append([]string(nil), names...), nil
-	})
+	if len(cached) > 0 {
+		return cached, nil
+	}
+	catalog, err := a.GetAIModelCatalog()
+	configured := a.configuredGeminiModels()
 	if err != nil {
-		configured := a.configuredGeminiModels()
-		fallback := make([]string, 0, len(configured))
+		if ctx != nil && ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		fallback := []string{}
 		for _, name := range configured {
 			if isUsableGeminiModel(name, []string{"generateContent"}) {
 				fallback = append(fallback, name)
 			}
 		}
-		if len(fallback) > 0 {
-			slog.Warn("ai_models_discovery_fallback", slog.Any("error", err), slog.Any("models", fallback))
-			if a.aiClient != nil {
-				a.aiClient.SetModels(fallback)
-			}
-			return fallback, nil
+		if len(fallback) == 0 {
+			return nil, err
 		}
-		return nil, err
+		slog.Warn("ai_models_discovery_fallback", slog.Any("error", err))
+		return fallback, nil
 	}
-
-	names, ok := value.([]string)
-	if !ok {
-		slog.Error("fetch_ai_models_type_assertion_failed", slog.String("type", fmt.Sprintf("%T", value)))
-		return nil, fmt.Errorf("fetchAIModels: unexpected type %T", value)
+	discovered := make(map[string]bool)
+	for _, name := range catalog.Available {
+		discovered[name] = true
 	}
+	names := selectConfiguredGeminiModels(configured, discovered)
+	if len(names) == 0 {
+		return nil, fmt.Errorf("no configured Gemini generateContent models are available")
+	}
+	a.modelsMutex.Lock()
+	a.aiModelsCache = append([]string(nil), names...)
+	a.modelsMutex.Unlock()
 	return names, nil
 }
 
@@ -767,7 +725,7 @@ func (a *App) RunScan() {
 
 	// 🟢 Створюємо контекст ДО запуску горутини (усуває race з StopScan).
 	// Якщо StopScan() викликається між wg.Add і setScanCancel — cancelScan() був silent no-op.
-	ctx, cancel := context.WithCancel(a.ctx)
+	ctx, cancel := context.WithCancel(a.modelContext(a.ctx))
 	a.setScanCancel(cancel)
 
 	a.wg.Add(1)
@@ -814,6 +772,7 @@ func (a *App) RunScan() {
 				slog.Int64("gemini_disambiguation_calls", metrics.Disambiguation),
 				slog.Int64("gemini_generate_calls", metrics.GeminiGenerate),
 				slog.Int64("grok_calls", metrics.Grok),
+				slog.Int64("groq_calls", metrics.Groq),
 				slog.Int64("tmdb_search_calls", tmdbMetrics.SearchCalls),
 				slog.Int64("tmdb_details_calls", tmdbMetrics.DetailsCalls),
 				slog.Int64("tmdb_cache_hits", tmdbMetrics.CacheHits),
@@ -1889,7 +1848,7 @@ type CandidateConfirmRequest struct {
 }
 
 func (a *App) SearchTMDBCandidates(request CandidateSearchRequest) ([]tmdb.TMDBCandidate, error) {
-	ctx := utils.EnsureTrace(a.ctx)
+	ctx := a.modelContext(utils.EnsureTrace(a.ctx))
 	if strings.TrimSpace(request.Filename) == "" {
 		return nil, fmt.Errorf("filename required")
 	}
@@ -2108,7 +2067,7 @@ func candidateSearchYear(parsedYear int, current *storage.Movie) int {
 }
 
 func (a *App) ConfirmTMDBCandidate(request CandidateConfirmRequest) error {
-	ctx := utils.EnsureTrace(a.ctx)
+	ctx := a.modelContext(utils.EnsureTrace(a.ctx))
 	startedAt := time.Now()
 	if strings.TrimSpace(request.Filename) == "" || request.TMDBID <= 0 {
 		return fmt.Errorf("valid filename and tmdb_id required")
@@ -2150,10 +2109,10 @@ func (a *App) ConfirmTMDBCandidate(request CandidateConfirmRequest) error {
 	if info.PosterURL != "" || needsTranslation {
 		filename, expectedID, expectedMediaType := request.Filename, request.TMDBID, string(mediaType)
 		posterURL := info.PosterURL
+		backgroundCtx := ctx
 		a.wg.Add(1)
 		go func() {
 			defer a.wg.Done()
-			backgroundCtx := utils.EnsureTrace(a.ctx)
 			translationStartedAt := time.Now()
 			utils.LoggerWithTrace(backgroundCtx).Info("candidate_background_started", slog.String("file", filename), slog.Int("tmdb_id", expectedID))
 			if posterURL != "" {
@@ -2187,7 +2146,7 @@ func (a *App) ConfirmTMDBCandidate(request CandidateConfirmRequest) error {
 }
 
 func (a *App) GetTMDBCandidateDetails(request CandidateConfirmRequest) (*tmdb.CandidateDetails, error) {
-	ctx := utils.EnsureTrace(a.ctx)
+	ctx := a.modelContext(utils.EnsureTrace(a.ctx))
 	mediaType := tmdb.MediaType(strings.ToLower(strings.TrimSpace(request.MediaType)))
 	if request.TMDBID <= 0 || (mediaType != tmdb.MediaTypeMovie && mediaType != tmdb.MediaTypeTV) {
 		return nil, fmt.Errorf("valid tmdb_id and media_type required")
@@ -2215,7 +2174,7 @@ func (a *App) FixSelected(selected []FixRequest) {
 	a.wg.Add(1)
 
 	// 1. Створюємо керований контекст з гарантованим trace_id 🟢
-	ctx, cancel := context.WithCancel(utils.EnsureTrace(a.ctx))
+	ctx, cancel := context.WithCancel(a.modelContext(utils.EnsureTrace(a.ctx)))
 	a.setScanCancel(cancel)
 	defer func() {
 		cancel()
@@ -2335,7 +2294,7 @@ func fixSelectedCompletion(ctx context.Context, succeeded, failed int) (string, 
 
 // UpdateMovie — Wails API: оновлення одного запису за hint від користувача.
 func (a *App) UpdateMovie(filename, hint string) error {
-	ctx := utils.EnsureTrace(a.ctx)
+	ctx := a.modelContext(utils.EnsureTrace(a.ctx))
 	if err := a.updateMovie(ctx, filename, hint); err != nil {
 		return err
 	}

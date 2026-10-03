@@ -1,0 +1,15 @@
+import assert from 'node:assert/strict';
+import {bindAboutDialog} from './about-dialog.js';
+const dialog = new EventTarget(); const open = {}, close = {}, focus = {count: 0, focus() { this.count++; }};
+dialog.showModal = () => { dialog.open = true; };
+dialog.close = () => { dialog.open = false; dialog.dispatchEvent(new Event('close')); };
+dialog.getBoundingClientRect = () => ({left: 10, right: 100, top: 10, bottom: 100});
+bindAboutDialog(dialog, open, close, focus);
+const click = (target, clientX, clientY) => { const event = new Event('click'); Object.defineProperty(event, 'target', {value: target}); Object.assign(event, {clientX, clientY}); dialog.dispatchEvent(event); };
+open.onclick(); assert.equal(dialog.open, true);
+click({}, 20, 20); assert.equal(dialog.open, true);
+click(dialog, 20, 20); assert.equal(dialog.open, true, 'click inside padding closed dialog');
+click(dialog, 200, 20); assert.equal(dialog.open, false);
+assert.equal(focus.count, 1);
+open.onclick(); close.onclick(); assert.equal(dialog.open, false); assert.equal(focus.count, 2);
+console.log('about dialog tests passed');

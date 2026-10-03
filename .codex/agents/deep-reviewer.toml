@@ -13,6 +13,15 @@ Your audit focuses on:
 4. Security & Data Protection: Strict redaction of secrets/API keys in logs and errors, safe DOM manipulation (preventing XSS in frontend/Wails), HTTPS-only external links, input validation on file paths and manual hints.
 5. Invariants & Stability: Recognition identity rule (TmdbID > 0 only), language cascade (uk-UA -> ru-RU -> en-US), immutable filename primary keys, Wails event contract stability.
 
+Check current MovieList contracts against AGENTS.md:
+- internal/version/VERSION is the only editable release version; build.ps1 synchronizes Wails/npm/HTML metadata. Generated version copies are not release sources.
+- The .env editor accesses only Config.EnvPath, validates syntax, rejects stale revisions and atomically saves UTF-8/LF. Never log config contents or raw parser errors. Saving requires restart to affect active configuration; persisted folder/model choices retain precedence.
+- Independent scan roots preserve legacy filename keys and stable source namespaces. Empty/unavailable sources abort before cleanup; exclusions skip the intended subtree.
+- Model catalogs are explicit requests; selections autosave and are captured per operation, including background localization. Keep Groq credentials/endpoints separate from xAI. Require explicit valid confidence, model-specific reasoning parameters, sequential fallback and shared rate limiting. Output budgets do not bypass account input limits.
+- Scan starts only in Library. About is a modal closed by button, backdrop or Escape, returning focus without changing the active panel.
+
+Use isolated API checks by default. Do not enable live test flags without explicit user authorization for external requests and quota usage. Synthetic live checks do not establish final TMDB identities, full production scan quality or Wails UI behavior.
+
 Run focused read-only commands (e.g. `git diff`, `git log`, `go test ./...`) to verify behavior. Do not claim tests or checks passed unless you executed or observed them.
 
 Report findings in Ukrainian, structured as follows:
@@ -25,5 +34,5 @@ Report findings in Ukrainian, structured as follows:
   - **Рекомендація щодо виправлення**: Чіткий алгоритм або концепція виправлення.
 - **Прогалини у верифікації (Verification Gaps)**: Які аспекти потребують перевірки на реальній медіатеці або інтеграційних прогонах.
 
-If no issues are found, explicitly confirm that the code satisfies architectural and safety criteria.
+If no actionable issues are found within the reviewed scope, say so and state material verification gaps. Do not claim universal architectural or safety compliance from a limited review.
 """

@@ -100,7 +100,9 @@ type Client struct {
 	disambiguationCalls   atomic.Int64
 	geminiGenerateCalls   atomic.Int64
 	grokCalls             atomic.Int64
+	groqCalls             atomic.Int64
 	// 🟢 ДОДАНО: Динамічний каскад та м'ютекс для його захисту
+	activeGrokModels  []string
 	activeModels      []string
 	modelsMu          sync.RWMutex
 	unavailableModels sync.Map
@@ -108,6 +110,7 @@ type Client struct {
 	initMu            sync.Mutex
 	httpClient        *http.Client // 🔴 ДОДАНО ДЛЯ ТЕСТІВ: Дозволяє мокувати відповіді API
 	grokHTTPClient    *http.Client
+	groqHTTPClient    *http.Client
 }
 
 type CallMetrics struct {
@@ -116,6 +119,7 @@ type CallMetrics struct {
 	Disambiguation   int64
 	GeminiGenerate   int64
 	Grok             int64
+	Groq             int64
 }
 
 func (c *Client) ResetCallMetrics() {
@@ -124,6 +128,7 @@ func (c *Client) ResetCallMetrics() {
 	c.disambiguationCalls.Store(0)
 	c.geminiGenerateCalls.Store(0)
 	c.grokCalls.Store(0)
+	c.groqCalls.Store(0)
 }
 
 func (c *Client) CallMetrics() CallMetrics {
@@ -133,6 +138,7 @@ func (c *Client) CallMetrics() CallMetrics {
 		Disambiguation:   c.disambiguationCalls.Load(),
 		GeminiGenerate:   c.geminiGenerateCalls.Load(),
 		Grok:             c.grokCalls.Load(),
+		Groq:             c.groqCalls.Load(),
 	}
 }
 
@@ -144,6 +150,7 @@ func NewClient(cfg *config.Config) *Client {
 		// Grok: rate.Every(2 * time.Second) = 30s per minute, burst=1 (conservative)
 		grokLimiter:    rate.NewLimiter(rate.Every(2*time.Second), 1),
 		grokHTTPClient: &http.Client{Timeout: 60 * time.Second},
+		groqHTTPClient: &http.Client{Timeout: 60 * time.Second},
 	}
 }
 
@@ -153,6 +160,15 @@ func (c *Client) SetModels(models []string) {
 	defer c.modelsMu.Unlock()
 	// Копіюємо слайс, щоб уникнути data race
 	c.activeModels = append([]string(nil), models...)
+	c.unavailableModels.Range(func(key, _ any) bool {
+		c.unavailableModels.Delete(key)
+		return true
+	})
+}
+
+// RefreshModelAvailability permits retrying models disabled after an earlier 404.
+// It leaves every operation's captured model order unchanged.
+func (c *Client) RefreshModelAvailability() {
 	c.unavailableModels.Range(func(key, _ any) bool {
 		c.unavailableModels.Delete(key)
 		return true
@@ -176,6 +192,10 @@ func (c *Client) getModels() []string {
 		candidates = []string{"gemini-2.5-flash", "gemini-flash-lite-latest"}
 	}
 
+	return filterGeminiModels(candidates)
+}
+
+func filterGeminiModels(candidates []string) []string {
 	var filtered []string
 	for _, m := range candidates {
 		mLower := strings.ToLower(m)
@@ -335,7 +355,7 @@ func (c *Client) requestWithRetry(ctx context.Context, prompt string) ([]Recogni
 		return c.grokRecognizeFallback(ctx, prompt)
 	}
 	var lastErr error
-	models := c.getModels() // 🟢: Беремо актуальний каскад
+	models := c.modelsForContext(ctx) // 🟢: Беремо актуальний каскад
 
 	// Йдемо по списку моделей (каскад)
 	for i, modelName := range models {
@@ -640,7 +660,7 @@ func (c *Client) translateBulkPrompt(ctx context.Context, prompt string) ([]Bulk
 		goto grokFallback
 	}
 
-	for _, modelName := range c.getModels() {
+	for _, modelName := range c.modelsForContext(ctx) {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
@@ -707,45 +727,63 @@ grokFallback:
 
 // grokRecognizeFallback calls Grok as a fallback for bulk file recognition.
 func (c *Client) grokRecognizeFallback(ctx context.Context, prompt string) ([]RecognizedTitle, error) {
+	if c.cfg.GroqAPIKey != "" {
+		return c.groqRecognizeFallback(ctx, prompt)
+	}
 	if c.cfg.GrokAPIKey == "" {
 		return nil, fmt.Errorf("grok: not configured")
 	}
 	utils.LoggerWithTrace(ctx).Info("grok_recognize_fallback")
-	c.grokCalls.Add(1)
-	raw, err := c.callGrok(ctx, prompt)
-	if err != nil {
-		return nil, fmt.Errorf("grok recognize: %w", err)
-	}
-	result, err := parseRecognizeResponse(raw)
-	if err != nil {
-		return nil, fmt.Errorf("grok recognize parse: %w", err)
-	}
-	for index := range result {
-		result[index].Provider = "grok"
-		result[index].Model = c.cfg.GrokModel
-		if result[index].Model == "" {
-			result[index].Model = "grok-3-mini"
+	var lastErr error
+	for _, model := range c.grokModelsForContext(ctx) {
+		if err := ctx.Err(); err != nil {
+			return nil, err
 		}
+		c.grokCalls.Add(1)
+		raw, err := c.callGrokModel(ctx, prompt, model)
+		var result []RecognizedTitle
+		if err == nil {
+			result, err = parseRecognizeResponse(raw)
+		}
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		for index := range result {
+			result[index].Provider = "grok"
+			result[index].Model = model
+		}
+		utils.LoggerWithTrace(ctx).Info("grok_recognize_success", slog.String("model", model), slog.Int("results_count", len(result)))
+		return result, nil
 	}
-	utils.LoggerWithTrace(ctx).Info("grok_recognize_success", slog.Int("results_count", len(result)))
-	return result, nil
+	return nil, fmt.Errorf("grok recognize: %w", lastErr)
 }
 
-// grokTranslateFallback calls Grok as a fallback for bulk translation.
 func (c *Client) grokTranslateFallback(ctx context.Context, prompt string) ([]BulkTranslateItem, error) {
+	if c.cfg.GroqAPIKey != "" {
+		return c.groqTranslateFallback(ctx, prompt)
+	}
 	if c.cfg.GrokAPIKey == "" {
 		return nil, fmt.Errorf("grok: not configured")
 	}
 	utils.LoggerWithTrace(ctx).Info("grok_translate_fallback")
-	c.grokCalls.Add(1)
-	raw, err := c.callGrok(ctx, prompt)
-	if err != nil {
-		return nil, fmt.Errorf("grok translate: %w", err)
+	var lastErr error
+	for _, model := range c.grokModelsForContext(ctx) {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		c.grokCalls.Add(1)
+		raw, err := c.callGrokModel(ctx, prompt, model)
+		var results []BulkTranslateItem
+		if err == nil {
+			err = json.Unmarshal([]byte(cleanJSON(raw)), &results)
+		}
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		utils.LoggerWithTrace(ctx).Info("grok_translate_success", slog.String("model", model), slog.Int("results_count", len(results)))
+		return results, nil
 	}
-	var results []BulkTranslateItem
-	if err := json.Unmarshal([]byte(cleanJSON(raw)), &results); err != nil {
-		return nil, fmt.Errorf("grok translate parse: %w", err)
-	}
-	utils.LoggerWithTrace(ctx).Info("grok_translate_success", slog.Int("results_count", len(results)))
-	return results, nil
+	return nil, fmt.Errorf("grok translate: %w", lastErr)
 }

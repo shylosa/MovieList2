@@ -16,6 +16,14 @@ export function GetAIModels():Promise<Array<string>>;
 
 export function GetAppVersion():Promise<string>;
 
+export function GetEnvConfig():Promise<main.EnvDocument>;
+
+export function GetGrokModelCatalog():Promise<main.AIModelCatalog>;
+
+export function GetGroqModelCatalog():Promise<main.AIModelCatalog>;
+
+export function GetModelSelections():Promise<Record<string, main.ProviderModels>>;
+
 export function GetMovies():Promise<Array<storage.Movie>>;
 
 export function GetScanFolders():Promise<main.ScanFolders>;
@@ -42,6 +50,8 @@ export function RepairMetadata(arg1:string):Promise<main.MetadataRepairResult>;
 
 export function RunScan():Promise<void>;
 
+export function SaveEnvConfig(arg1:string,arg2:string):Promise<string>;
+
 export function SearchTMDBCandidates(arg1:main.CandidateSearchRequest):Promise<Array<tmdb.TMDBCandidate>>;
 
 export function SelectExcludedFolder():Promise<void>;
@@ -53,6 +63,8 @@ export function SelectScanFolder():Promise<void>;
 export function SetAIModels(arg1:Array<string>):Promise<void>;
 
 export function SetExcludedFolders(arg1:Array<string>):Promise<void>;
+
+export function SetProviderModels(arg1:string,arg2:Array<string>):Promise<void>;
 
 export function SetScanFolders(arg1:Array<string>):Promise<void>;
 

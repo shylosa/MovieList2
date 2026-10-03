@@ -46,6 +46,22 @@ export namespace main {
 	        this.media_type = source["media_type"];
 	    }
 	}
+	export class EnvDocument {
+	    path: string;
+	    content: string;
+	    revision: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new EnvDocument(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.path = source["path"];
+	        this.content = source["content"];
+	        this.revision = source["revision"];
+	    }
+	}
 	export class FixRequest {
 	    filename: string;
 	    hint: string;

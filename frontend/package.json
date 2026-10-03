@@ -2,9 +2,11 @@
   "name": "frontend",
   "type": "module",
   "private": true,
-  "version": "2.8.1",
+  "version": "2.9.0",
   "scripts": {
-    "test": "node src/test-runner.mjs",
+    "test": "node src/test-runner.mjs && node ../scripts/sync-version.test.mjs",
+    "prebuild": "node ../scripts/sync-version.mjs",
+    "predev": "node ../scripts/sync-version.mjs",
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview"

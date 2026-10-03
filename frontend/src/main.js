@@ -1,8 +1,11 @@
+import { createModelTables } from './model-tables.js';
 import './style.css';
 import { bindSettingsMenu } from './settings-menu.js';
 import { createFolderTables } from './folder-tables.js';
+import { createConfigEditor } from './config-editor.js';
+import { bindAboutDialog } from './about-dialog.js';
 
-import { GetAppVersion, GetMovies, GetStats, RunScan, StopScan, GetAIModelCatalog, SetAIModels, OpenLogs, FixSelected, SearchTMDBCandidates, ConfirmTMDBCandidate, GetTMDBCandidateDetails, SyncToCloud, SyncToGitHub, OpenShowcase, OpenSheet, OpenGoogleSheet, OpenGitHubRepo, OpenGitHubPage, OpenURL, DeleteMovie, GetScanFolders, SetScanFolders, SelectScanFolder, SelectExcludedFolder, SetExcludedFolders } from '../wailsjs/go/main/App.js';
+import { GetAppVersion, GetMovies, GetStats, RunScan, StopScan, GetAIModelCatalog, GetGroqModelCatalog, GetModelSelections, SetProviderModels, OpenLogs, FixSelected, SearchTMDBCandidates, ConfirmTMDBCandidate, GetTMDBCandidateDetails, SyncToCloud, SyncToGitHub, OpenShowcase, OpenSheet, OpenGoogleSheet, OpenGitHubRepo, OpenGitHubPage, OpenURL, DeleteMovie, GetScanFolders, SetScanFolders, SelectScanFolder, SelectExcludedFolder, SetExcludedFolders, GetEnvConfig, SaveEnvConfig } from '../wailsjs/go/main/App.js';
 import { Quit, WindowMinimise, WindowToggleMaximise, EventsOn } from '../wailsjs/runtime/runtime.js';
 import logoUrl from './assets/images/appicon.png';
 import noPosterUrl from './assets/images/no-poster.jpg';
@@ -27,14 +30,11 @@ document.querySelector('#app').innerHTML = `
   <div class="layout">
     <div class="sidebar">
         <div class="sidebar-header">
-            <div class="header-flag" id="current-page-title">MovieList</div>
+            <div class="header-flag">MovieList</div>
         </div>
 
         <nav class="sidebar-primary" aria-label="Основна навігація">
-            <div class="toolbar-row library-toolbar">
-                <button type="button" class="nav-btn active" id="btn-library"><span class="nav-icon">▦</span> Бібліотека</button>
-                <button class="nav-btn icon-btn sidebar-scan" id="btn-scan" type="button" title="Сканувати бібліотеку" aria-label="Сканувати бібліотеку" aria-busy="false"><span class="nav-icon" aria-hidden="true">⟳</span></button>
-            </div>
+            <button type="button" class="nav-btn active" id="btn-library"><span class="nav-icon">▦</span> Бібліотека</button>
             <button type="button" class="nav-btn" id="btn-overview"><span class="nav-icon">◫</span> Активність<span id="activity-indicator" hidden aria-label="Виконується операція">●</span></button>
             <button type="button" class="nav-btn" id="btn-editor"><span class="nav-icon">✎</span> Редактор</button>
         </nav>
@@ -42,6 +42,7 @@ document.querySelector('#app').innerHTML = `
             <button type="button" class="nav-btn" id="btn-folders"><span class="nav-icon">▱</span> Папки сканування</button>
             <div class="settings-anchor">
                 <div id="settings-menu" class="settings-menu" hidden>
+                    <button type="button" id="btn-config">⚙ Конфігурація</button>
                     <button type="button" id="btn-models">✦ Моделі ШІ</button>
                     <button type="button" id="btn-exports">↗ Експорт і синхронізація</button>
                     <button type="button" id="btn-logs">☷ Відкрити папку з логами</button>
@@ -164,7 +165,19 @@ document.querySelector('#app').innerHTML = `
             <p id="exports-status" role="status"></p>
         </div>
         <div id="panel-models" class="panel settings-panel"><h1>Моделі ШІ</h1><p id="models-status" role="status"></p><div id="models-content"></div></div>
-        <div id="panel-about" class="panel settings-panel"><h1>Про MovieList</h1><section class="settings-card"><h2>MovieList <span id="about-version"></span></h2><p>Каталог локальної колекції фільмів і серіалів.</p><a href="#" id="sidebar-author-link">© 2026 shylosa</a></section></div>
+        <div id="panel-config" class="panel settings-panel config-panel">
+            <div class="config-heading"><h1>Конфігурація</h1><span id="config-status" role="status"></span></div>
+            <p id="config-path" class="section-description"></p>
+            <p class="section-description">Автозбереження після паузи у введенні. Зміни набудуть чинності після перезапуску. Вибрані папки та моделі ШІ зберігають пріоритет над початковими значеннями .env; змінюйте їх у відповідних розділах.</p>
+            <div class="config-surface"><pre id="config-highlight" aria-hidden="true"></pre><textarea id="config-content" aria-label="Вміст файла .env" spellcheck="false" autocomplete="off" autocapitalize="off" wrap="off" disabled></textarea></div>
+        </div>
+        <dialog id="about-dialog" class="about-dialog" aria-labelledby="about-title">
+            <button type="button" id="about-close" class="about-close" aria-label="Закрити" autofocus>×</button>
+            <img src="${logoUrl}" alt="" class="about-logo">
+            <h2 id="about-title">MovieList <span id="about-version"></span></h2>
+            <p>Каталог локальної колекції фільмів і серіалів.</p>
+            <a href="#" id="sidebar-author-link">© 2026 shylosa</a>
+        </dialog>
         <div id="panel-editor" class="panel">
             <div class="editor-toolbar">
                 <div class="editor-heading"><h1>Редактор</h1><span id="editor-count">—</span></div>
@@ -208,20 +221,17 @@ document.querySelector('#app').innerHTML = `
   </div>
 `;
 
-const btnScan = document.getElementById('btn-scan');
 const btnStop = document.getElementById('btn-stop-scan');
 const libraryScan = document.getElementById('library-scan');
 
 // ЗАМОК: Змінна, що стежить, чи йде зараз сканування
 let isScanning = false;
 
-function setSidebarScanState(active) {
+function setScanState(active) {
     document.getElementById('activity-indicator').hidden = !(active || isGitHubSyncing);
     folderTables.setScanning(active);
-    btnScan.disabled = active;
-    btnScan.classList.toggle('disabled', active);
-    btnScan.setAttribute('aria-busy', String(active));
-    btnScan.title = active ? 'Сканування триває…' : 'Сканувати бібліотеку';
+    libraryScan.disabled = active;
+    libraryScan.setAttribute('aria-busy', String(active));
 }
 
 function setStopButtonState(state) {
@@ -245,16 +255,15 @@ btnStop.addEventListener('click', async (e) => {
     }
 });
 document.getElementById('library-stop').addEventListener('click', () => btnStop.click());
-libraryScan.addEventListener('click', () => btnScan.click());
 
 // 🟢 Клік по кнопці Сканувати
-btnScan.addEventListener('click', async (e) => {
+libraryScan.addEventListener('click', async (e) => {
     e.preventDefault();
     e.stopPropagation();
 
     if (isScanning) return; // КРИТИЧНО: Захист від подвійного запуску
     isScanning = true;
-    setSidebarScanState(true);
+    setScanState(true);
 
     switchTab('library', 'Бібліотека');
     setStopButtonState('active'); // Стає червоною
@@ -266,7 +275,7 @@ btnScan.addEventListener('click', async (e) => {
     } catch (err) {
         console.error("Помилка сканування:", err);
         isScanning = false;
-        setSidebarScanState(false);
+        setScanState(false);
         setStopButtonState('disabled');
     }
 });
@@ -274,28 +283,28 @@ btnScan.addEventListener('click', async (e) => {
 // --- КЕРУВАННЯ ВІКНОМ ---
 document.getElementById('btn-min').onclick = WindowMinimise;
 document.getElementById('btn-max').onclick = WindowToggleMaximise;
-document.getElementById('btn-close').onclick = Quit;
+document.getElementById('btn-close').onclick = async () => {
+    if (await configEditor.flush()) Quit();
+    else switchTab('config', 'Конфігурація');
+};
 
 // --- НАВІГАЦІЯ ТА КНОПКИ ---
-const switchTab = (tab, title) => {
+const switchTab = (tab) => {
+    if (document.getElementById('panel-config').classList.contains('active') && tab !== 'config') configEditor.flush();
     inspectorMetadataPopover.hide();
     document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
     document.querySelectorAll('.nav-btn').forEach(b => b.classList.remove('active'));
 
     document.getElementById(`panel-${tab}`).classList.add('active');
     document.getElementById(`btn-${tab}`)?.classList.add('active');
-    document.getElementById('btn-settings').classList.toggle('active', ['models', 'exports', 'about'].includes(tab));
-    if (['models', 'exports', 'about', 'folders'].includes(tab)) {
+    document.getElementById('btn-settings').classList.toggle('active', ['models', 'exports', 'config'].includes(tab));
+    if (['models', 'exports', 'config', 'folders'].includes(tab)) {
         const heading = document.querySelector(`#panel-${tab} h1`);
         heading.tabIndex = -1;
         heading.focus();
     }
     document.querySelector('.main-area').classList.toggle('library-active', tab === 'library');
 
-    document.getElementById('current-page-title').innerText = title;
-
-    const flag = document.getElementById('current-page-title');
-    flag.innerText = title;
 };
 
 // Прив'язка кнопок
@@ -366,7 +375,12 @@ const settingsButton = document.getElementById('btn-settings');
 const settingsMenu = document.getElementById('settings-menu');
 bindSettingsMenu(settingsButton, settingsMenu);
 document.getElementById('btn-exports').onclick = () => switchTab('exports', 'Експорт і синхронізація');
-document.getElementById('btn-about').onclick = () => switchTab('about', 'Про MovieList');
+bindAboutDialog(document.getElementById('about-dialog'), document.getElementById('btn-about'), document.getElementById('about-close'), settingsButton);
+const configEditor = createConfigEditor({input: document.getElementById('config-content'), status: document.getElementById('config-status'), path: document.getElementById('config-path'), highlight: document.getElementById('config-highlight'), api: {GetEnvConfig, SaveEnvConfig}});
+document.getElementById('btn-config').onclick = async () => {
+    switchTab('config', 'Конфігурація');
+    await configEditor.load();
+};
 
 async function runExport(label, action, button) {
     const status = document.getElementById('exports-status');
@@ -384,39 +398,12 @@ document.getElementById('btn-folders').onclick = async () => {
     catch (error) { document.getElementById('folders-status').textContent = String(error); }
 };
 
+const modelTables = createModelTables({api: {GetModelSelections, GetAIModelCatalog, GetGroqModelCatalog, SetProviderModels}});
 document.getElementById('btn-models').onclick = async () => {
-    switchTab('models', 'Моделі ШІ');
-    const modelsBody = document.getElementById('models-content');
-	modelsBody.replaceChildren();
-    document.getElementById('models-status').innerText = "Запит до API...";
-	const loading = document.createElement('div'); loading.textContent = 'Отримання списку моделей Gemini…'; modelsBody.appendChild(loading);
-    try {
-		const catalog = await GetAIModelCatalog();
-		modelsBody.replaceChildren();
-		const currentTitle = document.createElement('h3'); currentTitle.textContent = 'Поточні моделі';
-		const currentList = document.createElement('div'); currentList.className = 'model-current-list';
-		for (const name of catalog.current || []) { const item = document.createElement('div'); item.textContent = name; currentList.appendChild(item); }
-		const availableTitle = document.createElement('h3'); availableTitle.textContent = 'Доступні через Gemini API';
-		const form = document.createElement('div'); form.className = 'model-picker';
-		const current = new Set((catalog.current || []).filter(name => !name.includes(' (fallback)')));
-		for (const name of catalog.available || []) {
-			const label = document.createElement('label');
-			const checkbox = document.createElement('input'); checkbox.type = 'checkbox'; checkbox.value = name; checkbox.checked = current.has(name);
-			const text = document.createElement('span'); text.textContent = name;
-			label.append(checkbox, text); form.appendChild(label);
-		}
-		const save = document.createElement('button'); save.type = 'button'; save.textContent = 'Зберегти вибір'; save.className = 'model-save';
-		save.onclick = async () => {
-			const selected = Array.from(form.querySelectorAll('input:checked'), input => input.value);
-			try { await SetAIModels(selected); document.getElementById('models-status').innerText = 'Вибір збережено'; }
-			catch (error) { document.getElementById('models-status').innerText = `Помилка: ${error}`; }
-		};
-		modelsBody.append(currentTitle, currentList, availableTitle, form, save);
-        document.getElementById('models-status').innerText = "Готово";
-    } catch (e) {
-        document.getElementById('models-status').textContent = `Помилка: ${e}`;
-
-    }
+ switchTab('models', 'Моделі ШІ');
+ document.getElementById('models-status').textContent = '';
+ try { await modelTables.load(); }
+ catch (error) { document.getElementById('models-status').textContent = String(error); }
 };
 
 // --- ФУНКЦІЇ ДЛЯ КОНСОЛІ ТА ПРОГРЕСУ ---
@@ -470,7 +457,7 @@ EventsOn('scan-started', () => {
     const btnStop = document.getElementById('btn-stop-scan');
     if (btnStop) btnStop.className = "stop-btn active";
 
-    setSidebarScanState(true);
+    setScanState(true);
 });
 
 EventsOn('scan-progress', (data) => {
@@ -514,7 +501,7 @@ EventsOn('scan-finished', (msg) => {
     // 🟢 ЗМІНА 4: Робимо кнопку СТОП знову сірою після завершення (або скасування)
     const btnStop = document.getElementById('btn-stop-scan');
     if (btnStop) btnStop.className = "stop-btn disabled";
-    setSidebarScanState(false);
+    setScanState(false);
     loadStats(); // Оновлюємо картки
     loadMovies();
 });
@@ -1368,6 +1355,7 @@ document.getElementById('btn-delete-selected').onclick = async (e) => {
 async function loadAppVersion() {
     try {
         const version = await GetAppVersion();
+        if (version) document.title = `MovieList ${version}`;
         const versionEl = document.getElementById('app-version');
         const welcomeEl = document.getElementById('welcome-message');
         if (versionEl && version) {

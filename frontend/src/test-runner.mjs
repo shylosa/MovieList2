@@ -1,7 +1,10 @@
 import assert from 'assert';
+import './model-tables.test.mjs';
 import './metadata-popover.test.mjs';
 import './settings-menu.test.mjs';
 import './folder-tables.test.mjs';
+import './config-editor.test.mjs';
+import './about-dialog.test.mjs';
 import { metadataValues, matchesCollectionSearch } from './metadata.js';
 import { shouldKeepEditorInspector } from './editor-state.js';
 

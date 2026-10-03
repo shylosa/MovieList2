@@ -26,6 +26,22 @@ export function GetAppVersion() {
   return window['go']['main']['App']['GetAppVersion']();
 }
 
+export function GetEnvConfig() {
+  return window['go']['main']['App']['GetEnvConfig']();
+}
+
+export function GetGrokModelCatalog() {
+  return window['go']['main']['App']['GetGrokModelCatalog']();
+}
+
+export function GetGroqModelCatalog() {
+  return window['go']['main']['App']['GetGroqModelCatalog']();
+}
+
+export function GetModelSelections() {
+  return window['go']['main']['App']['GetModelSelections']();
+}
+
 export function GetMovies() {
   return window['go']['main']['App']['GetMovies']();
 }
@@ -78,6 +94,10 @@ export function RunScan() {
   return window['go']['main']['App']['RunScan']();
 }
 
+export function SaveEnvConfig(arg1, arg2) {
+  return window['go']['main']['App']['SaveEnvConfig'](arg1, arg2);
+}
+
 export function SearchTMDBCandidates(arg1) {
   return window['go']['main']['App']['SearchTMDBCandidates'](arg1);
 }
@@ -100,6 +120,10 @@ export function SetAIModels(arg1) {
 
 export function SetExcludedFolders(arg1) {
   return window['go']['main']['App']['SetExcludedFolders'](arg1);
+}
+
+export function SetProviderModels(arg1, arg2) {
+  return window['go']['main']['App']['SetProviderModels'](arg1, arg2);
 }
 
 export function SetScanFolders(arg1) {

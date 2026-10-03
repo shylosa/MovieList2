@@ -36,7 +36,7 @@ func (a *App) RepairMetadata(filename string) (*MetadataRepairResult, error) {
 	}
 	a.isScanning = true // Serialize API work with scan/manual correction and other repairs.
 	a.scanMutex.Unlock()
-	ctx, cancel := context.WithCancel(utils.EnsureTrace(a.ctx))
+	ctx, cancel := context.WithCancel(a.modelContext(utils.EnsureTrace(a.ctx)))
 	a.repairCancel = cancel
 	a.wg.Add(1)
 	a.repairMutex.Unlock()

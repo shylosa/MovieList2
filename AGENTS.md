@@ -4,7 +4,7 @@
 
 MovieList App — desktop application for cataloging local movie/TV collections.
 
-**Tech stack:** Go 1.26+, Wails v2, SQLite, TMDB API, Google Gemini (`google.golang.org/genai`), Grok (`grok-3-mini`).
+**Tech stack:** Go 1.26+, Wails v2, SQLite, TMDB API, Google Gemini (`google.golang.org/genai`), Groq (`openai/gpt-oss-120b`), legacy xAI Grok compatibility.
 
 ---
 
@@ -16,7 +16,8 @@ MovieList App — desktop application for cataloging local movie/TV collections.
 |---------|------|
 | `main.go` | Wails bootstrap, global panic handler |
 | `app.go` | Main orchestration layer and Wails API |
-| `internal/ai/` | Gemini & Grok integration |
+| `internal/ai/` | Gemini & Groq integration, legacy xAI Grok compatibility |
+| `internal/version/` | Embedded release version from `VERSION` |
 | `internal/config/` | `.env` loading |
 | `internal/scanner/` | File scanning |
 | `internal/storage/` | SQLite layer |
@@ -24,6 +25,13 @@ MovieList App — desktop application for cataloging local movie/TV collections.
 | `internal/sheets/` | Google Sheets sync |
 | `internal/utils/` | Logging, language helpers, path display |
 | `internal/web/` | Static showcase generator |
+
+### Configuration editor
+
+* `Config.EnvPath` is the actual `.env` selected by `config.Load()`. Wails `GetEnvConfig`/`SaveEnvConfig` only access that path, never a client-supplied path.
+* The editor autosaves after a pause and on navigation/blur; the application close button flushes pending changes. Saves validate dotenv syntax, preserve comments, use UTF-8/LF and atomic replacement, and reject stale revisions after external changes. Never log config contents or raw parser errors, which may contain API keys.
+* Saving does not change active config, environment variables or clients; changes take effect after restart. Persisted folder/model selections retain precedence over `.env` defaults.
+* About is a native modal dialog, closed by its close button, backdrop click or Escape, with focus returned to the settings button. It does not navigate away from the active panel.
 
 ### Multiple scan sources
 
@@ -74,7 +82,7 @@ MovieList App — desktop application for cataloging local movie/TV collections.
 ## Critical Invariants
 
 * **Recognition:** `TmdbID > 0` is the only valid "recognised" state.
-* **Trust:** Gemini-generated IDs are **never** trusted directly.
+* **Trust:** AI-generated IDs (Gemini, Groq or legacy Grok) are **never** trusted directly.
 * **Language Cascade:** Always preserve: `uk-UA → ru-RU → en-US`.
 * **TMDB Search:** Use `/search/movie` or `/search/tv`. **Never** use `/search/multi`.
 * **Translation Queue:** Only verified entries may be translated. Bypass Gemini only for text validated as Ukrainian; Russian markers such as `ы`, `э`, `ъ`, `ё` require Ukrainian localization.
@@ -85,7 +93,13 @@ MovieList App — desktop application for cataloging local movie/TV collections.
 
 ---
 
-## AI Rules (Gemini & Grok)
+## AI Rules (Gemini, Groq & legacy Grok)
+
+* **Groq integration:** The model page now shows Gemini and Groq. Groq uses `GROQ_API_KEY`, `GROQ_MODEL` (default `openai/gpt-oss-120b`) and `selected_groq_models`. Its catalog is `GET https://api.groq.com/openai/v1/models`; chat requests use `/openai/v1/chat/completions` and a versioned MovieList User-Agent. GPT-OSS requires `reasoning_effort=low`, Qwen supports `none`, and other models omit that parameter. Groq selections are frozen through `WithGroqModelSelection` and use the conservative shared fallback limiter. Groq is preferred when configured; the existing xAI implementation and its settings remain available for compatibility. Never send xAI credentials to Groq: legacy `GROK_API_KEY` is accepted for Groq only with the `gsk_` prefix. Runtime/editor changes still require restart.
+
+* **Groq recognition contract:** Require explicit `confidence` in the range 0–1 together with recognition fields and request correlation. Missing/null/out-of-range confidence rejects the response; never invent confidence to satisfy the acceptance threshold. Unknown files remain unresolved. `max_completion_tokens=4096` bounds output, but does not bypass provider input/account limits. Live synthetic checks passed for GPT-OSS 120B/20B and Ukrainian metadata translation through 120B. Qwen rejected the full batch prompt with HTTP 429 `request_too_large` (requested 1426, limit 1000 on this account); its full batch support is not verified.
+
+* **Model settings:** Opening the two-provider model page reads local selections only. Provider catalogs are explicit, singleflight requests; checkbox/order changes autosave `selected_gemini_models` / `selected_groq_models` in `app_state`, overriding env defaults. Legacy `selected_grok_models` remains separate for xAI compatibility. `ai.WithModelSelection` and `ai.WithGroqModelSelection` capture model order in the operation context, including candidate background localization, without replacing shared clients or limiters. Groq and legacy Grok recognition/translation try selected models sequentially and record the successful provider/model. Catalog filtering excludes non-text outputs and explicitly incompatible reasoning-effort capabilities.
 
 * **Gemini SDK:** Use only `google.golang.org/genai`. Never use raw HTTP clients.
 * **Execution:** Gemini pipeline is intentionally sequential (batch size = 5/10) to respect RPM limits. Do not introduce aggressive parallelism.
@@ -191,9 +205,11 @@ Examples: `Vrag` → `Враг`, `Nochnoj Rejs` → `Ночной Рейс`.
 ## Environment Configuration
 
 ```env
-APP_VERSION=2.8.1
 GEMINI_API_KEY=
 GEMINI_MODELS=gemini-2.5-flash,gemini-flash-lite-latest
+GROQ_API_KEY=
+GROQ_MODEL=openai/gpt-oss-120b
+# Optional legacy xAI settings:
 GROK_API_KEY=
 GROK_MODEL=grok-3-mini
 TMDB_API_KEY=
@@ -207,15 +223,19 @@ GITHUB_PAGES_BRANCH=main
 
 ---
 
-## Active Work — MovieList 2.8.1
+## Active Work — MovieList
 
 The project-scoped `reviewer` custom agent is defined in `.codex/agents/reviewer.toml`. Run it only when the user explicitly requests a review; it is read-only and reports actionable findings without changing files.
 
-`APP_VERSION=2.8.1` is the current release value. `internal/config/config.go` supplies the default; a local `.env` or process environment can override it. Keep the Wails window title, `wails.json` product version, frontend HTML title, npm package metadata, `.env.example`, README and release notes aligned when changing the version.
+`internal/version/VERSION` is the only editable release version source (`major.minor.patch`). `internal/version` embeds it for runtime titles, logs, UI and generated showcases. Runtime configuration contains no version; legacy `APP_VERSION` overrides are ignored. Use `build.ps1` for production builds and `build.ps1 -Dev` for development: the wrapper synchronizes Wails product metadata, frontend package/lock metadata and HTML title before Wails reads its configuration. npm prebuild/predev also synchronize generated metadata. Do not manually edit version copies in generated metadata. README links to the version source; historical CHANGELOG entries retain their original release numbers.
 
 The active recognition specification is `CHECKLIST.md` (gitignored by design), now containing only remaining production checks after the 2026-10-02 log fixes. Real TMDB checks confirmed Ted 72105, Road Trip 9285 and folder rescue TV 284725/241882; the persisted model selection contains no gemini-2.0-flash. A fresh complete production scan and manual UI scenarios remain required. `DESIGN_CHECKLIST.md` tracks the remaining visual runtime checks.
 
-The 2.8 desktop UI opens on the poster library. A card opens a dedicated detail screen; editing navigates to the matching filename in the editor. The editor has a compact list, selection inspector, batch correction, TMDB candidates and an explicit search clear button with Escape shortcut. Movie ratings link to TMDB. The detail screen uses existing `GetMovies()` data and TMDB CDN poster URLs, with a local no-poster fallback.
+The desktop UI opens on the poster library. A card opens a dedicated detail screen; editing navigates to the matching filename in the editor. The editor has a compact list, selection inspector, batch correction, TMDB candidates and an explicit search clear button with Escape shortcut. Movie ratings link to TMDB. The detail screen uses existing `GetMovies()` data and TMDB CDN poster URLs, with a local no-poster fallback.
+
+The sidebar has Library, Activity and Editor as primary panels, with Scan Folders and Settings anchored at the bottom. Scan starts only from the Library button; there is no sidebar scan button. Settings exposes the configuration editor, AI models, export/synchronization, logs and About. The local showcase is an export option alongside Sheets and GitHub Pages. Navigation alone never starts an export or a provider catalog request. Activity has no filters; About overlays the active panel.
+
+Default checks use isolated API transports. Live catalog/inference tests require explicit opt-in and authorized external requests; never enable them just to verify a release version. Synthetic live checks do not establish final TMDB identities, full-library scan quality or production UI behavior.
 
 Metadata Repair is available only through the lightning icon beside TMDB in the editor inspector. It fetches the stored entity without filename parsing, search or identification; `tmdb_id`, `media_type` and recognition/verification state stay unchanged. The transactional batch upsert rejects concurrent record changes. Description and cast use local-data hover/focus popovers that can be pinned by clicking. Refreshing data preserves the active inspector when a resolved record leaves the review/unresolved list. The library review statistic opens the editor review filter with cleared search. Editor added sorting preserves the backend insertion order, with newer catalog records at the bottom.
 
@@ -400,12 +420,15 @@ shutdown) — рівно один app_closed в кінці сесії. FIX-17 (f
 
 ---
 
-## Current State Summary (станом на 2026-10-02)
+## Current State Summary (станом на 2026-10-03)
 
 | Area | Status |
 |------|--------|
-| Recognition pipeline | ✅ Stable. TMDB → Gemini → Grok cascade. |
-| Grok fallback | ✅ `grokRecognizeFallback` / `grokTranslateFallback` extracted; `ResetQuotaLock` on scan start. |
+| Recognition pipeline | ✅ TMDB → Gemini → Groq cascade; legacy xAI Grok when Groq is not configured. Full production scan remains open. |
+| AI fallback | ✅ Sequential captured selections, conservative shared limiter, explicit Groq confidence; `ResetQuotaLock` on scan start. |
+| Groq verification | ✅ Live catalog, synthetic GPT-OSS 120B/20B recognition and 120B translation passed. Qwen batch exceeds this account's input quota. |
+| Configuration editor & About | ✅ Autosaved UTF-8/LF .env with revision/atomic-write protection; compact About modal. Manual Wails checks remain open. |
+| Scan sources | ✅ Two folder tables, persisted independent roots/exclusions, stable identifiers and cleanup guards. Multi-drive runtime checks remain open. |
 | Unresolved placeholders | ✅ `processGeminiQueue` always saves a record, even on failure. |
 | Shutdown safety | ✅ `wg.Wait()` after `cancelScan()` before `db.Close()`. |
 | File display label | ✅ `utils.DisplayFileLabel` in `GetMovies`, web generator, and Sheets sync. |
@@ -418,8 +441,8 @@ shutdown) — рівно один app_closed в кінці сесії. FIX-17 (f
 | Automatic ambiguity | ✅ Exact movie+TV disambiguation before fuzzy Gemini merge; `The Bureau` regression selects TV 62476. |
 | Scan metrics | ✅ `processed_total` is distinct from complete collection `disk_total`. |
 | Recognition follow-up | ✅ Localized rescue, release cleanup, Lovelace movie type and per-pipeline fallback deduplication tested; four real TMDB identities verified. Full production scan remains open. |
-| Version | ✅ Default, local `.env`, Wails/HTML titles and npm metadata aligned to 2.8.1. |
-| Desktop UI | ✅ Poster library, dedicated detail screen, editor clear search, scan progress; final visual check remains in `DESIGN_CHECKLIST.md`. |
+| Version | ✅ Single embedded source: `internal/version/VERSION`; build wrapper synchronizes Wails/HTML/npm metadata. |
+| Desktop UI | ✅ Library, Activity, Editor; bottom folders/settings; scan only in Library; showcase under export. Final visual check remains in `DESIGN_CHECKLIST.md`. |
 | Metadata navigation and Repair | ✅ Clickable genres/cast/year, editor lightning action with immutable TMDB identity, local description/cast popovers; production visual check remains open. |
 | Candidate confirmation | ✅ TMDB selection saves in foreground; poster/localization finish in a guarded `App.wg` task and emit `movie-updated`. |
 | Diagnostics | ✅ Startup version, Repair before/after fields and localization sources; idle HTTP 400 reproduced and logged without raw remote content. Historical provider remains unknown. |
