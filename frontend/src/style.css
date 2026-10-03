@@ -698,7 +698,9 @@ html {
 .library-stat strong { display: block; margin-top: 2px; font-size: 19px; line-height: 1.1; }
 .library-stat.review-stat strong { color: #e9ae4a; }
 button.review-stat { color: var(--text-primary); font: inherit; text-align: left; cursor: pointer; }
-button.review-stat:hover { border-color: var(--warn-yellow); background: var(--nav-hover); }
+button.review-stat:enabled:hover { border-color: var(--warn-yellow); background: var(--nav-hover); }
+button.review-stat:disabled { cursor: default; }
+button.review-stat:disabled strong { color: var(--text-muted); }
 button.review-stat:focus-visible { outline: 2px solid var(--warn-yellow); outline-offset: 2px; }
 #panel-library.library-scrolled .library-stat { display: flex; align-items: center; justify-content: space-between; gap: 8px; height: 40px; padding: 5px 12px; }
 #panel-library.library-scrolled .library-stat span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -801,7 +803,6 @@ button.nav-btn { border: 0; background: transparent; font-family: inherit; text-
 .sidebar-primary > .nav-btn, .sidebar-bottom > .nav-btn, #btn-settings { width: calc(100% - 16px); }
 .sidebar-bottom { padding: 8px 0; }
 .settings-anchor { position: relative; border-top: 1px solid var(--sidebar-brd); margin-top: 8px; padding-top: 8px; }
-.settings-chevron { margin-left: auto; }
 .settings-menu { position: absolute; bottom: calc(100% + 6px); left: 8px; right: 8px; background: var(--sidebar-bg); border: 1px solid var(--sidebar-brd); border-radius: 12px; padding: 6px; z-index: 30; box-shadow: 0 8px 24px #0006; }
 .settings-menu[hidden], #activity-indicator[hidden] { display: none; }
 .settings-menu button { display: block; width: 100%; padding: 12px 8px; border: 0; border-radius: 7px; background: transparent; color: var(--text-primary); text-align: left; font: inherit; cursor: pointer; }

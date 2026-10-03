@@ -45,11 +45,11 @@ document.querySelector('#app').innerHTML = `
                     <button type="button" id="btn-config">⚙ Конфігурація</button>
                     <button type="button" id="btn-models">✦ Моделі ШІ</button>
                     <button type="button" id="btn-exports">↗ Експорт і синхронізація</button>
-                    <button type="button" id="btn-logs">☷ Відкрити папку з логами</button>
+                    <button type="button" id="btn-logs">☷ Папка з логами</button>
                     <hr>
                     <button type="button" id="btn-about">Про MovieList</button>
                 </div>
-                <button type="button" class="nav-btn" id="btn-settings" aria-expanded="false" aria-controls="settings-menu"><span class="nav-icon">⚙</span> Налаштування<span class="settings-chevron">⌃</span></button>
+                <button type="button" class="nav-btn" id="btn-settings" aria-expanded="false" aria-controls="settings-menu"><span class="nav-icon">⚙</span> Налаштування</button>
             </div>
         </div>
     </div>
@@ -66,7 +66,7 @@ document.querySelector('#app').innerHTML = `
                 <div class="library-stat"><span>Усього</span><strong id="library-total">—</strong></div>
                 <div class="library-stat"><span>Фільми</span><strong id="library-movies">—</strong></div>
                 <div class="library-stat"><span>Серіали</span><strong id="library-series">—</strong></div>
-                <button id="library-review-open" class="library-stat review-stat" type="button" title="Відкрити проблемні файли в Редакторі"><span>Потребують перевірки</span><strong id="library-review">—</strong></button>
+                <button id="library-review-open" class="library-stat review-stat" type="button" disabled title="Немає записів, що потребують перевірки"><span>Потребують перевірки</span><strong id="library-review">—</strong></button>
             </div>
             <div id="library-scan-status" class="library-scan-status" hidden>
                 <div class="library-scan-copy"><strong id="library-scan-label">Сканування…</strong><span id="library-scan-file">Пошук файлів і метаданих…</span></div>
@@ -523,6 +523,9 @@ async function loadStats() {
         document.getElementById('library-total').textContent = Number(stats.total || 0).toLocaleString('uk-UA');
         const reviewCount = Number(stats.unrec || 0) + Number(stats.suspicious || 0);
         document.getElementById('library-review').textContent = reviewCount.toLocaleString('uk-UA');
+        const reviewButton = document.getElementById('library-review-open');
+        reviewButton.disabled = !(reviewCount > 0);
+        reviewButton.title = reviewCount > 0 ? 'Відкрити проблемні файли в Редакторі' : 'Немає записів, що потребують перевірки';
         document.getElementById('library-last-scan').textContent = `Останнє сканування: ${stats.last || '—'}`;
     } catch (e) {
         console.error("❌ Помилка при завантаженні статистики:", e);
