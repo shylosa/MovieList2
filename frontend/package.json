@@ -3,6 +3,9 @@
   "type": "module",
   "private": true,
   "version": "2.9.0",
+  "engines": {
+    "node": "^20.19.0 || >=22.12.0"
+  },
   "scripts": {
     "test": "node src/test-runner.mjs && node ../scripts/sync-version.test.mjs",
     "prebuild": "node ../scripts/sync-version.mjs",
@@ -12,6 +15,6 @@
     "preview": "vite preview"
   },
   "devDependencies": {
-    "vite": "^3.0.7"
+    "vite": "^8.3.3"
   }
 }

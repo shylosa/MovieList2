@@ -4,7 +4,7 @@
 
 MovieList App — desktop application for cataloging local movie/TV collections.
 
-**Tech stack:** Go 1.26+, Wails v2, SQLite, TMDB API, Google Gemini (`google.golang.org/genai`), Groq (`openai/gpt-oss-120b`), legacy xAI Grok compatibility.
+**Tech stack:** Go 1.27.1+, Wails v2, SQLite, TMDB API, Google Gemini (`google.golang.org/genai`), Groq (`openai/gpt-oss-120b`), legacy xAI Grok compatibility.
 
 ---
 

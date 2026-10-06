@@ -1,7 +1,7 @@
 ---
 Creator: Serhii Shylo
 Tags: Go, Golang, Wails, JavaScript, Movie Library, TMDB, Gemini AI, Groq AI, SQLite, Local Media
-Requires at least: Go 1.26.2+, Node.js (для збірки), TMDB API Key, Gemini API Key
+Requires at least: Go 1.27.1+, Node.js (для збірки), TMDB API Key, Gemini API Key
 License: MIT License
 ---
 
@@ -9,7 +9,7 @@ License: MIT License
 
 Поточна версія: [VERSION](internal/version/VERSION).
 
-**MovieList** — десктопний додаток на **Go 1.26.2 та Wails v2** для перетворення папок із відеофайлами на структурований кінокаталог. Програма автоматично збирає метадані (постери, описи, рейтинги), підтримує хмарну синхронізацію та генерує статичну HTML-вітрину для перегляду на мобільних пристроях.
+**MovieList** — десктопний додаток на **Go 1.27.1 та Wails v2** для перетворення папок із відеофайлами на структурований кінокаталог. Програма автоматично збирає метадані (постери, описи, рейтинги), підтримує хмарну синхронізацію та генерує статичну HTML-вітрину для перегляду на мобільних пристроях.
 
 ---
 
@@ -180,9 +180,9 @@ Gemini використовує задані у `GEMINI_MODELS` production-мо�
 
 ## 🛠️ Вимоги для збірки
 
-- **Go 1.26.2+**
-- **Node.js 18+ та npm**
-- **Wails CLI:** `go install github.com/wailsapp/wails/v2/cmd/wails@latest`
+- **Go 1.27.1+**
+- **Node.js 20.19+ або 22.12+ та npm**
+- **Wails CLI 2.16.0:** `go install github.com/wailsapp/wails/v2/cmd/wails@v2.16.0` (перевстановіть після оновлення Go)
 
 **API ключі:**
 

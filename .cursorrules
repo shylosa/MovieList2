@@ -38,7 +38,7 @@ If decoding fails:
 
 ## Go Rules
 
-- Use modern Go 1.26+ patterns where appropriate.
+- Use modern Go 1.27.1+ patterns where appropriate.
 - Always check errors.
 - Use `context.Context` correctly.
 - Check `ctx.Err()`:
