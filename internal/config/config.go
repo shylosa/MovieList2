@@ -12,6 +12,7 @@ import (
 // Config зберігає всі налаштування програми
 type Config struct {
 	EnvPath            string
+	LogLevel           string
 	GithubName         string
 	GithubURL          string
 	GithubPageURL      string
@@ -86,6 +87,7 @@ func Load() *Config {
 	}
 	return &Config{
 		EnvPath:            envPath,
+		LogLevel:           getEnvOrDefault("LOG_LEVEL", "info"),
 		GithubName:         getEnvOrDefault("GITHUB_NAME", "shylosa"),
 		GithubURL:          getEnvOrDefault("GITHUB_URL", "https://github.com/shylosa/MovieList2"),
 		GithubPageURL:      getEnvOrDefault("GITHUB_PAGE_URL", "https://shylosa.github.io/MovieList2"),

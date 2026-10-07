@@ -293,6 +293,12 @@ func (a *App) DeleteMovie(filename string) error {
 		a.logFront(fmt.Sprintf("❌ Помилка видалення %s: %v", filename, err))
 		return err
 	}
+	logger := utils.LoggerWithTrace(utils.EnsureTrace(a.ctx))
+	oldID := 0
+	if m != nil {
+		oldID = m.TmdbID
+	}
+	logger.Debug("catalog_record_deleted", slog.String("file", filename), slog.Int("previous_tmdb_id", oldID))
 
 	// 🔴 ХІРУРГІЧНЕ ВТРУЧАННЯ: Очищаємо сліди з L2 кешу ШІ
 	if err := a.db.DeleteAIResolution(a.ctx, filename); err != nil {
@@ -874,10 +880,8 @@ func (a *App) RunScan() {
 
 		// Зберігаємо всіх знайдених одним запитом
 		if len(moviesToSave) > 0 {
-			if err := a.db.SaveMoviesBatch(scanCtx, moviesToSave); err != nil {
+			if err := a.saveRecognitionBatch(scanCtx, moviesToSave, "tmdb_scan"); err != nil {
 				utils.LoggerWithTrace(scanCtx).Error("batch_save_failed", slog.Any("error", err))
-			} else {
-				utils.LoggerWithTrace(scanCtx).Info("batch_save_success", slog.Int("count", len(moviesToSave)), slog.String("stage", "tmdb_scan"))
 			}
 		}
 
@@ -1347,7 +1351,12 @@ func (a *App) processGeminiQueue(ctx context.Context, paths []string, aiClient *
 				slog.String("media_type", rec.MediaType),
 				slog.Int("year", yearVal),
 				slog.Float64("confidence", rec.Confidence),
+				slog.String("provider", rec.Provider),
+				slog.String("model", rec.Model),
 			)
+			utils.LoggerWithTrace(ctx).Debug("ai_recognition_context",
+				slog.String("file", fname), slog.String("original_title", rec.OriginalTitle),
+				slog.String("status", rec.Status))
 
 			if rec.ENTitle == "" {
 				utils.LoggerWithTrace(ctx).Warn("gemini_recognition_empty_title",
@@ -1400,10 +1409,8 @@ func (a *App) processGeminiQueue(ctx context.Context, paths []string, aiClient *
 		}
 
 		if len(moviesToSave) > 0 {
-			if err := a.db.SaveMoviesBatch(ctx, moviesToSave); err != nil {
+			if err := a.saveRecognitionBatch(ctx, moviesToSave, "gemini_queue"); err != nil {
 				utils.LoggerWithTrace(ctx).Error("batch_save_failed", slog.Any("error", err))
-			} else {
-				utils.LoggerWithTrace(ctx).Info("batch_save_success", slog.Int("count", len(moviesToSave)), slog.String("stage", "gemini_queue"))
 			}
 		}
 	}
@@ -2244,10 +2251,12 @@ func (a *App) FixSelected(selected []FixRequest) {
 		}
 		succeeded++
 		if m.TitleUA != "" && m.Plot != "" && !needsTranslation(m.TitleUA) && !needsTranslation(m.Plot) {
+			utils.LoggerWithTrace(ctx).Debug("localization_skipped", slog.String("file", fix.Filename), slog.String("reason", "already_localized"))
 			a.logFront(fmt.Sprintf("🎯 [TMDB Істина] Пропуск черги локалізації для '%s' (офіційний переклад та опис вже є)", m.TitleUA))
 			continue
 		}
 		translationQueue = append(translationQueue, fix.Filename)
+		utils.LoggerWithTrace(ctx).Debug("localization_queued", slog.String("file", fix.Filename), slog.Int("tmdb_id", m.TmdbID))
 	}
 
 	// 3. Другий етап (черга Gemini) 🟢
@@ -2433,6 +2442,7 @@ func (a *App) updateMovieWithMediaType(ctx context.Context, filename, hint, requ
 		}
 		_ = a.db.DeleteAIResolution(ctx, filename)
 		logger.Info("manual_title_resolved", slog.Int("tmdb_id", info.TMDBID), slog.String("media_type", string(info.MediaType)), slog.String("title", info.TitleEN))
+		logger.Debug("manual_title_saved", slog.String("title_ua", existing.TitleUA), slog.Bool("needs_title_localization", existing.TitleUA == "" || needsTranslation(existing.TitleUA)))
 		return nil
 	}
 
@@ -2752,6 +2762,8 @@ func needsTranslation(s string) bool {
 }
 
 func (a *App) processTranslationQueue(ctx context.Context, filenames []string, aiClient *ai.Client, expectedTMDBIDs map[string]int) {
+	logger := utils.LoggerWithTrace(ctx)
+	logger.Debug("localization_started", slog.Int("requested", len(filenames)))
 	a.logFront(fmt.Sprintf("🌍 Аналіз локалізації для %d файлів...", len(filenames)))
 
 	var itemsToTranslate []ai.BulkTranslateItem
@@ -2773,11 +2785,14 @@ func (a *App) processTranslationQueue(ctx context.Context, filenames []string, a
 
 		movie, ok := movies[fname]
 		if !ok {
+			logger.Debug("localization_skipped", slog.String("file", fname), slog.String("reason", "record_missing"))
 			continue
 		}
 
 		needTitle := movie.TitleUA == "" || needsTranslation(movie.TitleUA)
 		needPlot := movie.Plot == "" || needsTranslation(movie.Plot)
+		logger.Debug("localization_prepared", slog.String("file", fname), slog.Int("tmdb_id", movie.TmdbID),
+			slog.Bool("need_title", needTitle), slog.Bool("need_plot", needPlot))
 
 		if needTitle || needPlot {
 			fallbackTitle := movie.TitleUA
@@ -2828,7 +2843,7 @@ func (a *App) processTranslationQueue(ctx context.Context, filenames []string, a
 	const batchSize = 20
 	totalItems := len(itemsToTranslate)
 	totalBatches := (totalItems + batchSize - 1) / batchSize
-	var updatedCount int32
+	updatedCount := 0
 
 	for i := 0; i < totalItems; i += batchSize {
 		if ctx.Err() != nil {
@@ -2847,11 +2862,28 @@ func (a *App) processTranslationQueue(ctx context.Context, filenames []string, a
 
 		results, err := aiClient.TranslateBulk(ctx, batch)
 		if err != nil {
+			logger.Debug("localization_batch_failed", slog.Int("batch", currentBatchIdx), slog.Bool("cancelled", ctx.Err() != nil))
 			a.logFront(fmt.Sprintf("⚠️ Помилка перекладу пачки %d: %v", currentBatchIdx, err))
 			continue
 		}
+		logger.Debug("localization_batch_received", slog.Int("batch", currentBatchIdx), slog.Int("requested", len(batch)), slog.Int("returned", len(results)))
+		returned := make(map[string]bool, len(results))
+		for _, res := range results {
+			if ctx.Err() != nil {
+				return
+			}
+			returned[res.Filename] = true
+		}
+		for _, item := range batch {
+			if ctx.Err() != nil {
+				return
+			}
+			if !returned[item.Filename] {
+				logger.Debug("localization_result_missing", slog.String("file", item.Filename))
+			}
+		}
 
-		var moviesToSave []storage.Movie
+		var localizationUpdates []localizationUpdate
 		currentMovies := movies
 		if len(expectedTMDBIDs) > 0 {
 			currentMovies, err = a.db.GetMoviesByFilenames(ctx, filenames)
@@ -2861,6 +2893,9 @@ func (a *App) processTranslationQueue(ctx context.Context, filenames []string, a
 			}
 		}
 		for _, res := range results {
+			if ctx.Err() != nil {
+				return
+			}
 			movie, ok := movieMap[res.Filename]
 			if !ok {
 				continue
@@ -2875,47 +2910,38 @@ func (a *App) processTranslationQueue(ctx context.Context, filenames []string, a
 				movie = current
 			}
 
-			changed := false
-			if res.Title != "" && res.Title != movie.TitleUA && !strings.HasPrefix(strings.TrimSpace(res.Title), "<think>") {
-				// 🔴 ХІРУРГІЧНЕ ВТРУЧАННЯ: Якщо TMDB вже дав надійну українську назву,
-				// Gemini не може її перезаписати навіть кириличним калькою.
-				if utils.IsGoodUkrainian(movie.TitleUA) {
-					slog.Debug("localization_skip_ai_override_trusted_tmdb",
-						slog.String("file", movie.Filename),
-						slog.String("kept", movie.TitleUA),
-						slog.String("rejected", res.Title))
-				} else if utils.HasCyrillic(movie.TitleUA) && !utils.HasCyrillic(res.Title) {
-					slog.Debug("localization_skip_downgrade",
-						slog.String("file", movie.Filename),
-						slog.String("kept", movie.TitleUA),
-						slog.String("rejected", res.Title))
-				} else {
-					movie.TitleUA = res.Title
-					changed = true
-				}
+			update, titleOutcome := prepareLocalizationUpdate(movie, res)
+			changed := update.TitleChanged || update.PlotChanged
+			if titleOutcome == "non_ukrainian_rejected" {
+				logger.Warn("translation_title_not_ukrainian", slog.String("file", res.Filename))
 			}
-			if res.Plot != "" && res.Plot != movie.Plot && !needsTranslation(res.Plot) {
-				movie.Plot = res.Plot
-				changed = true
-			} else if res.Plot != "" && needsTranslation(res.Plot) {
+			if res.Plot != "" && needsTranslation(res.Plot) {
 				utils.LoggerWithTrace(ctx).Warn("translation_plot_not_ukrainian", slog.String("file", res.Filename))
 			}
 
 			if changed {
-				moviesToSave = append(moviesToSave, movie)
-				atomic.AddInt32(&updatedCount, 1)
-				a.logFront(fmt.Sprintf("✅ Адаптовано: '%s'", movie.TitleUA))
+				localizationUpdates = append(localizationUpdates, update)
+			} else {
+				a.logFront(localizationUnchangedMessage(movie, titleOutcome))
 			}
+			logger.Debug("localization_result", slog.String("file", movie.Filename), slog.Int("tmdb_id", movie.TmdbID),
+				slog.String("title_outcome", titleOutcome), slog.Bool("changed", changed),
+				slog.Bool("returned_plot", res.Plot != ""), slog.Bool("returned_plot_ukrainian", res.Plot != "" && !needsTranslation(res.Plot)))
 		}
 
-		if len(moviesToSave) > 0 {
-			if err := a.db.SaveMoviesBatch(ctx, moviesToSave); err != nil {
+		if len(localizationUpdates) > 0 {
+			committed, err := a.saveLocalizationUpdates(ctx, localizationUpdates)
+			if err != nil {
 				slog.Error("translation_batch_save_failed", slog.Any("error", err))
+				a.logFront("⚠️ Локалізацію не збережено через помилку запису.")
+			} else {
+				updatedCount += committed
 			}
 		}
 	}
 
 	if ctx.Err() == nil {
+		logger.Debug("localization_completed", slog.Int("updated_records", updatedCount))
 		a.logFront(fmt.Sprintf("✅ Фаза перекладу завершена! Оновлено записів: %d", updatedCount))
 	}
 }

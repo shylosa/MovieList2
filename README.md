@@ -235,11 +235,14 @@ GEMINI_MODELS=gemini-2.5-flash,gemini-flash-lite-latest
 DB_PATH=movies.db
 HTML_PATH=local_index.html
 POSTERS_DIR=posters
+LOG_LEVEL=info               # debug для детальної діагностики; також warn/error
 
 # GitHub Pages (опційно)
 GITHUB_PAGES_BRANCH=main       # Гілка для публікації (default: main)
 EXCLUDE_FOLDERS=downloads,temp # Папки для ігнорування при скануванні
 ```
+
+`LOG_LEVEL` застосовується після перезапуску. Типовий `info` залишає компактний журнал; `debug` додає результати локалізації, успішну модель перекладу та збережену назву. Сирі відповіді AI, промпти й конфігурація в ці діагностичні події не потрапляють. Невідомий рівень повертає `info`.
 
 ---
 

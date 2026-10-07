@@ -31,8 +31,9 @@ func (sw safeWriter) Write(p []byte) (int, error) {
 }
 
 var (
-	logFile  *os.File
-	syncStop chan struct{} // закриття зупиняє фонову горутину periodicSync
+	logFile     *os.File
+	syncStop    chan struct{} // закриття зупиняє фонову горутину periodicSync
+	loggerLevel slog.LevelVar
 )
 
 // InitLogger ініціалізує структуроване логування (slog) з виводом у консоль та файл.
@@ -67,7 +68,7 @@ func InitLogger() {
 	}
 
 	opts := &slog.HandlerOptions{
-		Level: slog.LevelInfo,
+		Level: &loggerLevel,
 		ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
 			if a.Key == slog.TimeKey {
 				t := a.Value.Time()
@@ -80,6 +81,32 @@ func InitLogger() {
 	handler := slog.NewJSONHandler(writer, opts)
 	slog.SetDefault(slog.New(handler))
 	log.SetOutput(standardLogBridge{logger: slog.Default()})
+}
+
+// SetLogLevel applies the selected config after dotenv loading. Unknown values
+// fall back to INFO without echoing configuration contents into the log.
+func SetLogLevel(value string) {
+	level, valid := configuredLogLevel(value)
+	loggerLevel.Set(level)
+	if !valid {
+		slog.Warn("invalid_log_level_using_info")
+	}
+	slog.Info("log_level_configured", slog.String("log_level", level.String()))
+}
+
+func configuredLogLevel(value string) (slog.Level, bool) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", "info":
+		return slog.LevelInfo, true
+	case "debug":
+		return slog.LevelDebug, true
+	case "warn":
+		return slog.LevelWarn, true
+	case "error":
+		return slog.LevelError, true
+	default:
+		return slog.LevelInfo, false
+	}
 }
 
 // net/http reports unexpected bytes on idle connections through log.Printf.

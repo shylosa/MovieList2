@@ -37,6 +37,7 @@ func main() {
 
 	app := NewApp()
 	app.cfg = config.Load()
+	utils.SetLogLevel(app.cfg.LogLevel)
 
 	err := wails.Run(&options.App{
 		Title:     "MovieList " + version.Current,

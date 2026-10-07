@@ -1047,6 +1047,7 @@ var (
 	reEmptyBrackets       = regexp.MustCompile(`\(\s*\)|\[\s*\]`)
 	reObservedReleaseTail = regexp.MustCompile(`(?i)(?:[ ._-]+)(?:andre90|TRIPLE)\s*$`)
 	reMetadataReleaseTag  = regexp.MustCompile(`(?i)\b(?:19|20)\d{2}[\s()_-]+(?:TRIPLE|andre90)\b`)
+	reProviderMetadata    = regexp.MustCompile(`(?i)(?:^|\s)AMZN(?:\s|$)`)
 )
 
 // Only strip a release tail when the filename contains both a year and
@@ -1074,7 +1075,10 @@ func trimTechnicalReleaseTail(filename string) string {
 		if reSeason.MatchString(s[year[1]+marker[0]:]) {
 			return filename
 		}
-		prefix := strings.TrimSpace(s[:year[1]+marker[0]])
+		// Provider tags between the release year and quality marker are metadata.
+		// Keep the same words intact in the title before the year.
+		metadata := reProviderMetadata.ReplaceAllString(s[year[1]:year[1]+marker[0]], " ")
+		prefix := strings.TrimSpace(s[:year[1]] + metadata)
 		return strings.TrimSpace(reObservedReleaseTail.ReplaceAllString(prefix, ""))
 	}
 	return filename

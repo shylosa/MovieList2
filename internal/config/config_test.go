@@ -12,7 +12,7 @@ var configEnvKeys = []string{
 	"EXCLUDE_FOLDERS", "GEMINI_API_KEY", "GEMINI_MODELS", "TMDB_API_KEY", "DB_PATH",
 	"HTML_PATH", "POSTERS_DIR", "GOOGLE_SHEET_URL", "GOOGLE_SHEET_WORKSHEET_NAME",
 	"GROK_API_KEY", "GROK_MODEL", "GITHUB_PAGES_BRANCH",
-	"GROQ_API_KEY", "GROQ_MODEL",
+	"GROQ_API_KEY", "GROQ_MODEL", "LOG_LEVEL",
 }
 
 func TestLoadGroqSettingsAndLegacyKeyCompatibility(t *testing.T) {
@@ -56,6 +56,9 @@ func clearConfigEnv(t *testing.T) {
 func TestLoadDefaults(t *testing.T) {
 	clearConfigEnv(t)
 	cfg := Load()
+	if cfg.LogLevel != "info" {
+		t.Fatalf("default LogLevel = %q; want info", cfg.LogLevel)
+	}
 	if cfg.DBPath != "movies.db" || cfg.HTMLPath != "local_index.html" || cfg.PostersDir != "posters" {
 		t.Fatalf("unexpected path defaults: %+v", cfg)
 	}
@@ -76,7 +79,11 @@ func TestLoadEnvironmentOverrides(t *testing.T) {
 	t.Setenv("GEMINI_API_KEY", "test-gemini")
 	t.Setenv("GROK_API_KEY", "test-grok")
 	t.Setenv("GITHUB_PAGES_BRANCH", "pages")
+	t.Setenv("LOG_LEVEL", "debug")
 	cfg := Load()
+	if cfg.LogLevel != "debug" {
+		t.Fatalf("LogLevel override = %q; want debug", cfg.LogLevel)
+	}
 	if cfg.GeminiAPIKey != "test-gemini" || cfg.GrokAPIKey != "test-grok" || cfg.GitHubPagesBranch != "pages" {
 		t.Fatalf("environment overrides not applied: %+v", cfg)
 	}

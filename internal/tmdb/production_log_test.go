@@ -58,6 +58,29 @@ func TestProductionReleaseParsing(t *testing.T) {
 	}
 }
 
+func TestProviderMetadataCandidates(t *testing.T) {
+	for _, tt := range []struct {
+		filename string
+		want     string
+	}{
+		{"Kak.ryba.v.vode.2026.AMZN.WEB-DLRip.AVC.mkv", "Kak ryba v vode"},
+		{"Kak_ryba_v_vode_2026_amzn_WEB-DLRip_AVC.mkv", "Kak ryba v vode"},
+		{"AMZN.2026.WEB-DLRip.AVC.mkv", "AMZN"},
+		{"The.AMZN.Story.2026.AMZN.WEB-DLRip.AVC.mkv", "The AMZN Story"},
+	} {
+		t.Run(tt.filename, func(t *testing.T) {
+			parsed := ParseFilename(tt.filename)
+			got := generateTitleCandidates(parsed.CleanTitle, tt.filename)
+			if len(got) != 1 || got[0] != tt.want {
+				t.Fatalf("candidates=%q; want only %q", got, tt.want)
+			}
+		})
+	}
+	if got := trimTechnicalReleaseTail("The.AMZN.Story.mkv"); got != "The.AMZN.Story.mkv" {
+		t.Fatalf("title without release evidence changed: %q", got)
+	}
+}
+
 func TestFolderFallbackDoesNotRepeatBetweenCascades(t *testing.T) {
 	var output bytes.Buffer
 	previous := slog.Default()

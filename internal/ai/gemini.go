@@ -700,8 +700,10 @@ func (c *Client) translateBulkPrompt(ctx context.Context, prompt string) ([]Bulk
 			cleaned := cleanJSON(resp.Text())
 			unmarshalErr := json.Unmarshal([]byte(cleaned), &results)
 			if unmarshalErr == nil {
+				utils.LoggerWithTrace(ctx).Debug("bulk_translate_success", slog.String("provider", "gemini"), slog.String("model", modelName), slog.Int("results_count", len(results)))
 				return results, nil
 			}
+			utils.LoggerWithTrace(ctx).Debug("bulk_translate_parse_failed", slog.String("provider", "gemini"), slog.String("model", modelName))
 			lastErr = fmt.Errorf("parse error on %s: %w", modelName, unmarshalErr)
 			continue
 		}
