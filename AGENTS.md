@@ -31,6 +31,7 @@ MovieList App — desktop application for cataloging local movie/TV collections.
 * `Config.EnvPath` is the actual `.env` selected by `config.Load()`. Wails `GetEnvConfig`/`SaveEnvConfig` only access that path, never a client-supplied path.
 * The editor autosaves after a pause and on navigation/blur; the application close button flushes pending changes. Saves validate dotenv syntax, preserve comments, use UTF-8/LF and atomic replacement, and reject stale revisions after external changes. Never log config contents or raw parser errors, which may contain API keys.
 * Saving does not change active config, environment variables or clients; changes take effect after restart. Persisted folder/model selections retain precedence over `.env` defaults.
+* `LOG_LEVEL` selects `info` (default), `debug`, `warn` or `error` after config loading at startup; unknown values fall back to INFO without logging the supplied value. DEBUG diagnostics must not include secrets, prompts or raw provider payloads.
 * About is a native modal dialog, closed by its close button, backdrop click or Escape, with focus returned to the settings button. It does not navigate away from the active panel.
 
 ### Multiple scan sources
@@ -224,6 +225,8 @@ GITHUB_PAGES_BRANCH=main
 ---
 
 ## Active Work — MovieList
+
+Project workflows live in `.agents/skills`: `movielist-log-analysis` (read-only log analysis with a code-change decision), `movielist-verify` (proportional checks), `movielist-build` (builds and toolchain compatibility), `movielist-docs` (documentation synchronization), and `deep-reviewer` (explicitly requested read-only audit). README contains links and invocation examples. Log recommendations do not authorize implementation or changes to product policy; documentation must distinguish automated evidence from outstanding production checks.
 
 The project-scoped `reviewer` custom agent is defined in `.codex/agents/reviewer.toml`. Run it only when the user explicitly requests a review; it is read-only and reports actionable findings without changing files.
 
