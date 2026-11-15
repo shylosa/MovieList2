@@ -8,6 +8,7 @@ import (
 
 	"movielist-app/internal/config"
 	"movielist-app/internal/storage"
+	"movielist-app/internal/version"
 )
 
 func TestGeneratePosterSourcesAndStableIDs(t *testing.T) {
@@ -30,7 +31,7 @@ func TestGeneratePosterSourcesAndStableIDs(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "index.html")
-			if err := Generate(&config.Config{AppVersion: "test", HTMLPath: path}, []storage.Movie{movie}, tc.mobile); err != nil {
+			if err := Generate(&config.Config{HTMLPath: path}, []storage.Movie{movie}, tc.mobile); err != nil {
 				t.Fatal(err)
 			}
 			content, err := os.ReadFile(path)
@@ -38,6 +39,9 @@ func TestGeneratePosterSourcesAndStableIDs(t *testing.T) {
 				t.Fatal(err)
 			}
 			html := string(content)
+			if !strings.Contains(html, "<title>MovieList "+version.Current+"</title>") {
+				t.Fatal("showcase does not use embedded release version")
+			}
 			if !strings.Contains(html, tc.want) || strings.Contains(html, tc.dontWant) {
 				t.Fatalf("poster source mismatch: want %q and not %q", tc.want, tc.dontWant)
 			}

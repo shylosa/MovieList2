@@ -46,6 +46,22 @@ export namespace main {
 	        this.media_type = source["media_type"];
 	    }
 	}
+	export class EnvDocument {
+	    path: string;
+	    content: string;
+	    revision: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new EnvDocument(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.path = source["path"];
+	        this.content = source["content"];
+	        this.revision = source["revision"];
+	    }
+	}
 	export class FixRequest {
 	    filename: string;
 	    hint: string;
@@ -62,6 +78,54 @@ export namespace main {
 	        this.media_type = source["media_type"];
 	    }
 	}
+	export class MetadataRepairResult {
+	    movie: storage.Movie;
+	    warning?: string;
+	
+	    static createFrom(source: any = {}) {
+	        return new MetadataRepairResult(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.movie = this.convertValues(source["movie"], storage.Movie);
+	        this.warning = source["warning"];
+	    }
+	
+		convertValues(a: any, classs: any, asMap: boolean = false): any {
+		    if (!a) {
+		        return a;
+		    }
+		    if (a.slice && a.map) {
+		        return (a as any[]).map(elem => this.convertValues(elem, classs));
+		    } else if ("object" === typeof a) {
+		        if (asMap) {
+		            for (const key of Object.keys(a)) {
+		                a[key] = new classs(a[key]);
+		            }
+		            return a;
+		        }
+		        return new classs(a);
+		    }
+		    return a;
+		}
+	}
+	export class ScanFolders {
+	    root: string;
+	    folders: string[];
+	    excluded: string[];
+	
+	    static createFrom(source: any = {}) {
+	        return new ScanFolders(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.root = source["root"];
+	        this.folders = source["folders"];
+	        this.excluded = source["excluded"];
+	    }
+	}
 
 }
 
@@ -71,6 +135,7 @@ export namespace storage {
 	    id: number;
 	    filename: string;
 	    file_label?: string;
+	    file_path?: string;
 	    tmdb_id: number;
 	    title_ua: string;
 	    title_en: string;
@@ -98,6 +163,7 @@ export namespace storage {
 	        this.id = source["id"];
 	        this.filename = source["filename"];
 	        this.file_label = source["file_label"];
+	        this.file_path = source["file_path"];
 	        this.tmdb_id = source["tmdb_id"];
 	        this.title_ua = source["title_ua"];
 	        this.title_en = source["title_en"];

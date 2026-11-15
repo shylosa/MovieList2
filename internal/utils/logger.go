@@ -3,9 +3,11 @@ package utils
 import (
 	"context"
 	"io"
+	"log"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -24,13 +26,14 @@ type safeWriter struct {
 }
 
 func (sw safeWriter) Write(p []byte) (int, error) {
-	sw.w.Write(p) //nolint:errcheck — помилки ігноруємо навмисно
+	sw.w.Write(p)      //nolint:errcheck — помилки ігноруємо навмисно
 	return len(p), nil // Завжди репортуємо повний запис, щоб MultiWriter не обривався
 }
 
 var (
-	logFile  *os.File
-	syncStop chan struct{} // закриття зупиняє фонову горутину periodicSync
+	logFile     *os.File
+	syncStop    chan struct{} // закриття зупиняє фонову горутину periodicSync
+	loggerLevel slog.LevelVar
 )
 
 // InitLogger ініціалізує структуроване логування (slog) з виводом у консоль та файл.
@@ -65,7 +68,7 @@ func InitLogger() {
 	}
 
 	opts := &slog.HandlerOptions{
-		Level: slog.LevelInfo,
+		Level: &loggerLevel,
 		ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
 			if a.Key == slog.TimeKey {
 				t := a.Value.Time()
@@ -77,6 +80,53 @@ func InitLogger() {
 
 	handler := slog.NewJSONHandler(writer, opts)
 	slog.SetDefault(slog.New(handler))
+	log.SetOutput(standardLogBridge{logger: slog.Default()})
+}
+
+// SetLogLevel applies the selected config after dotenv loading. Unknown values
+// fall back to INFO without echoing configuration contents into the log.
+func SetLogLevel(value string) {
+	level, valid := configuredLogLevel(value)
+	loggerLevel.Set(level)
+	if !valid {
+		slog.Warn("invalid_log_level_using_info")
+	}
+	slog.Info("log_level_configured", slog.String("log_level", level.String()))
+}
+
+func configuredLogLevel(value string) (slog.Level, bool) {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "", "info":
+		return slog.LevelInfo, true
+	case "debug":
+		return slog.LevelDebug, true
+	case "warn":
+		return slog.LevelWarn, true
+	case "error":
+		return slog.LevelError, true
+	default:
+		return slog.LevelInfo, false
+	}
+}
+
+// net/http reports unexpected bytes on idle connections through log.Printf.
+// Do not persist the raw response: it has no request context and may contain
+// remote content. An idle close is not an active API request failure.
+type standardLogBridge struct{ logger *slog.Logger }
+
+func (w standardLogBridge) Write(p []byte) (int, error) {
+	message := strings.TrimSpace(string(p))
+	if strings.Contains(message, "Unsolicited response received on idle HTTP channel") {
+		status := 0
+		if strings.Contains(message, "HTTP/1.1 400 ") {
+			status = 400
+		}
+		w.logger.Info("http_idle_unsolicited_response", slog.String("component", "net/http"),
+			slog.String("connection_state", "idle"), slog.String("provider", "unknown"), slog.Int("response_status", status))
+	} else {
+		w.logger.Info(message)
+	}
+	return len(p), nil
 }
 
 // ContextWithTrace додає trace_id до контексту

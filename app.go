@@ -31,6 +31,7 @@ import (
 	"movielist-app/internal/storage"
 	"movielist-app/internal/tmdb"
 	"movielist-app/internal/utils"
+	"movielist-app/internal/version"
 	"movielist-app/internal/web"
 
 	"github.com/google/uuid"
@@ -44,9 +45,12 @@ type App struct {
 	tmdbClient                 *tmdb.Client
 	aiClient                   *ai.Client
 	aiModelsCache              []string
+	discoveredGrokModels       []string
+	discoveredGroqModels       []string
 	discoveredAIModels         []string
 	aiModelsHTTPClient         *http.Client
 	modelsMutex                sync.RWMutex
+	configFileMutex            sync.Mutex
 	modelsGroup                singleflight.Group
 	scanCancel                 context.CancelFunc
 	isScanning                 bool
@@ -60,6 +64,11 @@ type App struct {
 	eventEmitter               func(context.Context, string, ...interface{})
 	diskFileScanner            func(context.Context) ([]string, error)
 	candidateTranslationRunner func(context.Context, []string, map[string]int)
+	repairMutex                sync.Mutex
+	repairCancel               context.CancelFunc
+	repairClosing              bool
+	repairDetailsFetcher       func(context.Context, tmdb.MediaType, int) (*tmdb.MovieInfo, error)
+	repairTranslator           func(context.Context, []ai.BulkTranslateItem) ([]ai.BulkTranslateItem, error)
 }
 
 type scanResult struct {
@@ -132,7 +141,10 @@ func (a *App) getDiskFiles(ctx context.Context) ([]string, error) {
 
 func (a *App) startup(ctx context.Context) {
 	a.ctx = ctx
-	a.cfg = config.Load()
+	if a.cfg == nil {
+		a.cfg = config.Load()
+	}
+	slog.Info("app_started", slog.String("version", version.Current))
 
 	var err error
 	a.db, err = storage.New(a.cfg.DBPath)
@@ -146,6 +158,8 @@ func (a *App) startup(ctx context.Context) {
 		os.Exit(1)
 	}
 	a.restoreMediaFolder(ctx)
+	a.restoreExcludedFolders()
+	a.restoreScanFolders()
 	a.tmdbClient = tmdb.NewClient(a.cfg)
 	a.aiClient = ai.NewClient(a.cfg)
 	if err := a.auditDuplicateMovieIdentities(ctx); err != nil {
@@ -167,6 +181,12 @@ func (a *App) restoreMediaFolder(ctx context.Context) {
 
 func (a *App) shutdown(ctx context.Context) {
 	slog.Info("app_closed")
+	a.repairMutex.Lock()
+	a.repairClosing = true
+	if a.repairCancel != nil {
+		a.repairCancel()
+	}
+	a.repairMutex.Unlock()
 	a.cancelScan() // спочатку сигналізуємо зупинку всім горутинам
 	a.wg.Wait()    // потім чекаємо graceful завершення
 	if a.tmdbClient != nil {
@@ -228,8 +248,16 @@ func (a *App) GetMovies() ([]storage.Movie, error) {
 	if movies == nil {
 		return []storage.Movie{}, nil
 	}
+	a.scanMutex.Lock()
+	defer a.scanMutex.Unlock()
 	for i := range movies {
+		if err := a.ctx.Err(); err != nil {
+			return nil, err
+		}
 		movies[i].FileLabel = utils.DisplayFileLabel(movies[i].Filename)
+		if a.cfg != nil {
+			movies[i].FilePath = a.cfg.ResolveMediaPath(movies[i].Filename)
+		}
 	}
 	return movies, nil
 }
@@ -253,7 +281,7 @@ func (a *App) GetStats() map[string]interface{} {
 }
 
 func (a *App) GetAppVersion() string {
-	return a.cfg.AppVersion
+	return version.Current
 }
 
 func (a *App) DeleteMovie(filename string) error {
@@ -265,6 +293,12 @@ func (a *App) DeleteMovie(filename string) error {
 		a.logFront(fmt.Sprintf("❌ Помилка видалення %s: %v", filename, err))
 		return err
 	}
+	logger := utils.LoggerWithTrace(utils.EnsureTrace(a.ctx))
+	oldID := 0
+	if m != nil {
+		oldID = m.TmdbID
+	}
+	logger.Debug("catalog_record_deleted", slog.String("file", filename), slog.Int("previous_tmdb_id", oldID))
 
 	// 🔴 ХІРУРГІЧНЕ ВТРУЧАННЯ: Очищаємо сліди з L2 кешу ШІ
 	if err := a.db.DeleteAIResolution(a.ctx, filename); err != nil {
@@ -320,7 +354,15 @@ func (a *App) setMediaFolder(path string) (string, error) {
 	if err := a.db.SetState(a.ctx, "media_folder_path", path); err != nil {
 		return "", fmt.Errorf("save selected media folder: %w", err)
 	}
+	state, err := json.Marshal(savedScanFolders{Root: path, Folders: []string{path}, Sources: a.cfg.MediaSources})
+	if err != nil {
+		return "", err
+	}
+	if err := a.db.SetState(a.ctx, "scan_folders", string(state)); err != nil {
+		return "", err
+	}
 	a.cfg.MediaFolderPath = path
+	a.cfg.MediaFolders = []string{path}
 	if a.tmdbClient != nil {
 		a.tmdbClient.SetMediaRoot(path)
 	}
@@ -525,57 +567,55 @@ func (a *App) GetAIModels() ([]string, error) {
 // GetAIModelCatalog refreshes Gemini's model list and returns configured models
 // separately from every compatible model reported by the API.
 func (a *App) GetAIModelCatalog() (AIModelCatalog, error) {
-	a.modelsMutex.Lock()
-	a.aiModelsCache = nil
-	a.discoveredAIModels = nil
-	a.modelsMutex.Unlock()
-	current, err := a.fetchAIModels(a.ctx)
-	a.modelsMutex.RLock()
-	available := append([]string(nil), a.discoveredAIModels...)
-	a.modelsMutex.RUnlock()
-	return AIModelCatalog{Current: current, Available: available}, err
+	current := a.configuredGeminiModels()
+	if a.cfg.GeminiAPIKey == "" {
+		return AIModelCatalog{Current: current}, fmt.Errorf("GEMINI_API_KEY not configured")
+	}
+	value, err, _ := a.modelsGroup.Do("gemini_catalog", func() (interface{}, error) {
+		ctx := a.ctx
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		defer cancel()
+		client := a.aiModelsHTTPClient
+		if client == nil {
+			client = &http.Client{Timeout: 15 * time.Second}
+		}
+		genClient, err := genai.NewClient(ctx, &genai.ClientConfig{APIKey: a.cfg.GeminiAPIKey, Backend: genai.BackendGeminiAPI, HTTPClient: client})
+		if err != nil {
+			return nil, fmt.Errorf("Gemini catalog initialization failed")
+		}
+		available := []string{}
+		for model, listErr := range genClient.Models.All(ctx) {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			if listErr != nil {
+				return nil, fmt.Errorf("Gemini catalog request failed")
+			}
+			name := strings.TrimPrefix(model.Name, "models/")
+			if isUsableGeminiModel(name, model.SupportedActions) {
+				available = append(available, name)
+			}
+		}
+		sort.Strings(available)
+		a.modelsMutex.Lock()
+		a.discoveredAIModels = append([]string(nil), available...)
+		a.modelsMutex.Unlock()
+		if a.aiClient != nil {
+			a.aiClient.RefreshModelAvailability()
+		}
+		return available, nil
+	})
+	if err != nil {
+		return AIModelCatalog{Current: current}, err
+	}
+	return AIModelCatalog{Current: current, Available: value.([]string)}, nil
 }
 
 func (a *App) SetAIModels(names []string) error {
-	if len(names) == 0 {
-		return fmt.Errorf("select at least one Gemini model")
-	}
-	catalog, err := a.GetAIModelCatalog()
-	if err != nil {
-		return err
-	}
-	available := make(map[string]bool, len(catalog.Available))
-	for _, name := range catalog.Available {
-		available[name] = true
-	}
-	selected := make([]string, 0, len(names))
-	seen := make(map[string]bool, len(names))
-	for _, name := range names {
-		name = strings.TrimSpace(name)
-		if !available[name] || seen[name] {
-			continue
-		}
-		seen[name] = true
-		selected = append(selected, name)
-	}
-	if len(selected) == 0 {
-		return fmt.Errorf("selected models are not available for generateContent")
-	}
-	encoded, err := json.Marshal(selected)
-	if err != nil {
-		return err
-	}
-	if err := a.db.SetState(a.ctx, "selected_gemini_models", string(encoded)); err != nil {
-		return err
-	}
-	if a.aiClient != nil {
-		a.aiClient.SetModels(selected)
-	}
-	a.modelsMutex.Lock()
-	a.aiModelsCache = append([]string(nil), selected...)
-	a.modelsMutex.Unlock()
-	slog.Info("ai_models_selection_updated", slog.Int("selected", len(selected)))
-	return nil
+	return a.SetProviderModels("gemini", names)
 }
 
 func (a *App) configuredGeminiModels() []string {
@@ -589,99 +629,55 @@ func (a *App) configuredGeminiModels() []string {
 }
 
 // fetchAIModels is the internal implementation that accepts a context.
-// This allows internal callers (like RunScan warmup) to pass their
-// scan-specific context while keeping the exported signature RPC-friendly.
+// Discovery shares the same singleflight request as the settings catalog.
 func (a *App) fetchAIModels(ctx context.Context) ([]string, error) {
-	if ctx == nil {
-		ctx = context.Background()
+	if ctx != nil && ctx.Err() != nil {
+		return nil, ctx.Err()
 	}
-	// Grok-only mode: if Gemini key is absent but Grok is configured — report Grok as available.
 	if a.cfg.GeminiAPIKey == "" {
-		if a.cfg.GrokAPIKey != "" {
-			return []string{"grok-3-mini"}, nil
+		if a.cfg.GroqAPIKey != "" {
+			return a.configuredGroqModels(), nil
 		}
-		return nil, fmt.Errorf("no AI API key configured (set GEMINI_API_KEY or GROK_API_KEY in .env)")
+		if a.cfg.GrokAPIKey != "" {
+			return a.configuredGrokModels(), nil
+		}
+		return nil, fmt.Errorf("no AI API key configured")
 	}
 	a.modelsMutex.RLock()
-	if len(a.aiModelsCache) > 0 {
-		cache := append([]string(nil), a.aiModelsCache...)
-		a.modelsMutex.RUnlock()
-		return cache, nil
-	}
+	cached := append([]string(nil), a.aiModelsCache...)
 	a.modelsMutex.RUnlock()
-
-	// safe to ignore: singleflight shared flag is not needed by callers.
-	value, err, _ := a.modelsGroup.Do("ai_models", func() (interface{}, error) {
-		client := a.aiModelsHTTPClient
-		if client == nil {
-			client = &http.Client{Timeout: 10 * time.Second}
-		}
-		genClient, err := genai.NewClient(ctx, &genai.ClientConfig{
-			APIKey: a.cfg.GeminiAPIKey, Backend: genai.BackendGeminiAPI, HTTPClient: client,
-		})
-		if err != nil {
-			return nil, err
-		}
-		discovered := make(map[string]bool)
-		for model, listErr := range genClient.Models.All(ctx) {
-			if listErr != nil {
-				return nil, listErr
-			}
-			name := strings.TrimPrefix(model.Name, "models/")
-			if isUsableGeminiModel(name, model.SupportedActions) {
-				discovered[name] = true
-			}
-		}
-		discoveredNames := make([]string, 0, len(discovered))
-		for name := range discovered {
-			discoveredNames = append(discoveredNames, name)
-		}
-		sort.Strings(discoveredNames)
-		names := selectConfiguredGeminiModels(a.configuredGeminiModels(), discovered)
-		if len(names) == 0 {
-			return nil, fmt.Errorf("no configured Gemini generateContent models are available")
-		}
-
-		if a.aiClient != nil {
-			a.aiClient.SetModels(names) // SetModels receives only Gemini models — correct.
-		}
-
-		// Append Grok as a known fallback model if configured.
-		if a.cfg.GrokAPIKey != "" {
-			names = append(names, "grok-3-mini (fallback)")
-		}
-
-		// Cache includes Grok suffix so all callers see a consistent list.
-		a.modelsMutex.Lock()
-		a.aiModelsCache = append([]string(nil), names...)
-		a.discoveredAIModels = append([]string(nil), discoveredNames...)
-		a.modelsMutex.Unlock()
-
-		return append([]string(nil), names...), nil
-	})
+	if len(cached) > 0 {
+		return cached, nil
+	}
+	catalog, err := a.GetAIModelCatalog()
+	configured := a.configuredGeminiModels()
 	if err != nil {
-		configured := a.configuredGeminiModels()
-		fallback := make([]string, 0, len(configured))
+		if ctx != nil && ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		fallback := []string{}
 		for _, name := range configured {
 			if isUsableGeminiModel(name, []string{"generateContent"}) {
 				fallback = append(fallback, name)
 			}
 		}
-		if len(fallback) > 0 {
-			slog.Warn("ai_models_discovery_fallback", slog.Any("error", err), slog.Any("models", fallback))
-			if a.aiClient != nil {
-				a.aiClient.SetModels(fallback)
-			}
-			return fallback, nil
+		if len(fallback) == 0 {
+			return nil, err
 		}
-		return nil, err
+		slog.Warn("ai_models_discovery_fallback", slog.Any("error", err))
+		return fallback, nil
 	}
-
-	names, ok := value.([]string)
-	if !ok {
-		slog.Error("fetch_ai_models_type_assertion_failed", slog.String("type", fmt.Sprintf("%T", value)))
-		return nil, fmt.Errorf("fetchAIModels: unexpected type %T", value)
+	discovered := make(map[string]bool)
+	for _, name := range catalog.Available {
+		discovered[name] = true
 	}
+	names := selectConfiguredGeminiModels(configured, discovered)
+	if len(names) == 0 {
+		return nil, fmt.Errorf("no configured Gemini generateContent models are available")
+	}
+	a.modelsMutex.Lock()
+	a.aiModelsCache = append([]string(nil), names...)
+	a.modelsMutex.Unlock()
 	return names, nil
 }
 
@@ -735,7 +731,7 @@ func (a *App) RunScan() {
 
 	// 🟢 Створюємо контекст ДО запуску горутини (усуває race з StopScan).
 	// Якщо StopScan() викликається між wg.Add і setScanCancel — cancelScan() був silent no-op.
-	ctx, cancel := context.WithCancel(a.ctx)
+	ctx, cancel := context.WithCancel(a.modelContext(a.ctx))
 	a.setScanCancel(cancel)
 
 	a.wg.Add(1)
@@ -782,6 +778,7 @@ func (a *App) RunScan() {
 				slog.Int64("gemini_disambiguation_calls", metrics.Disambiguation),
 				slog.Int64("gemini_generate_calls", metrics.GeminiGenerate),
 				slog.Int64("grok_calls", metrics.Grok),
+				slog.Int64("groq_calls", metrics.Groq),
 				slog.Int64("tmdb_search_calls", tmdbMetrics.SearchCalls),
 				slog.Int64("tmdb_details_calls", tmdbMetrics.DetailsCalls),
 				slog.Int64("tmdb_cache_hits", tmdbMetrics.CacheHits),
@@ -883,10 +880,8 @@ func (a *App) RunScan() {
 
 		// Зберігаємо всіх знайдених одним запитом
 		if len(moviesToSave) > 0 {
-			if err := a.db.SaveMoviesBatch(scanCtx, moviesToSave); err != nil {
+			if err := a.saveRecognitionBatch(scanCtx, moviesToSave, "tmdb_scan"); err != nil {
 				utils.LoggerWithTrace(scanCtx).Error("batch_save_failed", slog.Any("error", err))
-			} else {
-				utils.LoggerWithTrace(scanCtx).Info("batch_save_success", slog.Int("count", len(moviesToSave)), slog.String("stage", "tmdb_scan"))
 			}
 		}
 
@@ -1356,7 +1351,12 @@ func (a *App) processGeminiQueue(ctx context.Context, paths []string, aiClient *
 				slog.String("media_type", rec.MediaType),
 				slog.Int("year", yearVal),
 				slog.Float64("confidence", rec.Confidence),
+				slog.String("provider", rec.Provider),
+				slog.String("model", rec.Model),
 			)
+			utils.LoggerWithTrace(ctx).Debug("ai_recognition_context",
+				slog.String("file", fname), slog.String("original_title", rec.OriginalTitle),
+				slog.String("status", rec.Status))
 
 			if rec.ENTitle == "" {
 				utils.LoggerWithTrace(ctx).Warn("gemini_recognition_empty_title",
@@ -1409,10 +1409,8 @@ func (a *App) processGeminiQueue(ctx context.Context, paths []string, aiClient *
 		}
 
 		if len(moviesToSave) > 0 {
-			if err := a.db.SaveMoviesBatch(ctx, moviesToSave); err != nil {
+			if err := a.saveRecognitionBatch(ctx, moviesToSave, "gemini_queue"); err != nil {
 				utils.LoggerWithTrace(ctx).Error("batch_save_failed", slog.Any("error", err))
-			} else {
-				utils.LoggerWithTrace(ctx).Info("batch_save_success", slog.Int("count", len(moviesToSave)), slog.String("stage", "gemini_queue"))
 			}
 		}
 	}
@@ -1624,7 +1622,7 @@ func (a *App) rescueEmptyGeminiWithFolder(ctx context.Context, filePath string) 
 	}
 
 	parsed := tmdb.ParseFilename(filePath)
-	parentTitle := cleanRescueParentTitle(filePath, a.cfg.MediaFolderPath, parsed.ParentDir)
+	parentTitle := cleanRescueParentTitle(filePath, a.cfg.RootForPath(filePath), parsed.ParentDir)
 	if parentTitle == "" {
 		logger.Warn("gemini_empty_rescue_skipped_no_parent_title")
 		return storage.Movie{Filename: fname}
@@ -1683,8 +1681,11 @@ func (a *App) rescueEmptyGeminiWithFolder(ctx context.Context, filePath string) 
 		}
 
 		jw := maxTitleSimilarity(candidate, tmdbInfo)
-		if jw < geminiTMDBVerifyMinJW {
+		if jw < geminiTMDBVerifyMinJW || tmdbInfo.AmbiguousExact || tmdbInfo.TMDBID <= 0 || (tmdbInfo.MediaType != tmdb.MediaTypeMovie && tmdbInfo.MediaType != tmdb.MediaTypeTV) {
 			logger.Warn("gemini_empty_rescue_post_verify_rejected",
+				slog.Int("tmdb_id", tmdbInfo.TMDBID),
+				slog.String("tmdb_media_type", string(tmdbInfo.MediaType)),
+				slog.Bool("ambiguous", tmdbInfo.AmbiguousExact),
 				slog.String("candidate", candidate),
 				slog.String("tmdb_title", tmdbInfo.TitleEN),
 				slog.String("search_title", tmdbInfo.SearchTitle),
@@ -1854,7 +1855,7 @@ type CandidateConfirmRequest struct {
 }
 
 func (a *App) SearchTMDBCandidates(request CandidateSearchRequest) ([]tmdb.TMDBCandidate, error) {
-	ctx := utils.EnsureTrace(a.ctx)
+	ctx := a.modelContext(utils.EnsureTrace(a.ctx))
 	if strings.TrimSpace(request.Filename) == "" {
 		return nil, fmt.Errorf("filename required")
 	}
@@ -2073,7 +2074,7 @@ func candidateSearchYear(parsedYear int, current *storage.Movie) int {
 }
 
 func (a *App) ConfirmTMDBCandidate(request CandidateConfirmRequest) error {
-	ctx := utils.EnsureTrace(a.ctx)
+	ctx := a.modelContext(utils.EnsureTrace(a.ctx))
 	startedAt := time.Now()
 	if strings.TrimSpace(request.Filename) == "" || request.TMDBID <= 0 {
 		return fmt.Errorf("valid filename and tmdb_id required")
@@ -2115,10 +2116,10 @@ func (a *App) ConfirmTMDBCandidate(request CandidateConfirmRequest) error {
 	if info.PosterURL != "" || needsTranslation {
 		filename, expectedID, expectedMediaType := request.Filename, request.TMDBID, string(mediaType)
 		posterURL := info.PosterURL
+		backgroundCtx := ctx
 		a.wg.Add(1)
 		go func() {
 			defer a.wg.Done()
-			backgroundCtx := utils.EnsureTrace(a.ctx)
 			translationStartedAt := time.Now()
 			utils.LoggerWithTrace(backgroundCtx).Info("candidate_background_started", slog.String("file", filename), slog.Int("tmdb_id", expectedID))
 			if posterURL != "" {
@@ -2152,7 +2153,7 @@ func (a *App) ConfirmTMDBCandidate(request CandidateConfirmRequest) error {
 }
 
 func (a *App) GetTMDBCandidateDetails(request CandidateConfirmRequest) (*tmdb.CandidateDetails, error) {
-	ctx := utils.EnsureTrace(a.ctx)
+	ctx := a.modelContext(utils.EnsureTrace(a.ctx))
 	mediaType := tmdb.MediaType(strings.ToLower(strings.TrimSpace(request.MediaType)))
 	if request.TMDBID <= 0 || (mediaType != tmdb.MediaTypeMovie && mediaType != tmdb.MediaTypeTV) {
 		return nil, fmt.Errorf("valid tmdb_id and media_type required")
@@ -2180,7 +2181,7 @@ func (a *App) FixSelected(selected []FixRequest) {
 	a.wg.Add(1)
 
 	// 1. Створюємо керований контекст з гарантованим trace_id 🟢
-	ctx, cancel := context.WithCancel(utils.EnsureTrace(a.ctx))
+	ctx, cancel := context.WithCancel(a.modelContext(utils.EnsureTrace(a.ctx)))
 	a.setScanCancel(cancel)
 	defer func() {
 		cancel()
@@ -2212,7 +2213,7 @@ func (a *App) FixSelected(selected []FixRequest) {
 		if fixRequestUsesDirectPath(s, existing) {
 			withHint = append(withHint, s)
 		} else {
-			geminiQueue = append(geminiQueue, filepath.Join(a.cfg.MediaFolderPath, s.Filename))
+			geminiQueue = append(geminiQueue, a.cfg.ResolveMediaPath(s.Filename))
 		}
 	}
 
@@ -2250,10 +2251,12 @@ func (a *App) FixSelected(selected []FixRequest) {
 		}
 		succeeded++
 		if m.TitleUA != "" && m.Plot != "" && !needsTranslation(m.TitleUA) && !needsTranslation(m.Plot) {
+			utils.LoggerWithTrace(ctx).Debug("localization_skipped", slog.String("file", fix.Filename), slog.String("reason", "already_localized"))
 			a.logFront(fmt.Sprintf("🎯 [TMDB Істина] Пропуск черги локалізації для '%s' (офіційний переклад та опис вже є)", m.TitleUA))
 			continue
 		}
 		translationQueue = append(translationQueue, fix.Filename)
+		utils.LoggerWithTrace(ctx).Debug("localization_queued", slog.String("file", fix.Filename), slog.Int("tmdb_id", m.TmdbID))
 	}
 
 	// 3. Другий етап (черга Gemini) 🟢
@@ -2300,7 +2303,7 @@ func fixSelectedCompletion(ctx context.Context, succeeded, failed int) (string, 
 
 // UpdateMovie — Wails API: оновлення одного запису за hint від користувача.
 func (a *App) UpdateMovie(filename, hint string) error {
-	ctx := utils.EnsureTrace(a.ctx)
+	ctx := a.modelContext(utils.EnsureTrace(a.ctx))
 	if err := a.updateMovie(ctx, filename, hint); err != nil {
 		return err
 	}
@@ -2439,6 +2442,7 @@ func (a *App) updateMovieWithMediaType(ctx context.Context, filename, hint, requ
 		}
 		_ = a.db.DeleteAIResolution(ctx, filename)
 		logger.Info("manual_title_resolved", slog.Int("tmdb_id", info.TMDBID), slog.String("media_type", string(info.MediaType)), slog.String("title", info.TitleEN))
+		logger.Debug("manual_title_saved", slog.String("title_ua", existing.TitleUA), slog.Bool("needs_title_localization", existing.TitleUA == "" || needsTranslation(existing.TitleUA)))
 		return nil
 	}
 
@@ -2464,7 +2468,7 @@ func (a *App) updateMovieWithMediaType(ctx context.Context, filename, hint, requ
 	} else {
 		rec = preserveRecognizedContext(rec, existing)
 	}
-	movie := a.mergeGeminiWithTMDBForType(ctx, filepath.Join(a.cfg.MediaFolderPath, filename), rec, strictMediaType)
+	movie := a.mergeGeminiWithTMDBForType(ctx, a.cfg.ResolveMediaPath(filename), rec, strictMediaType)
 	if !strictMediaType && identityReplacementConflicts(existing, movie) {
 		utils.LoggerWithTrace(ctx).Warn("identity_replacement_rejected",
 			slog.String("file", filename), slog.Int("old_tmdb_id", existing.TmdbID), slog.String("old_media_type", existing.MediaType), slog.String("old_year", existing.Year),
@@ -2539,11 +2543,7 @@ func sameMovieIdentity(existing *storage.Movie, replacement storage.Movie) bool 
 
 // getFileIdentifier повертає відносний шлях до файлу (захищає від колізій імен файлів)
 func (a *App) getFileIdentifier(p string) string {
-	rel, err := filepath.Rel(a.cfg.MediaFolderPath, p)
-	if err != nil || strings.HasPrefix(rel, "..") {
-		return filepath.Base(p) // Фоллбек, якщо файл поза медіатекою
-	}
-	return filepath.ToSlash(rel)
+	return a.cfg.MediaIdentifier(p)
 }
 
 // filterUnprocessed повертає файли яких немає в БД або які нерозпізнані
@@ -2729,33 +2729,30 @@ func (a *App) localizeStoredMovies(ctx context.Context, attempted []string) {
 	if a.aiClient == nil || ctx.Err() != nil {
 		return
 	}
-	movies, err := a.db.GetAllMovies(ctx)
-	if err != nil {
-		utils.LoggerWithTrace(ctx).Warn("localization_backfill_read_failed", slog.Any("error", err))
-		return
-	}
 	excluded := make(map[string]struct{}, len(attempted))
 	for _, filename := range attempted {
 		excluded[filename] = struct{}{}
 	}
 	var queue []string
-	for _, movie := range movies {
-		if ctx.Err() != nil {
-			return
+	err := a.db.ForEachRecognizedLocalization(ctx, func(filename, titleUA, plot string) error {
+		if _, skip := excluded[filename]; !skip && needsStoredLocalization(titleUA, plot) {
+			queue = append(queue, filename)
 		}
-		if movie.TmdbID <= 0 {
-			continue
+		return nil
+	})
+	if err != nil {
+		if ctx.Err() == nil {
+			utils.LoggerWithTrace(ctx).Warn("localization_backfill_read_failed", slog.Any("error", err))
 		}
-		if _, skip := excluded[movie.Filename]; skip {
-			continue
-		}
-		if movie.TitleUA == "" || needsTranslation(movie.TitleUA) || movie.Plot == "" || needsTranslation(movie.Plot) {
-			queue = append(queue, movie.Filename)
-		}
+		return
 	}
 	if len(queue) > 0 {
 		a.processTranslationQueue(ctx, queue, a.aiClient, nil)
 	}
+}
+
+func needsStoredLocalization(titleUA, plot string) bool {
+	return titleUA == "" || needsTranslation(titleUA) || (plot != "" && needsTranslation(plot))
 }
 
 // needsTranslation повертає true, якщо текст треба перекласти (англійська або підозріла кирилиця)
@@ -2765,6 +2762,8 @@ func needsTranslation(s string) bool {
 }
 
 func (a *App) processTranslationQueue(ctx context.Context, filenames []string, aiClient *ai.Client, expectedTMDBIDs map[string]int) {
+	logger := utils.LoggerWithTrace(ctx)
+	logger.Debug("localization_started", slog.Int("requested", len(filenames)))
 	a.logFront(fmt.Sprintf("🌍 Аналіз локалізації для %d файлів...", len(filenames)))
 
 	var itemsToTranslate []ai.BulkTranslateItem
@@ -2786,11 +2785,14 @@ func (a *App) processTranslationQueue(ctx context.Context, filenames []string, a
 
 		movie, ok := movies[fname]
 		if !ok {
+			logger.Debug("localization_skipped", slog.String("file", fname), slog.String("reason", "record_missing"))
 			continue
 		}
 
 		needTitle := movie.TitleUA == "" || needsTranslation(movie.TitleUA)
 		needPlot := movie.Plot == "" || needsTranslation(movie.Plot)
+		logger.Debug("localization_prepared", slog.String("file", fname), slog.Int("tmdb_id", movie.TmdbID),
+			slog.Bool("need_title", needTitle), slog.Bool("need_plot", needPlot))
 
 		if needTitle || needPlot {
 			fallbackTitle := movie.TitleUA
@@ -2841,7 +2843,7 @@ func (a *App) processTranslationQueue(ctx context.Context, filenames []string, a
 	const batchSize = 20
 	totalItems := len(itemsToTranslate)
 	totalBatches := (totalItems + batchSize - 1) / batchSize
-	var updatedCount int32
+	updatedCount := 0
 
 	for i := 0; i < totalItems; i += batchSize {
 		if ctx.Err() != nil {
@@ -2860,11 +2862,28 @@ func (a *App) processTranslationQueue(ctx context.Context, filenames []string, a
 
 		results, err := aiClient.TranslateBulk(ctx, batch)
 		if err != nil {
+			logger.Debug("localization_batch_failed", slog.Int("batch", currentBatchIdx), slog.Bool("cancelled", ctx.Err() != nil))
 			a.logFront(fmt.Sprintf("⚠️ Помилка перекладу пачки %d: %v", currentBatchIdx, err))
 			continue
 		}
+		logger.Debug("localization_batch_received", slog.Int("batch", currentBatchIdx), slog.Int("requested", len(batch)), slog.Int("returned", len(results)))
+		returned := make(map[string]bool, len(results))
+		for _, res := range results {
+			if ctx.Err() != nil {
+				return
+			}
+			returned[res.Filename] = true
+		}
+		for _, item := range batch {
+			if ctx.Err() != nil {
+				return
+			}
+			if !returned[item.Filename] {
+				logger.Debug("localization_result_missing", slog.String("file", item.Filename))
+			}
+		}
 
-		var moviesToSave []storage.Movie
+		var localizationUpdates []localizationUpdate
 		currentMovies := movies
 		if len(expectedTMDBIDs) > 0 {
 			currentMovies, err = a.db.GetMoviesByFilenames(ctx, filenames)
@@ -2874,6 +2893,9 @@ func (a *App) processTranslationQueue(ctx context.Context, filenames []string, a
 			}
 		}
 		for _, res := range results {
+			if ctx.Err() != nil {
+				return
+			}
 			movie, ok := movieMap[res.Filename]
 			if !ok {
 				continue
@@ -2888,47 +2910,38 @@ func (a *App) processTranslationQueue(ctx context.Context, filenames []string, a
 				movie = current
 			}
 
-			changed := false
-			if res.Title != "" && res.Title != movie.TitleUA && !strings.HasPrefix(strings.TrimSpace(res.Title), "<think>") {
-				// 🔴 ХІРУРГІЧНЕ ВТРУЧАННЯ: Якщо TMDB вже дав надійну українську назву,
-				// Gemini не може її перезаписати навіть кириличним калькою.
-				if utils.IsGoodUkrainian(movie.TitleUA) {
-					slog.Debug("localization_skip_ai_override_trusted_tmdb",
-						slog.String("file", movie.Filename),
-						slog.String("kept", movie.TitleUA),
-						slog.String("rejected", res.Title))
-				} else if utils.HasCyrillic(movie.TitleUA) && !utils.HasCyrillic(res.Title) {
-					slog.Debug("localization_skip_downgrade",
-						slog.String("file", movie.Filename),
-						slog.String("kept", movie.TitleUA),
-						slog.String("rejected", res.Title))
-				} else {
-					movie.TitleUA = res.Title
-					changed = true
-				}
+			update, titleOutcome := prepareLocalizationUpdate(movie, res)
+			changed := update.TitleChanged || update.PlotChanged
+			if titleOutcome == "non_ukrainian_rejected" {
+				logger.Warn("translation_title_not_ukrainian", slog.String("file", res.Filename))
 			}
-			if res.Plot != "" && res.Plot != movie.Plot && !needsTranslation(res.Plot) {
-				movie.Plot = res.Plot
-				changed = true
-			} else if res.Plot != "" && needsTranslation(res.Plot) {
+			if res.Plot != "" && needsTranslation(res.Plot) {
 				utils.LoggerWithTrace(ctx).Warn("translation_plot_not_ukrainian", slog.String("file", res.Filename))
 			}
 
 			if changed {
-				moviesToSave = append(moviesToSave, movie)
-				atomic.AddInt32(&updatedCount, 1)
-				a.logFront(fmt.Sprintf("✅ Адаптовано: '%s'", movie.TitleUA))
+				localizationUpdates = append(localizationUpdates, update)
+			} else {
+				a.logFront(localizationUnchangedMessage(movie, titleOutcome))
 			}
+			logger.Debug("localization_result", slog.String("file", movie.Filename), slog.Int("tmdb_id", movie.TmdbID),
+				slog.String("title_outcome", titleOutcome), slog.Bool("changed", changed),
+				slog.Bool("returned_plot", res.Plot != ""), slog.Bool("returned_plot_ukrainian", res.Plot != "" && !needsTranslation(res.Plot)))
 		}
 
-		if len(moviesToSave) > 0 {
-			if err := a.db.SaveMoviesBatch(ctx, moviesToSave); err != nil {
+		if len(localizationUpdates) > 0 {
+			committed, err := a.saveLocalizationUpdates(ctx, localizationUpdates)
+			if err != nil {
 				slog.Error("translation_batch_save_failed", slog.Any("error", err))
+				a.logFront("⚠️ Локалізацію не збережено через помилку запису.")
+			} else {
+				updatedCount += committed
 			}
 		}
 	}
 
 	if ctx.Err() == nil {
+		logger.Debug("localization_completed", slog.Int("updated_records", updatedCount))
 		a.logFront(fmt.Sprintf("✅ Фаза перекладу завершена! Оновлено записів: %d", updatedCount))
 	}
 }

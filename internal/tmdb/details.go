@@ -296,6 +296,32 @@ func (c *Client) GetDetails(ctx context.Context, mediaType MediaType, id int, or
 	return info, nil
 }
 
+// RefreshDetails bypasses the recognition cache and only fetches the stored entity.
+// No filename parsing, search or type inference is allowed on this path.
+func (c *Client) RefreshDetails(ctx context.Context, mediaType MediaType, id int) (*MovieInfo, error) {
+	if id <= 0 || (mediaType != MediaTypeMovie && mediaType != MediaTypeTV) {
+		return nil, fmt.Errorf("valid TMDB identity required")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	var info *MovieInfo
+	var err error
+	if mediaType == MediaTypeTV {
+		info, err = c.getTVDetails(ctx, id, "")
+	} else {
+		info, err = c.getMovieDetails(ctx, id, "")
+	}
+	if err != nil {
+		return nil, err
+	}
+	if info == nil || info.TMDBID != id || info.MediaType != mediaType {
+		return nil, fmt.Errorf("TMDB returned a different identity")
+	}
+	c.detailsCache.Delete(fmt.Sprintf("%s:%d", mediaType, id))
+	return info, nil
+}
+
 // GetCandidateDetails returns on-demand preview data without credits, aliases,
 // or a local poster download.
 func (c *Client) GetCandidateDetails(ctx context.Context, mediaType MediaType, id int) (*CandidateDetails, error) {
@@ -428,6 +454,28 @@ func joinGenres(items []tmdbNamedItem) string {
 		}
 	}
 	return strings.Join(names, ", ")
+}
+
+// HasLocalizedGenres also accepts known Ukrainian labels without distinctive
+// alphabet markers (for example, "Драма"). Unknown Latin labels are rejected.
+func HasLocalizedGenres(genres string) bool {
+	if strings.TrimSpace(genres) == "" {
+		return false
+	}
+	for _, genre := range strings.Split(genres, ",") {
+		genre = strings.TrimSpace(genre)
+		valid := utils.IsGoodUkrainian(genre)
+		for _, localized := range genreTranslations {
+			if genre == localized {
+				valid = true
+				break
+			}
+		}
+		if !valid {
+			return false
+		}
+	}
+	return true
 }
 
 func joinCast(cast []tmdbNamedItem) string {

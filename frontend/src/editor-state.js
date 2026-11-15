@@ -1,3 +1,5 @@
+import { matchesCollectionSearch } from './metadata.js';
+
 export function candidateSearchPayload(filename, hints, mediaTypes) {
     return { filename, title: hints[filename] || '', media_type: mediaTypes[filename] || 'auto' };
 }
@@ -47,9 +49,11 @@ export function filterAndSortEditorMovies(movies, query = '', filter = 'all', so
     const result = movies.filter(movie => {
         if (filter === 'review' && !(movie.needs_review || !movie.tmdb_id)) return false;
         if (filter === 'unresolved' && movie.tmdb_id) return false;
-        const text = [movie.filename, movie.file_label, movie.title_ua, movie.title_en, movie.year].join(' ').toLocaleLowerCase('uk-UA');
-        return text.includes(search);
+        return matchesCollectionSearch(movie, search);
     });
+    // GetMovies returns insertion order, also used by the library's added sort.
+    // Keep that order after filtering so newly added records stay at the bottom.
+    if (sort === 'added') return result;
     const title = movie => movie.title_ua || movie.title_en || movie.file_label || movie.filename || '';
     result.sort((a, b) => {
         let difference = 0;
@@ -69,6 +73,12 @@ export function updateEditorSelection(selection, filenames, checked) {
         else next.delete(filename);
     }
     return next;
+}
+
+// Refreshes can remove a repaired record from the list without ending its inspection.
+// Explicit search/filter changes still restrict selection to their visible results.
+export function shouldKeepEditorInspector(filename, movies, visibleMovies, preserveInspector = false) {
+    return (preserveInspector ? movies : visibleMovies).some(movie => movie.filename === filename);
 }
 
 export function candidateStatus(candidates, error = null) {

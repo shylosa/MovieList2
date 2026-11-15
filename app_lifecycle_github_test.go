@@ -36,7 +36,7 @@ func newTestAppDB(t *testing.T, movies []storage.Movie) (*App, string) {
 	a := NewApp()
 	a.ctx = context.Background()
 	a.db = db
-	a.cfg = &config.Config{AppVersion: "test", HTMLPath: filepath.Join(dir, "local.html"), GitHubPagesBranch: "pages-test"}
+	a.cfg = &config.Config{HTMLPath: filepath.Join(dir, "local.html"), GitHubPagesBranch: "pages-test"}
 	a.eventEmitter = func(context.Context, string, ...interface{}) {}
 	return a, dir
 }

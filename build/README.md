@@ -1,5 +1,9 @@
 # Build Directory
 
+## MovieList version and build commands
+
+Edit the release version only in [`internal/version/VERSION`](../internal/version/VERSION). From the repository root, use `./build.ps1` for production or `./build.ps1 -Dev` for development. The wrapper synchronizes Wails, npm and HTML metadata before Wails reads its configuration. The platform notes below describe Wails assets; use the wrapper when building this project.
+
 The build directory is used to house all the build files and assets for your application. 
 
 The structure is:

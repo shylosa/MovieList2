@@ -10,6 +10,8 @@ func TestDisplayFileLabel(t *testing.T) {
 		relativePath string
 		expected     string
 	}{
+		{name: "Additional source folder", relativePath: "source:abcdef/Raw.Folder/movie.mkv", expected: "Raw.Folder"},
+		{name: "Additional source flat file", relativePath: "source:abcdef/movie.mkv", expected: "movie.mkv"},
 		{
 			name:         "Фільм у каталозі — повертає каталог",
 			relativePath: "Banshi.Inisherina.2022.WEB-DLRip/movie.mkv",

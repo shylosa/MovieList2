@@ -6,7 +6,9 @@ import (
 	"os"
 	"runtime/debug"
 
+	"movielist-app/internal/config"
 	"movielist-app/internal/utils"
+	"movielist-app/internal/version"
 
 	"github.com/wailsapp/wails/v2"
 	"github.com/wailsapp/wails/v2/pkg/options"
@@ -34,9 +36,11 @@ func main() {
 	}()
 
 	app := NewApp()
+	app.cfg = config.Load()
+	utils.SetLogLevel(app.cfg.LogLevel)
 
 	err := wails.Run(&options.App{
-		Title:     "MovieList 2.7.0",
+		Title:     "MovieList " + version.Current,
 		Width:     1100,
 		Height:    650,
 		MinWidth:  860,

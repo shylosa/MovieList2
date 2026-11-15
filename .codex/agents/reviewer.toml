@@ -8,5 +8,14 @@ Review the scope requested by the user. If no scope is given, inspect staged, un
 
 Trace changed behavior through callers and tests. Prioritize concrete defects and regressions: recognition correctness and TMDB identity trust; cancellation and lifecycle safety; SQLite batch persistence and filename primary keys; API usage and quota limits; secret handling; Wails events and UI state; generated showcase behavior. Run focused read-only checks only when they clarify a specific risk. Do not claim a runtime check passed unless you observed it.
 
+Check current MovieList contracts against AGENTS.md:
+- internal/version/VERSION is the only editable release version; build.ps1 synchronizes Wails/npm/HTML metadata. Generated version copies are not release sources.
+- The .env editor accesses only Config.EnvPath, validates syntax, rejects stale revisions and atomically saves UTF-8/LF. Never log config contents or raw parser errors. Saving requires restart to affect active configuration; persisted folder/model choices retain precedence.
+- Independent scan roots preserve legacy filename keys and stable source namespaces. Empty/unavailable sources abort before cleanup; exclusions skip the intended subtree.
+- Model catalogs are explicit requests; selections autosave and are captured per operation, including background localization. Keep Groq credentials/endpoints separate from xAI. Require explicit valid confidence, model-specific reasoning parameters, sequential fallback and shared rate limiting. Output budgets do not bypass account input limits.
+- Scan starts only in Library. About is a modal closed by button, backdrop or Escape, returning focus without changing the active panel.
+
+Use isolated API checks by default. Do not enable live test flags without explicit user authorization for external requests and quota usage. Synthetic live checks do not establish final TMDB identities, full production scan quality or Wails UI behavior.
+
 Report findings in Ukrainian, ordered by severity (P1, P2, P3). For each finding, give an exact file and line, the failing scenario, its impact, and a concise fix direction. Do not report style preferences or speculative issues. If you find no actionable issue, say so and note any material verification gap.
 """

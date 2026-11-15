@@ -11,6 +11,7 @@ import (
 	"movielist-app/internal/config"
 	"movielist-app/internal/storage"
 	"movielist-app/internal/utils"
+	"movielist-app/internal/version"
 )
 
 // SVG-іконки з вашого build_html.py
@@ -23,7 +24,7 @@ const (
 // movielist-app\internal\web\generator.go
 
 func Generate(cfg *config.Config, movies []storage.Movie, isMobile bool) error {
-	fmt.Printf("🎨 Генерація веб-каталогу %s (mobile=%v)...\n", cfg.AppVersion, isMobile)
+	fmt.Printf("🎨 Генерація веб-каталогу %s (mobile=%v)...\n", version.Current, isMobile)
 
 	displayMovies := make([]storage.Movie, len(movies))
 	for i, m := range movies {
@@ -61,7 +62,7 @@ func Generate(cfg *config.Config, movies []storage.Movie, isMobile bool) error {
 		ListIcon       template.HTML
 		FaviconBase64  string
 	}{
-		AppVersion:     cfg.AppVersion,
+		AppVersion:     version.Current,
 		TotalMovies:    len(displayMovies),
 		GenerationTime: time.Now().Format("02.01.2006 о 15:04"),
 		Movies:         displayMovies, // Відправляємо виправлені дані

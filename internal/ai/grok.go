@@ -38,6 +38,13 @@ type grokResponse struct {
 // Rate-limited via grokLimiter (30 RPM, burst=1). The prompt must already
 // instruct the model to respond in JSON without markdown wrapping.
 func (c *Client) callGrok(ctx context.Context, prompt string) (string, error) {
+	return c.callGrokModel(ctx, prompt, c.getGrokModels()[0])
+}
+
+func (c *Client) callGrokModel(ctx context.Context, prompt, model string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	if c.grokLimiter != nil {
 		if err := c.grokLimiter.Wait(ctx); err != nil {
 			return "", err
@@ -48,7 +55,7 @@ func (c *Client) callGrok(ctx context.Context, prompt string) (string, error) {
 	}
 
 	payload, err := json.Marshal(grokRequest{
-		Model:           c.cfg.GrokModel,
+		Model:           model,
 		Messages:        []grokMessage{{Role: "user", Content: prompt}},
 		Temperature:     0.1,
 		ReasoningEffort: "none",
@@ -103,4 +110,21 @@ func (c *Client) callGrok(ctx context.Context, prompt string) (string, error) {
 	}
 
 	return result.Choices[0].Message.Content, nil
+}
+
+func (c *Client) SetGrokModels(models []string) {
+	c.modelsMu.Lock()
+	defer c.modelsMu.Unlock()
+	c.activeGrokModels = append([]string(nil), models...)
+}
+func (c *Client) getGrokModels() []string {
+	c.modelsMu.RLock()
+	defer c.modelsMu.RUnlock()
+	if len(c.activeGrokModels) > 0 {
+		return append([]string(nil), c.activeGrokModels...)
+	}
+	if c.cfg.GrokModel != "" {
+		return []string{c.cfg.GrokModel}
+	}
+	return []string{"grok-3-mini"}
 }

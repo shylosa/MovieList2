@@ -14,7 +14,7 @@ import (
 // reSeason — детектор серіальних маркерів що go-ptn пропускає:
 // S07 (без епізоду), Season 3, сезон
 var (
-	reSeason           = regexp.MustCompile(`(?i)\bS(\d{2})\b(?:E\d{2})?|\bSeason\s*\d+\b|\bсезон\b`)
+	reSeason           = regexp.MustCompile(`(?i)\bS(\d{2})(?:E\d{2})?\b|\bSeason\s*\d+\b|\bсезон\b`)
 	rePunctFallback    = regexp.MustCompile(`[._]`)
 	reSpaceFallback    = regexp.MustCompile(`\s{2,}`)
 	yearZeroReplacer   = strings.NewReplacer("O", "0", "О", "0", "o", "0", "о", "0")
@@ -82,6 +82,7 @@ func ParseFilename(fullPath string) ParsedFile {
 	// Також знімаємо "голі" лічильники мов виду 3xRus, 2xUkr, бо go-ptn бачить "3x" як маркер серіалу.
 	nameForPTN := reLangTag.ReplaceAllString(name, "")
 	nameForPTN = reNakedLang.ReplaceAllString(nameForPTN, "")
+	nameForPTN = trimTechnicalReleaseTail(nameForPTN)
 	nameForPTN = strings.TrimSpace(nameForPTN)
 
 	info, err := ptn.Parse(nameForPTN + ext)

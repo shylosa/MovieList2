@@ -13,6 +13,52 @@ import (
 	"movielist-app/internal/config"
 )
 
+func TestGrokCascadeRetriesInvalidJSONAndReportsSuccessfulModel(t *testing.T) {
+	var models []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req grokRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Error(err)
+		}
+		models = append(models, req.Model)
+		content := "invalid JSON"
+		if req.Model == "second" {
+			content = `[{"en_title":"Enemy","original_file":"Enemy.mkv","confidence":0.9}]`
+		}
+		json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{"message": map[string]string{"content": content}}}})
+	}))
+	defer server.Close()
+	client := &Client{cfg: &config.Config{GrokAPIKey: "test"}, grokHTTPClient: &http.Client{Transport: &grokTestTransport{serverURL: server.URL}}}
+	client.SetGrokModels([]string{"first", "second"})
+	result, err := client.grokRecognizeFallback(context.Background(), "prompt")
+	if err != nil || len(result) != 1 || result[0].Model != "second" || len(models) != 2 {
+		t.Fatalf("result=%+v requests=%v err=%v", result, models, err)
+	}
+	if client.CallMetrics().Grok != 2 {
+		t.Fatal("request count incorrect")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := client.grokTranslateFallback(ctx, "prompt"); err != context.Canceled || len(models) != 2 {
+		t.Fatalf("cancellation made request: %v", err)
+	}
+}
+
+func TestModelSelectionSnapshotSurvivesSubsequentChanges(t *testing.T) {
+	client := NewClient(&config.Config{GeminiModels: []string{"gemini-2.5-flash"}, GrokModel: "grok-default"})
+	gemini, grok := []string{"gemini-2.5-pro"}, []string{"grok-first", "grok-second"}
+	ctx := WithModelSelection(context.Background(), gemini, grok)
+	gemini[0], grok[0] = "changed", "changed"
+	client.SetModels([]string{"gemini-flash-lite-latest"})
+	client.SetGrokModels([]string{"grok-new"})
+	if got := client.modelsForContext(ctx); len(got) != 1 || got[0] != "gemini-2.5-pro" {
+		t.Fatalf("Gemini snapshot=%v", got)
+	}
+	if got := client.grokModelsForContext(ctx); len(got) != 2 || got[0] != "grok-first" {
+		t.Fatalf("Grok snapshot=%v", got)
+	}
+}
+
 // TestCallGrok_HappyPath verifies that callGrok returns valid content
 // when the server responds with a well-formed OpenAI-compatible JSON.
 func TestCallGrok_HappyPath(t *testing.T) {

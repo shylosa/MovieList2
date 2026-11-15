@@ -26,8 +26,28 @@ export function GetAppVersion() {
   return window['go']['main']['App']['GetAppVersion']();
 }
 
+export function GetEnvConfig() {
+  return window['go']['main']['App']['GetEnvConfig']();
+}
+
+export function GetGrokModelCatalog() {
+  return window['go']['main']['App']['GetGrokModelCatalog']();
+}
+
+export function GetGroqModelCatalog() {
+  return window['go']['main']['App']['GetGroqModelCatalog']();
+}
+
+export function GetModelSelections() {
+  return window['go']['main']['App']['GetModelSelections']();
+}
+
 export function GetMovies() {
   return window['go']['main']['App']['GetMovies']();
+}
+
+export function GetScanFolders() {
+  return window['go']['main']['App']['GetScanFolders']();
 }
 
 export function GetStats() {
@@ -66,20 +86,48 @@ export function OpenURL(arg1) {
   return window['go']['main']['App']['OpenURL'](arg1);
 }
 
+export function RepairMetadata(arg1) {
+  return window['go']['main']['App']['RepairMetadata'](arg1);
+}
+
 export function RunScan() {
   return window['go']['main']['App']['RunScan']();
+}
+
+export function SaveEnvConfig(arg1, arg2) {
+  return window['go']['main']['App']['SaveEnvConfig'](arg1, arg2);
 }
 
 export function SearchTMDBCandidates(arg1) {
   return window['go']['main']['App']['SearchTMDBCandidates'](arg1);
 }
 
+export function SelectExcludedFolder() {
+  return window['go']['main']['App']['SelectExcludedFolder']();
+}
+
 export function SelectMediaFolder() {
   return window['go']['main']['App']['SelectMediaFolder']();
 }
 
+export function SelectScanFolder() {
+  return window['go']['main']['App']['SelectScanFolder']();
+}
+
 export function SetAIModels(arg1) {
   return window['go']['main']['App']['SetAIModels'](arg1);
+}
+
+export function SetExcludedFolders(arg1) {
+  return window['go']['main']['App']['SetExcludedFolders'](arg1);
+}
+
+export function SetProviderModels(arg1, arg2) {
+  return window['go']['main']['App']['SetProviderModels'](arg1, arg2);
+}
+
+export function SetScanFolders(arg1) {
+  return window['go']['main']['App']['SetScanFolders'](arg1);
 }
 
 export function StopScan() {
