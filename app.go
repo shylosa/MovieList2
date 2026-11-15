@@ -520,7 +520,12 @@ func (a *App) syncToGitHub() (bool, string) {
 func (a *App) gitRepoRoot() (string, error) {
 	out, err := a.gitRunner(a.ctx, "", "git", "rev-parse", "--show-toplevel")
 	if err != nil {
-		return "", fmt.Errorf("%s", strings.TrimSpace(string(out)))
+		a.logGitFailure("rev-parse", out, err)
+		diagnostic := safeGitDiagnostic(string(out))
+		if diagnostic == "" {
+			diagnostic = safeGitDiagnostic(err.Error())
+		}
+		return "", fmt.Errorf("%s", diagnostic)
 	}
 	root := strings.TrimSpace(string(out))
 	if root == "" {
@@ -533,7 +538,8 @@ func (a *App) deployToGitHubPagesIn(workDir string) error {
 	run := func(args ...string) error {
 		out, err := a.gitRunner(a.ctx, workDir, args[0], args[1:]...)
 		if err != nil {
-			a.logFront(fmt.Sprintf("❌ git %s: %s", args[1], strings.TrimSpace(string(out))))
+			a.logGitFailure(args[1], out, err)
+			a.logFront(fmt.Sprintf("❌ git %s: %s", args[1], safeGitDiagnostic(string(out))))
 		}
 		return err
 	}
@@ -2884,6 +2890,7 @@ func (a *App) processTranslationQueue(ctx context.Context, filenames []string, a
 		}
 
 		var localizationUpdates []localizationUpdate
+		var completedLocalizations []storage.Movie
 		currentMovies := movies
 		if len(expectedTMDBIDs) > 0 {
 			currentMovies, err = a.db.GetMoviesByFilenames(ctx, filenames)
@@ -2911,6 +2918,9 @@ func (a *App) processTranslationQueue(ctx context.Context, filenames []string, a
 			}
 
 			update, titleOutcome := prepareLocalizationUpdate(movie, res)
+			if localizationCompleted(movie, res, update) {
+				completedLocalizations = append(completedLocalizations, update.Movie)
+			}
 			changed := update.TitleChanged || update.PlotChanged
 			if titleOutcome == "non_ukrainian_rejected" {
 				logger.Warn("translation_title_not_ukrainian", slog.String("file", res.Filename))
@@ -2934,8 +2944,14 @@ func (a *App) processTranslationQueue(ctx context.Context, filenames []string, a
 			if err != nil {
 				slog.Error("translation_batch_save_failed", slog.Any("error", err))
 				a.logFront("⚠️ Локалізацію не збережено через помилку запису.")
+				continue
 			} else {
 				updatedCount += committed
+			}
+		}
+		for _, movie := range completedLocalizations {
+			if err := a.db.MarkLocalizationCompleted(ctx, movie); err != nil {
+				logger.Warn("localization_completion_save_failed", slog.Bool("cancelled", ctx.Err() != nil))
 			}
 		}
 	}

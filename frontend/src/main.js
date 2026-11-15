@@ -37,6 +37,7 @@ document.querySelector('#app').innerHTML = `
             <button type="button" class="nav-btn active" id="btn-library"><span class="nav-icon">▦</span> Бібліотека</button>
             <button type="button" class="nav-btn" id="btn-overview"><span class="nav-icon">◫</span> Активність<span id="activity-indicator" hidden aria-label="Виконується операція">●</span></button>
             <button type="button" class="nav-btn" id="btn-editor"><span class="nav-icon">✎</span> Редактор</button>
+            <button type="button" class="nav-btn" id="btn-exports"><span class="nav-icon">↗</span> Експорт і синхронізація</button>
         </nav>
         <div class="sidebar-bottom">
             <button type="button" class="nav-btn" id="btn-folders"><span class="nav-icon">▱</span> Папки сканування</button>
@@ -44,7 +45,6 @@ document.querySelector('#app').innerHTML = `
                 <div id="settings-menu" class="settings-menu" hidden>
                     <button type="button" id="btn-config">⚙ Конфігурація</button>
                     <button type="button" id="btn-models">✦ Моделі ШІ</button>
-                    <button type="button" id="btn-exports">↗ Експорт і синхронізація</button>
                     <button type="button" id="btn-logs">☷ Папка з логами</button>
                     <hr>
                     <button type="button" id="btn-about">Про MovieList</button>
@@ -297,7 +297,7 @@ const switchTab = (tab) => {
 
     document.getElementById(`panel-${tab}`).classList.add('active');
     document.getElementById(`btn-${tab}`)?.classList.add('active');
-    document.getElementById('btn-settings').classList.toggle('active', ['models', 'exports', 'config'].includes(tab));
+    document.getElementById('btn-settings').classList.toggle('active', ['models', 'config'].includes(tab));
     if (['models', 'exports', 'config', 'folders'].includes(tab)) {
         const heading = document.querySelector(`#panel-${tab} h1`);
         heading.tabIndex = -1;

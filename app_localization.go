@@ -91,3 +91,15 @@ func validLocalizationTitle(title, original string) bool {
 	return title != "" && !strings.HasPrefix(strings.TrimSpace(title), "<think>") &&
 		(utils.IsGoodUkrainian(title) || title == original)
 }
+
+// An original-title fallback is a successful result, but missing/rejected
+// translations of existing text must remain eligible for retry.
+func localizationCompleted(movie storage.Movie, result ai.BulkTranslateItem, update localizationUpdate) bool {
+	if !validLocalizationTitle(result.Title, movie.TitleEN) ||
+		(!utils.IsGoodUkrainian(update.Movie.TitleUA) && update.Movie.TitleUA != movie.TitleEN) {
+		return false
+	}
+	return movie.Plot == "" && result.Plot == "" ||
+		(result.Plot != "" && !needsTranslation(result.Plot)) ||
+		(movie.Plot != "" && !needsTranslation(movie.Plot))
+}

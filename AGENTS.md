@@ -53,6 +53,7 @@ MovieList App — desktop application for cataloging local movie/TV collections.
 * **Deploy trigger:** `SyncToGitHub()` from UI only — no background sync.
 * **Git:** System `git` via `os/exec`; no tokens in code. `git rev-parse --show-toplevel` sets `cmd.Dir` and `index.html` output path. `git push origin <cfg.GitHubPagesBranch>` (default: `"main"`, env: `GITHUB_PAGES_BRANCH`).
 * **`git commit` exit code:** Non-zero when nothing to commit is **not** treated as failure; `git push` still runs.
+* **Git diagnostics:** Failures of repository discovery/add/commit/push persist as `git_command_failed` with subcommand and sanitized output/error. URLs, credential patterns and Windows paths are redacted; do not log full command arguments or working directories. Unchanged commits emit informational `git_commit_no_changes`. Preserve the existing explicit-push workflow; no automatic pull/merge.
 
 ### Recognition Pipeline
 
@@ -236,9 +237,11 @@ The active recognition specification is `CHECKLIST.md` (gitignored by design), n
 
 The desktop UI opens on the poster library. A card opens a dedicated detail screen; editing navigates to the matching filename in the editor. The editor has a compact list, selection inspector, batch correction, TMDB candidates and an explicit search clear button with Escape shortcut. Movie ratings link to TMDB. The detail screen uses existing `GetMovies()` data and TMDB CDN poster URLs, with a local no-poster fallback.
 
-The sidebar has Library, Activity and Editor as primary panels, with Scan Folders and Settings anchored at the bottom. Scan starts only from the Library button; there is no sidebar scan button. Settings exposes the configuration editor, AI models, export/synchronization, logs and About. The local showcase is an export option alongside Sheets and GitHub Pages. Navigation alone never starts an export or a provider catalog request. Activity has no filters; About overlays the active panel.
+The sidebar has Library, Activity, Editor and Export/Synchronization as primary panels, with Scan Folders and Settings anchored at the bottom. Scan starts only from the Library button; there is no sidebar scan button. Settings exposes the configuration editor, AI models, logs and About. The local showcase is an export option alongside Sheets and GitHub Pages. Navigation alone never starts an export or a provider catalog request. Activity has no filters; About overlays the active panel.
 
 Default checks use isolated API transports. Live catalog/inference tests require explicit opt-in and authorized external requests; never enable them just to verify a release version. Synthetic live checks do not establish final TMDB identities, full-library scan quality or production UI behavior.
+
+Automatic stored-record localization skips successfully completed snapshots, including exact original-title fallbacks. The persisted localization fingerprint covers TMDB ID, media type, Ukrainian/current title, original title and plot; changed text or identity permits retry, unrelated metadata does not. Missing/rejected results and request/save failures remain eligible. Explicit editor localization bypasses this automatic filter. Completion markers must match the current snapshot and must never overwrite catalog fields.
 
 Metadata Repair is available only through the lightning icon beside TMDB in the editor inspector. It fetches the stored entity without filename parsing, search or identification; `tmdb_id`, `media_type` and recognition/verification state stay unchanged. The transactional batch upsert rejects concurrent record changes. Description and cast use local-data hover/focus popovers that can be pinned by clicking. Refreshing data preserves the active inspector when a resolved record leaves the review/unresolved list. The library review statistic opens the editor review filter with cleared search. Editor added sorting preserves the backend insertion order, with newer catalog records at the bottom.
 

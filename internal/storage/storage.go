@@ -240,6 +240,7 @@ func (db *DB) InitSchema(ctx context.Context) error {
 	_, _ = db.db.ExecContext(ctx, `ALTER TABLE movies ADD COLUMN review_reason TEXT NOT NULL DEFAULT '';`)
 	_, _ = db.db.ExecContext(ctx, `ALTER TABLE movies ADD COLUMN vote_average REAL NOT NULL DEFAULT 0;`)
 	_, _ = db.db.ExecContext(ctx, `ALTER TABLE movies ADD COLUMN vote_count INTEGER NOT NULL DEFAULT 0;`)
+	_, _ = db.db.ExecContext(ctx, `ALTER TABLE movies ADD COLUMN localization_fingerprint TEXT NOT NULL DEFAULT '';`)
 	_, _ = db.db.ExecContext(ctx, `ALTER TABLE ai_resolutions ADD COLUMN pipeline_version INTEGER NOT NULL DEFAULT 0;`)
 	_, _ = db.db.ExecContext(ctx, `ALTER TABLE ai_resolutions ADD COLUMN provider TEXT NOT NULL DEFAULT '';`)
 	_, _ = db.db.ExecContext(ctx, `ALTER TABLE ai_resolutions ADD COLUMN model TEXT NOT NULL DEFAULT '';`)
@@ -282,7 +283,7 @@ func (db *DB) GetAllMovies(ctx context.Context) ([]Movie, error) {
 // ForEachRecognizedLocalization streams only the fields needed to find stored
 // movies requiring localization. The callback must not issue another DB query.
 func (db *DB) ForEachRecognizedLocalization(ctx context.Context, visit func(filename, titleUA, plot string) error) error {
-	rows, err := db.db.QueryContext(ctx, `SELECT filename, title_ua, plot FROM movies WHERE tmdb_id > 0 ORDER BY rowid ASC`)
+	rows, err := db.db.QueryContext(ctx, `SELECT filename, tmdb_id, media_type, title_ua, title_en, plot, localization_fingerprint FROM movies WHERE tmdb_id > 0 ORDER BY rowid ASC`)
 	if err != nil {
 		return fmt.Errorf("localization candidates query failed: %w", err)
 	}
@@ -291,11 +292,15 @@ func (db *DB) ForEachRecognizedLocalization(ctx context.Context, visit func(file
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		var filename, titleUA, plot string
-		if err := rows.Scan(&filename, &titleUA, &plot); err != nil {
+		var movie Movie
+		var fingerprint string
+		if err := rows.Scan(&movie.Filename, &movie.TmdbID, &movie.MediaType, &movie.TitleUA, &movie.TitleEN, &movie.Plot, &fingerprint); err != nil {
 			return fmt.Errorf("localization candidate scan failed: %w", err)
 		}
-		if err := visit(filename, titleUA, plot); err != nil {
+		if fingerprint == localizationFingerprint(movie) {
+			continue
+		}
+		if err := visit(movie.Filename, movie.TitleUA, movie.Plot); err != nil {
 			return err
 		}
 	}
