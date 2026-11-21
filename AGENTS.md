@@ -1,457 +1,131 @@
-# AGENTS.md — MovieList App
-
-## Project Overview
-
-MovieList App — desktop application for cataloging local movie/TV collections.
-
-**Tech stack:** Go 1.27.1+, Wails v2, SQLite, TMDB API, Google Gemini (`google.golang.org/genai`), Groq (`openai/gpt-oss-120b`), legacy xAI Grok compatibility.
-
----
-
-## Architecture
-
-### Core Files
-
-| Package | Role |
-|---------|------|
-| `main.go` | Wails bootstrap, global panic handler |
-| `app.go` | Main orchestration layer and Wails API |
-| `internal/ai/` | Gemini & Groq integration, legacy xAI Grok compatibility |
-| `internal/version/` | Embedded release version from `VERSION` |
-| `internal/config/` | `.env` loading |
-| `internal/scanner/` | File scanning |
-| `internal/storage/` | SQLite layer |
-| `internal/tmdb/` | Parsing, search, scoring, metadata |
-| `internal/sheets/` | Google Sheets sync |
-| `internal/utils/` | Logging, language helpers, path display |
-| `internal/web/` | Static showcase generator |
-
-### Configuration editor
-
-* `Config.EnvPath` is the actual `.env` selected by `config.Load()`. Wails `GetEnvConfig`/`SaveEnvConfig` only access that path, never a client-supplied path.
-* The editor autosaves after a pause and on navigation/blur; the application close button flushes pending changes. Saves validate dotenv syntax, preserve comments, use UTF-8/LF and atomic replacement, and reject stale revisions after external changes. Never log config contents or raw parser errors, which may contain API keys.
-* Saving does not change active config, environment variables or clients; changes take effect after restart. Persisted folder/model selections retain precedence over `.env` defaults.
-* `LOG_LEVEL` selects `info` (default), `debug`, `warn` or `error` after config loading at startup; unknown values fall back to INFO without logging the supplied value. DEBUG diagnostics must not include secrets, prompts or raw provider payloads.
-* About is a native modal dialog, closed by its close button, backdrop click or Escape, with focus returned to the settings button. It does not navigate away from the active panel.
-
-### Multiple scan sources
-
-* `Config.MediaFolders` is the active source list; nil preserves the legacy `MediaFolderPath` default. An explicitly empty list aborts scanning before catalog cleanup.
-* `MediaFolderPath` remains the original identifier anchor. Existing relative `movies.filename` keys are preserved. Additional sources outside that anchor use `source:<SHA-256 of normalized root>/<full relative media path>` to avoid collisions across folders and drives. This is the explicit extension of the filename key format for multiple sources; it does not rewrite existing records or introduce rowid identifiers.
-* `Config.MediaIdentifier` and `ResolveMediaPath` provide round-trip source mapping. Saved source history resolves records until the next catalog cleanup; removal or reordering of sources never changes remaining identifiers.
-* `scan_folders` and `excluded_folders` persist through `app_state`. Sources cannot overlap. Any unavailable source aborts the disk scan before cleanup. Absolute exclusions skip the complete selected subtree; legacy bare names retain first-level semantics.
-* Recognition uses the corresponding source root as the boundary for parent-directory rescue. `DisplayFileLabel` strips the source namespace before computing the raw folder/file navigation label.
-* `Movie.FilePath` is computed by `GetMovies()` for displaying the actual source path; it is not stored and never replaces `Filename` as the record key.
-
-### Showcase & GitHub Pages
-
-| File | Role |
-|------|------|
-| `local_index.html` | Local PC showcase (`HTML_PATH` default); posters from `posters/` (`LocalPosterPath`). Gitignored. |
-| `index.html` | Mobile showcase for GitHub Pages; TMDB CDN posters (`PosterURL`, `isMobile: true`). Committed via `SyncToGitHub` only. |
-
-* **Deploy trigger:** `SyncToGitHub()` from UI only — no background sync.
-* **Git:** System `git` via `os/exec`; no tokens in code. `git rev-parse --show-toplevel` sets `cmd.Dir` and `index.html` output path. `git push origin <cfg.GitHubPagesBranch>` (default: `"main"`, env: `GITHUB_PAGES_BRANCH`).
-* **`git commit` exit code:** Non-zero when nothing to commit is **not** treated as failure; `git push` still runs.
-* **Git diagnostics:** Failures of repository discovery/add/commit/push persist as `git_command_failed` with subcommand and sanitized output/error. URLs, credential patterns and Windows paths are redacted; do not log full command arguments or working directories. Unchanged commits emit informational `git_commit_no_changes`. Preserve the existing explicit-push workflow; no automatic pull/merge.
-
-### Recognition Pipeline
-
-**Strict execution order:**
-
-1. Filename parsing
-2. IMDB ID lookup
-3. Typed TMDB search (`/search/movie` → `/search/tv`)
-4. Transliteration fallback
-5. Parent directory fallback
-6. TMDB scoring and verification
-7. Metadata waterfall (`uk-UA → ru-RU → en-US`)
-8. Merge TMDB + Gemini (bypass Gemini only when TMDB title and plot are valid Ukrainian)
-9. SQLite batch save
-10. Gemini fallback queue
-11. Translation queue
-
-### AI Agent Priorities
-
-1. Correct recognition
-2. Deterministic behavior
-3. Cancellation responsiveness
-4. Minimal API usage
-5. Throughput / performance
-
----
-
-## Critical Invariants
-
-* **Recognition:** `TmdbID > 0` is the only valid "recognised" state.
-* **Trust:** AI-generated IDs (Gemini, Groq or legacy Grok) are **never** trusted directly.
-* **Language Cascade:** Always preserve: `uk-UA → ru-RU → en-US`.
-* **TMDB Search:** Use `/search/movie` or `/search/tv`. **Never** use `/search/multi`.
-* **Translation Queue:** Only verified entries may be translated. Bypass Gemini only for text validated as Ukrainian; Russian markers such as `ы`, `э`, `ъ`, `ё` require Ukrainian localization.
-* **Batch Persistence:** Always use transactional `SaveMoviesBatch()`. Never replace with N individual saves.
-* **Cancellation:** Always check `ctx.Err()` before network requests and at loop boundaries.
-* **Primary Key:** `movies.filename` is the primary key (full relative path). Never use rowid as identifier externally.
-* **Unresolved records:** If Gemini fails to recognise a file, save a placeholder with `TmdbID=0` so the record is never silently dropped.
-
----
-
-## AI Rules (Gemini, Groq & legacy Grok)
-
-* **Groq integration:** The model page now shows Gemini and Groq. Groq uses `GROQ_API_KEY`, `GROQ_MODEL` (default `openai/gpt-oss-120b`) and `selected_groq_models`. Its catalog is `GET https://api.groq.com/openai/v1/models`; chat requests use `/openai/v1/chat/completions` and a versioned MovieList User-Agent. GPT-OSS requires `reasoning_effort=low`, Qwen supports `none`, and other models omit that parameter. Groq selections are frozen through `WithGroqModelSelection` and use the conservative shared fallback limiter. Groq is preferred when configured; the existing xAI implementation and its settings remain available for compatibility. Never send xAI credentials to Groq: legacy `GROK_API_KEY` is accepted for Groq only with the `gsk_` prefix. Runtime/editor changes still require restart.
-
-* **Groq recognition contract:** Require explicit `confidence` in the range 0–1 together with recognition fields and request correlation. Missing/null/out-of-range confidence rejects the response; never invent confidence to satisfy the acceptance threshold. Unknown files remain unresolved. `max_completion_tokens=4096` bounds output, but does not bypass provider input/account limits. Live synthetic checks passed for GPT-OSS 120B/20B and Ukrainian metadata translation through 120B. Qwen rejected the full batch prompt with HTTP 429 `request_too_large` (requested 1426, limit 1000 on this account); its full batch support is not verified.
-
-* **Model settings:** Opening the two-provider model page reads local selections only. Provider catalogs are explicit, singleflight requests; checkbox/order changes autosave `selected_gemini_models` / `selected_groq_models` in `app_state`, overriding env defaults. Legacy `selected_grok_models` remains separate for xAI compatibility. `ai.WithModelSelection` and `ai.WithGroqModelSelection` capture model order in the operation context, including candidate background localization, without replacing shared clients or limiters. Groq and legacy Grok recognition/translation try selected models sequentially and record the successful provider/model. Catalog filtering excludes non-text outputs and explicitly incompatible reasoning-effort capabilities.
-
-* **Gemini SDK:** Use only `google.golang.org/genai`. Never use raw HTTP clients.
-* **Execution:** Gemini pipeline is intentionally sequential (batch size = 5/10) to respect RPM limits. Do not introduce aggressive parallelism.
-* **Model Loading:** Uses `singleflight.Group`. Do not duplicate concurrent requests.
-* **Quota Lock:** `quotaLocked atomic.Bool` is a field on `Client` (not a package-level var). Call `ResetQuotaLock()` at the start of each `RunScan`.
-* **Grok Fallback:** `grok-3-mini` (configurable via `GROK_MODEL`) activates when `geminiQuotaLocked` is set, and as a last resort after all Gemini models fail. Uses `grokLimiter` (30 RPM, burst=1). Reasoning tokens disabled (`ReasoningEffort: "none"`). Never wrap JSON in markdown.
-* **Translation Safety:** If official Ukrainian title is unknown, preserve the original title (do not hallucinate localisation).
-* **TMDB Title Trust:** If `movie.TitleUA` is validated as good Ukrainian, Gemini must not override it.
-
----
-
-## Scoring Rules
-
-| Criterion | Score |
-|-----------|-------|
-| Exact title match | `+200` |
-| Contains match | `+70` |
-| Exact year | `+150` |
-| Year ±1 | `+80` |
-| Year > ±2 | `−400` |
-| Media type match | `+30` |
-| UA language | `+20` |
-| EN language | `+10` |
-| RU recent | `−50` |
-| RU old | `−300` |
-
-* **Hard rejection:** `titleScore == 0` → reject immediately.
-* **Default threshold:** `200`.
-* **AI Verification:** Use Jaro-Winkler similarity (`geminiTMDBVerifyMinJW`) to reject AI results that deviate significantly from TMDB titles.
-* **UA→RU early exit:** If `uk-UA` yields a candidate with `score >= 140`, skip `ru-RU` query entirely.
-
----
-
-## Transliteration
-
-Runs only after a failed direct search. Digraphs must be processed **before** single-character replacements.
-
-Examples: `Vrag` → `Враг`, `Nochnoj Rejs` → `Ночной Рейс`.
-
----
-
-## File Display Label
-
-`movies.filename` remains the primary key (full relative path). UI uses `FileLabel` computed by `utils.DisplayFileLabel(relativePath)` — raw folder name (first path segment) or file basename for flat files. Used as a navigation badge to locate files on disk.
-
-`FileLabel` is **not** stored in SQLite — computed in `GetMovies()` before returning to UI.
-
----
-
-## SQLite & Storage
-
-* **Primary key:** `filename` (relative media path).
-* **AI Cache (`ai_resolutions`):** L2 Gemini recognition cache.
-* **Required pragmas:** `journal_mode=WAL`, `synchronous=NORMAL`, `busy_timeout=5000`, `foreign_keys=ON`.
-* **Connection pool:** `SetMaxOpenConns(1)`.
-* **Upsert:** Always use `movieUpsertQuery` (merge upsert). `PatchMovie` updates only non-empty fields. A record with `tmdb_id=0` must never overwrite `title_ua`/`title_en`/`year` of a record that already has `tmdb_id > 0`.
-
----
-
-## Performance & Concurrency Rules
-
-**Always:**
-* Use `strings.Builder` for large string generation.
-* Use package-level regexp variables and `strings.NewReplacer`.
-* Use chunking for large SQL `IN` queries (`filenameChunkSize = 500`).
-* Use structured logging (`slog`).
-* Check `ctx.Err()` at every loop boundary and before network calls.
-
-**Never:**
-* Compile regexp inside loops.
-* Mutate shared maps (`movieMap`) from goroutines after initialisation.
-* Spam Wails IPC progress events.
-
----
-
-## Shutdown & Lifecycle Safety
-
-* `App.wg sync.WaitGroup` tracks all background goroutines (`RunScan`, `FixSelected`, GitHub Pages push).
-* `shutdown()` calls `cancelScan()` **before** `wg.Wait()` so goroutines can exit rather than hang.
-* `db.Close()` is called only after `wg.Wait()` completes.
-* `finalizeScan` always receives `a.ctx` (not the local scan context) to avoid generating an empty showcase on cancellation.
-
----
-
-## Stable Interfaces & Public API
-
-**Do not rename without explicit migration:**
-
-* **Wails events:** `scan-started`, `scan-progress`, `scan-finished`, `log-message`, `github-sync-started`, `github-sync-finished`, `movie-updated`.
-* **HTML element IDs:** `id="noResults"`, `id="filteredCount"`, `id="filteredNum"`.
-* **Public methods:** `RunScan()`, `StopScan()`, `FixSelected()`, `GetMovies()`, `UpdateMovie()`, `SyncToCloud()`, `SyncToGitHub()`, `OpenGoogleSheet()`, `OpenGitHubRepo()`, `OpenGitHubPage()`.
-* **DB primary key:** `movies.filename` (relative path). Never replace with rowid externally.
-
----
-
-## Encoding & Formatting
-
-* **Required:** UTF-8 without BOM, LF (Unix) line endings, `gofmt` formatting, tabs for Go indentation.
-* **Never commit:** Mixed encodings, malformed UTF-8, CRLF endings.
-
----
-
-## Environment Configuration
-
-```env
-GEMINI_API_KEY=
-GEMINI_MODELS=gemini-2.5-flash,gemini-flash-lite-latest
-GROQ_API_KEY=
-GROQ_MODEL=openai/gpt-oss-120b
-# Optional legacy xAI settings:
-GROK_API_KEY=
-GROK_MODEL=grok-3-mini
-TMDB_API_KEY=
-MEDIA_FOLDER_PATH=
-EXCLUDE_FOLDERS=
-DB_PATH=movies.db
-HTML_PATH=local_index.html
-POSTERS_DIR=posters
-GITHUB_PAGES_BRANCH=main
-```
-
----
-
-## Active Work — MovieList
-
-Project workflows live in `.agents/skills`: `movielist-log-analysis` (read-only log analysis with a code-change decision), `movielist-verify` (proportional checks), `movielist-build` (builds and toolchain compatibility), `movielist-docs` (documentation synchronization), and `deep-reviewer` (explicitly requested read-only audit). README contains links and invocation examples. Log recommendations do not authorize implementation or changes to product policy; documentation must distinguish automated evidence from outstanding production checks.
-
-The project-scoped `reviewer` custom agent is defined in `.codex/agents/reviewer.toml`. Run it only when the user explicitly requests a review; it is read-only and reports actionable findings without changing files.
-
-`internal/version/VERSION` is the only editable release version source (`major.minor.patch`). `internal/version` embeds it for runtime titles, logs, UI and generated showcases. Runtime configuration contains no version; legacy `APP_VERSION` overrides are ignored. Use `build.ps1` for production builds and `build.ps1 -Dev` for development: the wrapper synchronizes Wails product metadata, frontend package/lock metadata and HTML title before Wails reads its configuration. npm prebuild/predev also synchronize generated metadata. Do not manually edit version copies in generated metadata. README links to the version source; historical CHANGELOG entries retain their original release numbers.
-
-The active recognition specification is `CHECKLIST.md` (gitignored by design), now containing only remaining production checks after the 2026-10-02 log fixes. Real TMDB checks confirmed Ted 72105, Road Trip 9285 and folder rescue TV 284725/241882; the persisted model selection contains no gemini-2.0-flash. A fresh complete production scan and manual UI scenarios remain required. `DESIGN_CHECKLIST.md` tracks the remaining visual runtime checks.
-
-The desktop UI opens on the poster library. A card opens a dedicated detail screen; editing navigates to the matching filename in the editor. The editor has a compact list, selection inspector, batch correction, TMDB candidates and an explicit search clear button with Escape shortcut. Movie ratings link to TMDB. The detail screen uses existing `GetMovies()` data and TMDB CDN poster URLs, with a local no-poster fallback.
-
-The sidebar has Library, Activity, Editor and Export/Synchronization as primary panels, with Scan Folders and Settings anchored at the bottom. Scan starts only from the Library button; there is no sidebar scan button. Settings exposes the configuration editor, AI models, logs and About. The local showcase is an export option alongside Sheets and GitHub Pages. Navigation alone never starts an export or a provider catalog request. Activity has no filters; About overlays the active panel.
-
-Default checks use isolated API transports. Live catalog/inference tests require explicit opt-in and authorized external requests; never enable them just to verify a release version. Synthetic live checks do not establish final TMDB identities, full-library scan quality or production UI behavior.
-
-Automatic stored-record localization skips successfully completed snapshots, including exact original-title fallbacks. The persisted localization fingerprint covers TMDB ID, media type, Ukrainian/current title, original title and plot; changed text or identity permits retry, unrelated metadata does not. Missing/rejected results and request/save failures remain eligible. Explicit editor localization bypasses this automatic filter. Completion markers must match the current snapshot and must never overwrite catalog fields.
-
-Metadata Repair is available only through the lightning icon beside TMDB in the editor inspector. It fetches the stored entity without filename parsing, search or identification; `tmdb_id`, `media_type` and recognition/verification state stay unchanged. The transactional batch upsert rejects concurrent record changes. Description and cast use local-data hover/focus popovers that can be pinned by clicking. Refreshing data preserves the active inspector when a resolved record leaves the review/unresolved list. The library review statistic opens the editor review filter with cleared search. Editor added sorting preserves the backend insertion order, with newer catalog records at the bottom.
-
-Round 29 exclusions: migration framework, database backup/restore, file fingerprints/rename tracking and SQLite FTS. Do not expand scope into these items.
-
-Important delivery rules:
-
-* Preserve all Critical Invariants and Stable Interfaces in this file.
-* `CHECKLIST.md` checkboxes may be marked complete only after implementation and proportional automated verification.
-* Implement schema additions as idempotent lazy column additions; a general migration framework was explicitly declined.
-* Candidate previews contain no posters and must not trigger details, credits, alternative-title or poster requests.
-* Keep candidate UI compact and return at most five deterministic results.
-* Do not claim runtime checks complete until the user runs the production build on the real media library and provides the log.
-
-## Changelog
-
-### Audit Round 24 — Вересень 2026 (automatic exact disambiguation)
-
-* Gemini results first use exact typed movie+TV lookup; reported AI media type is only a weak tie-breaker.
-* Exact localized search titles are validated aliases for post-verification.
-* `scan_completed.processed_total` is the denominator for `tmdb_accepted + ai_accepted + unresolved`; `disk_total` remains the collection size.
-
-### Manual media type selector — Вересень 2026
-
-* `FixRequest.media_type` приймає `auto`, `movie` або `tv`; порожнє значення сумісне з `auto`.
-* Strict manual type обмежує пошук відповідним typed TMDB endpoint.
-* В Auto exact original/localized/alias titles рівноправні; popularity/year/type використовуються лише для deterministic tie-break.
-
-### Audit Round 23 — Вересень 2026 (authoritative manual titles)
-
-* Точна ручна назва не передається Gemini: typed TMDB exact search перевіряє primary/original/localized/alias titles, а filename year/type є лише tie-breakers.
-* Gemini discovery допускає лише `generateContent` production-моделі у configured order; недоступні 404-моделі вимикаються до refresh.
-* Default Gemini cascade: `gemini-2.5-flash,gemini-flash-lite-latest`.
-* Scan/fix summaries повідомляють фактичні unresolved counters.
-
-### Audit Round 22 — Вересень 2026 (lifecycle і deployment tests)
-
-* `finalizeScan` завжди використовує lifecycle-контекст; cancellation і disk errors не очищають showcase та не оновлюють `last_scan_at`.
-* GitHub Pages git execution і Wails event emission мають вузькі test adapters; публічні API та events незмінні.
-* Додано ізольовані тести scan lifecycle, GitHub deployment, web generator, config та Sheets row mapping.
-* Production `wails build` і повний набір Go-перевірок проходять.
-
-### Audit Round 21 — Вересень 2026 (IMDb manual hints)
-
-* `FixSelected` / `UpdateMovie` accept full IMDb title URLs and bare `tt...` IDs.
-* IMDb hints use TMDB `/find` directly and never fall through to title scoring or Gemini.
-* Unknown authoritative IDs return an explicit error instead of silently retrying as text.
-* FixSelected clears TMDB caches and reports actual resolved/unresolved counts.
-
-### Audit Round 20 — Вересень 2026
-
-* TMDB no-year fallback preserves the parsed target year for ranking and cache identity.
-* Gemini verification requires a strong original/validated-alias match; localized titles
-  are diagnostic-only signals.
-* Gemini batch outputs correlate by `request_id`; a missing item gets at most one
-  sequential retry and cancellation prevents retry.
-* Year-like homoglyph normalization is limited to four-digit year tokens.
-* `scan_completed` reports deterministic and AI recognition counts plus AI call metrics.
-
-### Audit Round 15 — Липень 2026
-
-Лог 12:58–12:59: FIX-15, FIX-16, FIX-20 підтверджені. Нуль багів.
-
-* `app_updatemovie_test.go`: `TestMaxTitleSimilarity_CyrillicCandidate` +
-  `TestMaxTitleSimilarity_MatchedAlias` — тести для FIX-20, пропущені в R14.
-* `CHECKLIST.md`: Очищено (раунди 1–15 закриті).
-
-### Audit Round 14 Fix Patch — Липень 2026 (Аналіз логів)
-
-Підтверджено логами: FIX-15 (warmup a.ctx) — нуль warmup_failed. FIX-16 (app_closed у
-shutdown) — рівно один app_closed в кінці сесії. FIX-17 (folder_en_fallback) — активний.
-
-* `app.go` / `maxTitleSimilarity()`: Додано перевірку `info.TitleUA` між `TitleEN` і
-  `SearchTitle`. Раніше кириличний кандидат ("Скарпетта") отримував similarity=0 проти
-  TitleEN="Scarpetta" (JaroWinkler між різними алфавітами = 0), хоча TitleUA="Скарпетта" —
-  точний збіг. Rescue витрачав 2 зайвих TMDB-запити і знаходив відповідь лише через
-  borrowedLatinVariants. Після фіксу: accepted на першому кандидаті (similarity=1).
-
-### Round 13b — Аналіз логів після FIX-17 (Липень 2026)
-
-Підтверджено: FIX-15 (warmup a.ctx), FIX-17 (folder_en_fallback) — в логах присутні.
-`ai_models_warmup_failed` не спостерігається.
-
-Спостереження:
-* `"Скарпетта"→"Skarpetta"` через folder_en_fallback: технічно правильна транслітерація,
-  але TMDB назва `"Scarpetta"` (італійська) — не знайдено. Файл коректно перенаправлено
-  в Gemini, який повернув правильний EN title. Post-recognition lookup знайшов серіал через
-  TV endpoint. Каскад відпрацював.
-* `internal/utils/lang.go` / `CyrillicToLatin()`: FIX-19 — подвоєні приголосні (тт→tt тощо)
-  обробляються окремим replacer до одинарних (BGN/PCGN). Тест `TestCyrillicToLatinDoubleConsonants`.
-
----
-
-### Audit Round 13 Fix Patch — Липень 2026 (Код + Аналіз логів)
-
-* `app.go` / `RunScan()` warmup goroutine: `fetchAIModels(scanCtx)` → `fetchAIModels(a.ctx)`.
-  Warmup кешує AI-моделі для lifecycle додатку; `scanCtx` скасовується при миттєвому
-  завершенні скана (нових файлів нема) і передчасно вбивав HTTP-запит (`context canceled`).
-* `internal/utils/logger.go` / `CloseLogger()`: Видалено `slog.Info("app_closed")`.
-* `app.go` / `shutdown()`: Додано `slog.Info("app_closed")` першим рядком. Усуває подвійні
-  `app_closed` при WebView2 retry (~15с) або повторному запуску exe на Windows.
-* `internal/tmdb/search.go`: Варіант "Папка" пробує EN cascade після провалу CYR — усуває
-  cache hit блокування EN-пошуку для кириличних назв папок.
-* `internal/tmdb/client.go` / `pipelineLatin()`: Guard `!HasCyrillic(cleanTitle)` → пропуск
-  lat→cyr транслітерації для чисто ASCII назв (заощаджує 2+ зайвих TMDB-запити).
-
----
-
-### Audit Round 12 Fix Patch — Липень 2026
-
-* `app.go` / `finalizeScan()`: Додано параметр `success bool`. `SetState("last_scan_at")`
-  тепер викликається лише при `success = true` — виключає STOP користувачем і disk error
-  як хибні мітки часу "останнього сканування". Оновлено всі 5 викликів.
-* `app.go` / `processTranslationQueue()`: Виправлено коментар — `movies` є результатом
-  `GetMoviesByFilenames(filenames)`, а не "all movies in the DB".
-* `internal/storage/storage_test.go`: Додано `TestSetAndGetState` — базовий set/get,
-  upsert і відсутній ключ для `SetState`/`GetState`.
-* `CHECKLIST.md`: Очищено (всі раунди 1–12 закриті).
-
----
-
-### Audit Round 8 Fix Patch — Червень 2026
-
-* `app.go` / `updateMovie()`: Варіант 1.5 (прямий пошук за hint) більше не робить безумовний `return`, коли TMDB знаходить запис без українського перекладу (`TitleUA` порожній або не кириличний). Тепер потік провалюється у Варіант 2 (Gemini) для локалізації — раніше Gemini fallback був недосяжний у цьому сценарії, попри лог-повідомлення що обіцяло протилежне.
-* `config.go`: Видалено невикористану функцію `getEnvRequired`.
-* `system.go`: Видалено `utils.OpenLogsFolder` — мертвий дублікат `App.OpenLogs` (app.go), ніде не викликався.
-
----
-
-### Audit Round 9 Fix Patch — Липень 2026
-
-* `internal/ai/gemini.go` / `TranslateBulk()`: Додано `else`-гілку при `empty Candidates` — тепер логується `Warn("bulk_translate_empty_candidates")` і оновлюється `lastErr`. Раніше порожня відповідь від Gemini (safety block / content filter) мовчки пропускалась, що давало оманливий error message після вичерпання всіх моделей.
-* `app.go` / `RunScan()`: Warmup goroutine (`fetchAIModels`) тепер tracked у `a.wg` (`wg.Add(1)` + `defer wg.Done()`). Раніше горутина могла пережити shutdown і звернутись до `a.aiClient` після `db.Close()`.
-* `app.go`: Видалено мертву змінну `russianMarkers []string` — артефакт рефакторингу, замінений на `russianMarkersRE`.
-* `internal/storage/storage.go`: Видалено мертвий метод `GetAllFilenames` і реліктовий коментар над ним.
-
----
-
-### Audit Round 11 Fix Patch — Липень 2026
-
-* `internal/utils/path_display.go` / `reSeasonCut`: Видалено year-альтернатив (`[.\s]\d{4}[\s._].*`) — регекс більше не обрізає рік якщо він є частиною назви серіалу (The.1984.Show, 1923...). Обрізання відбувається тільки від маркера сезону `S\d{2}`. Додано регресійні тести.
-* `app.go` / `GetStats()`: Замінено `os.Stat(DBPath).ModTime()` на `db.GetState("last_scan_at")` — час останнього сканування тепер записується явно після завершення scan і не залежить від WAL checkpoint-ів SQLite.
-* `internal/storage/storage.go`: Додано таблицю `app_state (key TEXT PK, value TEXT)` і методи `SetState` / `GetState`.
-* `CHECKLIST.md`: Очищено (всі раунди 1–11 закриті).
-
----
-
-### DisplayFileLabel: фінальна семантика — Липень 2026
-
-* `internal/utils/path_display.go`: Переписано повністю. Видалено `reSeason`, `reEpisode`,
-  `reSeasonCut`, `cleanFolderLabel`, імпорт `"regexp"`. Нова логіка: є каталог → сира назва
-  першого рівня; плоский файл → ім'я файлу. Badge слугує навігаційною міткою для пошуку
-  файлу на диску, тому потрібна точна сира назва, а не очищений UX-заголовок.
-* `internal/web/generator.go`: `title="{{.Filename}}"` → `title="{{.FileLabel}}"`.
-* Сигнатура `DisplayFileLabel` скорочена до 1 параметра. Оновлено всі 3 виклики
-  (app.go, generator.go, sheets.go) і тести.
-
----
-
-### Audit Round 19 Fix Patch — Вересень 2026
-
-* TMDB network errors redact `api_key` inside error strings without breaking `errors.Is(err, context.Canceled)`.
-* Search attempts, language/endpoint loops, metadata waterfalls and poster downloads stop immediately when the scan context is cancelled; cancellation no longer appears as file-level WARN noise.
-* `RunScan` emits one structured `scan_cancelled` INFO event with trace ID and duration.
-* Regression tests verify secret redaction and that cancellation permits only the already-started transport request.
-
-### Audit Round 18 Fix Patch — Вересень 2026
-
-* `frontend/src/main.js`: scan UI керується подіями `scan-started` / `scan-finished`, тому асинхронний backend scan не втрачає активну кнопку STOP після повернення RPC. Movie editor використовує DOM API (`textContent`, properties, `dataset`) замість HTML-конкатенації зовнішніх даних; TMDB-посилання обмежені офіційним HTTPS-host.
-* `internal/scanner/scanner.go`: `GetDiskFiles(ctx)` і вкладений `WalkDir` перевіряють cancellation та повертають помилки. Неповний disk scan завершується до `CleanMissingMovies`, захищаючи валідні записи і постери від помилкового cleanup.
-* `internal/tmdb/client.go`: постер записується у temporary-файл і з'являється за фінальним шляхом лише після успішного непорожнього download та atomic rename.
-* Додано `internal/scanner/scanner_test.go` і `internal/tmdb/poster_test.go`. Повний набір тестів стабільно проходить у 10 послідовних прогонах.
-
-### Audit Round 17 Fix Patch — Липень 2026 (StopScan race fix)
-
-* `app.go` / `RunScan()`: `ctx, cancel` і `a.setScanCancel(cancel)` перенесено перед
-  `a.wg.Add(1)` — поза горутиною. Усуває race: `StopScan()` міг викликатись до
-  реєстрації cancel у горутині → `cancelScan()` був silent no-op → скан не зупинявся.
-* `app.go` / `StopScan()`: Додано перевірку `scanCancel != nil` під `scanMutex`. Якщо
-  активного сканування немає — попередження `"⚠️ [СТОП] Немає активного сканування"`
-  замість хибного `"🚨 Сигнал отримано"`.
-
----
-
-## Current State Summary (станом на 2026-10-03)
-
-| Area | Status |
-|------|--------|
-| Recognition pipeline | ✅ TMDB → Gemini → Groq cascade; legacy xAI Grok when Groq is not configured. Full production scan remains open. |
-| AI fallback | ✅ Sequential captured selections, conservative shared limiter, explicit Groq confidence; `ResetQuotaLock` on scan start. |
-| Groq verification | ✅ Live catalog, synthetic GPT-OSS 120B/20B recognition and 120B translation passed. Qwen batch exceeds this account's input quota. |
-| Configuration editor & About | ✅ Autosaved UTF-8/LF .env with revision/atomic-write protection; compact About modal. Manual Wails checks remain open. |
-| Scan sources | ✅ Two folder tables, persisted independent roots/exclusions, stable identifiers and cleanup guards. Multi-drive runtime checks remain open. |
-| Unresolved placeholders | ✅ `processGeminiQueue` always saves a record, even on failure. |
-| Shutdown safety | ✅ `wg.Wait()` after `cancelScan()` before `db.Close()`. |
-| File display label | ✅ `utils.DisplayFileLabel` in `GetMovies`, web generator, and Sheets sync. |
-| Mobile showcase | ✅ `index.html` (TMDB CDN) for GitHub Pages; `local_index.html` for desktop. |
-| Quota lock | ✅ `atomic.Bool` field on `Client`; reset at scan start. |
-| Trace IDs | ✅ `EnsureTrace` in `FixSelected` and `UpdateMovie`. |
-| Warmup goroutine | ✅ `fetchAIModels` tracked in `a.wg`; safe shutdown guaranteed. |
-| StopScan race fix | ✅ `ctx/cancel` created before goroutine; `StopScan` guards with `scanMutex`. |
-| Manual title correction | ✅ Authoritative exact title with `Авто / Фільм / Серіал`; strict mode limits typed endpoint. |
-| Automatic ambiguity | ✅ Exact movie+TV disambiguation before fuzzy Gemini merge; `The Bureau` regression selects TV 62476. |
-| Scan metrics | ✅ `processed_total` is distinct from complete collection `disk_total`. |
-| Recognition follow-up | ✅ Localized rescue, release cleanup, Lovelace movie type and per-pipeline fallback deduplication tested; four real TMDB identities verified. Full production scan remains open. |
-| Version | ✅ Single embedded source: `internal/version/VERSION`; build wrapper synchronizes Wails/HTML/npm metadata. |
-| Desktop UI | ✅ Library, Activity, Editor; bottom folders/settings; scan only in Library; showcase under export. Final visual check remains in `DESIGN_CHECKLIST.md`. |
-| Metadata navigation and Repair | ✅ Clickable genres/cast/year, editor lightning action with immutable TMDB identity, local description/cast popovers; production visual check remains open. |
-| Candidate confirmation | ✅ TMDB selection saves in foreground; poster/localization finish in a guarded `App.wg` task and emit `movie-updated`. |
-| Diagnostics | ✅ Startup version, Repair before/after fields and localization sources; idle HTTP 400 reproduced and logged without raw remote content. Historical provider remains unknown. |
-| Tests | ✅ Automated Go/frontend checks and opt-in live TMDB/model checks; remaining runtime checks are in `CHECKLIST.md` and require a fresh production log. |
-
-> For full change history see [CHANGELOG.md](./CHANGELOG.md).
+# AGENTS.md — MovieList
+
+Почніть з цього контракту та [індексу задач](docs/agents/INDEX.md). MovieList — каталог локальної медіатеки на Go/Wails v2, SQLite і Vanilla JS/Vite з інтеграціями TMDB, Gemini, Groq та legacy xAI Grok. [Карта підсистем](docs/architecture/OVERVIEW.md)
+
+## Робота в репозиторії
+
+- Пишіть відповіді й актуальну користувацьку документацію українською. Зберігайте технічні ідентифікатори та наявні
+  англомовні коментарі.
+- Перед змінами звірте `pwd`, `git status --short`, `git branch --show-current` і `git rev-parse HEAD`. Збережіть робочі
+  зміни користувача. Запитайте рішення, якщо вони конфліктують із конкретним редагуванням.
+- Пріоритет мають поточне завдання та цей контракт. Фактичну реалізацію звіряйте з поточним локальним кодом, конфігурацією й
+  тестами. Розбіжність між контрактом і кодом фіксуйте як таку.
+- Читайте лише тему, потрібну для зміни. Зберігайте поточні інтерфейси та виправляйте вузьку причину. Зміна продуктового
+  правила, широкі переробки й публікація потребують окремого завдання.
+- Міграційний фреймворк, backup/restore, відстеження перейменувань через fingerprint файла і SQLite FTS виходять за погоджені
+  межі попередніх робіт. Виконуйте додавання колонок ідемпотентно зі збереженням існуючих БД.
+- Кодування файлів під час змін — UTF-8 без BOM і LF. Go — `gofmt` і таби. Версію Go в `go.mod` знижуйте лише за явним
+  погодженням.
+
+## Розпізнавання та локалізація
+
+- `TmdbID > 0` — єдиний стан розпізнаного запису. `NeedsReview` може бути істинним при відомій identity. AI та L2-кеш дають
+  гіпотезу для пошуку, яку слід окремо підтвердити за даними TMDB.
+- Пошук TMDB використовує тільки `/search/movie` і `/search/tv`. `/find` застосовується для IMDb. Зберігайте окрему поведінку
+  автоматичного скану, ручного IMDb/TMDB ID, exact-назви, списку варіантів і Repair.
+- Зберігайте водоспад повних деталей `uk-UA → ru-RU → en-US` і ранній вихід за якісного українського тексту. Порядок мов
+  пошуку залежить від режиму.
+- Зберігайте порядок кандидатів, цільовий рік у спробі без року, обмеження коренем джерела, обробку диграфів перед одиночними
+  символами та дедуплікацію спроб.
+- Явна IMDb-підказка використовує `/find`. Явна назва використовує exact typed пошук. Помилка або промах цих дій не запускає
+  AI-розпізнавання. Після верифікації дозволена локалізація.
+- Кандидатів у компактному списку — не більше п’яти, детерміновано. Список обходиться без деталей, credits, аліасів і
+  постерів. Деталі доступні за окремою дією. Підтвердження зберігає TMDB-дані до фонового доповнення.
+- За провалу автоматичного AI/TMDB зберігайте unresolved placeholder з `TmdbID=0`, якщо файл не має підтвердженого запису й
+  транзакція може завершитись. Не знижуйте статус підтвердженого запису.
+- Переклад дозволено після підтвердження identity. Валідна українська назва під захистом, а за відсутності відомої
+  локалізації допустимий точний оригінал. Російські маркери, зокрема `ы`, `э`, `ъ`, `ё`, проходять мовну валідацію.
+- Пропускайте успішну автоматичну локалізацію незмінного snapshot. Помилки залишаються придатними до повтору. Явна
+  редакторська дія може повторити переклад.
+- Repair звертається до збереженого TMDB ID і типу. Зберігайте recognition/review state та транзакційний захист від
+  конкурентних змін.
+
+Джерела й тести для цих шляхів у [розпізнаванні](docs/architecture/RECOGNITION.md).
+
+## AI, API та скасування
+
+- Gemini використовує `google.golang.org/genai`. Зберігайте послідовні batches і перебір моделей, спільні лімітери та
+  `singleflight` для завантаження каталогів.
+- `quotaLocked` належить `ai.Client`. `RunScan` скидає його на початку. Fallback — Groq, якщо налаштований, інакше legacy xAI
+  Grok.
+- Для Groq вимагайте явний confidence у межах 0–1. Корелюйте елементи запиту й відповіді. Зберігайте provider/model
+  provenance, підтримуваний `reasoning_effort` та окремі credentials для Groq і xAI.
+- Знімок вибору моделей живе в контексті операції, у т. ч. для фонового доповнення кандидата. Зміна налаштування діє з
+  наступної операції; клієнти і лімітери залишаються спільними.
+- Перевіряйте `ctx.Err()` на межах циклів, перед мережевими запитами й дорогими операціями. Зберігайте обмежені retries та
+  cancellation-aware очікування. Для повторних очікувань у циклах використовуйте контрольований таймер.
+- У `RunScan` реєструйте cancel до старту горутини. `StopScan` скасовує операцію. У shutdown спочатку скасуйте scan і Repair,
+  потім `wg.Wait()`, після цього закрийте БД.
+- Тривалі фонові операції `App` відстежуються в `App.wg`. Model warmup і `finalizeScan` використовують `a.ctx`. Disk error і
+  STOP не мають оновлювати `last_scan_at`.
+- Контролюйте зовнішні запити й fan-out. Не змінюйте shared maps з файлових воркерів. Для гарячих шляхів використовуйте
+  пакетні regex, `strings.NewReplacer` і `strings.Builder`, де їх уже передбачено.
+
+Ліміти, побічні ефекти й порядок завершення описано в [сховищі та lifecycle](docs/architecture/STORAGE_LIFECYCLE.md).
+
+## SQLite та файли
+
+- `movies.filename` — стабільний ключ для зовнішніх викликів. `rowid` використовується для внутрішнього порядку. Відносні
+  ключі legacy anchor і простір імен додаткових джерел стабільні.
+- Зберігайте round-trip `MediaIdentifier` / `ResolveMediaPath`. Для UI обчислюйте `file_path` і сирий навігаційний
+  `file_label`. Ці поля окремі від SQL-ключа.
+- Зберігайте незалежні джерела без перекриттів і поточну семантику абсолютних та legacy-виключень. Порожній список,
+  недоступне джерело або неповний обхід не запускають cleanup каталогу.
+- Зберігайте `SaveMoviesBatch` як транзакцію, спільний `movieUpsertQuery`, `defer tx.Rollback()`, WAL, `synchronous=NORMAL`,
+  `busy_timeout=5000`, `foreign_keys=ON` і `SetMaxOpenConns(1)`.
+- Merge-upsert захищає підтверджені поля від unresolved запису. При зміні identity не переносіть поля іншого твору.
+  `PatchMovie` зберігає семантику непорожніх полів.
+- Зберігайте версіонування `ai_resolutions`, обмеження запису за версією, повторну верифікацію й інвалідацію. Очищення
+  orphan-постерів має відбуватися після дискового обходу та обробки записів.
+
+[SQLite, джерела та життєвий цикл](docs/architecture/STORAGE_LIFECYCLE.md)
+
+## Wails, налаштування та вивід
+
+- Без явної міграції зберігайте експортовані методи `App`, JSON-поля, назви подій та стабільні DOM IDs. `frontend/wailsjs`
+  генерується Wails.
+- Події `scan-started`, `scan-progress`, `scan-finished` керують станом UI. Також зберігайте `log-message`,
+  `github-sync-started`, `github-sync-finished` і `movie-updated` та їхні payload.
+- Підтримуйте `RunScan`, `StopScan`, `FixSelected`, `GetMovies`, `UpdateMovie`, `SyncToCloud`, `SyncToGitHub`,
+  `OpenGoogleSheet`, `OpenGitHubRepo`, `OpenGitHubPage` та решту Bridge API. Для вітрини стабільні `noResults`,
+  `filteredCount` і `filteredNum`.
+- Зберігайте запуск скану в Бібліотеці, стан інспектора при зміні review-фільтра, очищення пошуку через кнопку/Escape та
+  About поверх поточної панелі. Навігація сама по собі не викликає експорт чи завантаження каталогів моделей.
+- `.env` редактор працює лише з `Config.EnvPath`. Зберігайте валідацію, revision guard, UTF-8/LF, коментарі, temp+rename,
+  автозбереження та застосування після перезапуску. Збережені папки й моделі мають пріоритет над defaults.
+- Локальна та мобільна вітрини мають окремі шляхи й джерела постерів. GitHub Pages публікується за явною дією через системний
+  Git. Зберігайте діагностику з маскуванням і потік без автоматичного pull/merge.
+- Єдине редаговане джерело release version — `internal/version/VERSION`. Build wrapper генерує копії для Wails, npm і HTML.
+  Runtime `.env` версію не задає.
+
+[Контракти Wails](docs/architecture/WAILS_UI_CONTRACTS.md), [розробка та конфігурація](docs/operations/DEVELOPMENT.md)
+
+## Докази та безпечні перевірки
+
+- Для конфігурації читайте `.env.example` і код. Реальні `.env`, credentials, БД, логи з приватними даними й медіашляхи
+  відкривайте лише в межах погодженої діагностики.
+- У логах і звітах маскуйте секрети. Не друкуйте сирі відповіді, промпти, dotenv parser errors або повні аргументи Git із
+  приватними значеннями. Для діагностики використовуйте `slog` і trace ID, з пропорційною частотою IPC-подій.
+- За замовчуванням перевіряйте ізольовано. Живі API/квоти, скан реальної медіатеки, експорт, sync, push, реліз чи запуск
+  production потребують відповідного завдання. При звичайних тестах залишайте opt-in flags невстановленими.
+- Для docs-only перевірте diff, посилання й назви, UTF-8/LF та відсутність секретів. Для коду виберіть адресні тести і
+  розширюйте перевірки пропорційно зміненому контракту.
+- Наводьте точні команди та спостережені результати. Відокремлюйте докази в коді й тестах від запуску тестів, історичних
+  результатів і ручної перевірки. Збірка чи synthetic live test не встановлюють якість на реальній медіатеці.
+- `CHECKLIST.md` gitignored і може бути відсутній. Оновлюйте погоджений пункт лише за відповідною реалізацією та перевіркою.
+  Production-галочки потребують нового спостереження від користувача. [Ручні сценарії](DESIGN_CHECKLIST.md)
+- Аналіз логів читає докази й формулює рішення щодо коду. Реалізація потребує окремого завдання. `reviewer` і `deep-reviewer`
+  працюють read-only за явним запитом.
+
+Матриця перевірок у [DEVELOPMENT.md](docs/operations/DEVELOPMENT.md). Робочі процедури зберігаються в наявних скілах та reviewer-конфігураціях, навігація — в [індексі](docs/agents/INDEX.md).
+
+## Джерела за призначенням
+
+| Джерело | Для чого читати |
+| --- | --- |
+| [README.md](README.md) | Можливості застосунку та швидкий старт |
+| [CHANGELOG.md](CHANGELOG.md) | Історія змін і попередніх результатів |
+| [DESIGN_CHECKLIST.md](DESIGN_CHECKLIST.md) | Ручні сценарії UI |
+| [docs/agents/INDEX.md](docs/agents/INDEX.md) | Маршрути до архітектури, коду, тестів і скілів |
+
+За історичним контекстом відкривайте конкретний розділ CHANGELOG або потрібний документ із індексу.

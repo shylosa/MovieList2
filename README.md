@@ -1,7 +1,7 @@
 ---
 Creator: Serhii Shylo
 Tags: Go, Golang, Wails, JavaScript, Movie Library, TMDB, Gemini AI, Groq AI, SQLite, Local Media
-Requires at least: Go 1.27.1+, Node.js (для збірки), TMDB API Key, Gemini API Key
+Requires at least: Go 1.27.1+, Node.js (для збірки), TMDB API Key (для метаданих)
 License: MIT License
 ---
 
@@ -17,7 +17,7 @@ License: MIT License
 
 ### 🎬 Бібліотека та перегляд
 
-Сайдбар містить «Бібліотеку», «Активність» і «Редактор». Унизу розташовано «Папки сканування» та меню налаштувань із конфігурацією, моделями ШІ, експортом, відкриттям логів і «Про MovieList». Сканування запускається кнопкою в Бібліотеці; перебіг видно в Активності без додаткових фільтрів. «Про MovieList» — компактне модальне вікно, яке закривається кнопкою, кліком поза ним або Escape.
+Сайдбар містить «Бібліотеку», «Активність», «Редактор» та «Експорт і синхронізацію». Унизу розташовано «Папки сканування» та меню налаштувань із конфігурацією, моделями ШІ, відкриттям логів і «Про MovieList». Сканування запускається кнопкою в Бібліотеці. Перебіг видно в Активності. «Про MovieList» відкриває модальне вікно, яке закривається кнопкою, кліком поза ним або Escape. [Контракти Wails та UI](docs/architecture/WAILS_UI_CONTRACTS.md)
 
 Головний екран показує постери, статистику, пошук, фільтри й стан сканування. Картка відкриває окремий перегляд із назвою, роком, типом, рейтингом TMDB, жанрами, описом і шляхом до файла. Рейтинг веде на сторінку фільму в TMDB. Із перегляду можна перейти до конкретного запису в редакторі; кнопку очищення пошуку видно, коли поле заповнене, а клавіша `Esc` також очищає його. Редактор має компактний список, панель вибраного запису, пакетне уточнення та пошук варіантів TMDB. Нерозпізнані та сумнівні записи доступні через «Потребують перевірки».
 
@@ -41,28 +41,16 @@ License: MIT License
 
 - **Gemini** — основний провайдер; послідовний каскад задається у `GEMINI_MODELS` або вибирається на сторінці «Моделі ШІ».
 - **Groq** — послідовний резервний каскад; початкова модель задається через `GROQ_MODEL` (типово `openai/gpt-oss-120b`), а список і порядок вибираються на сторінці «Моделі ШІ»:
-  - **primary**: активується одразу при блокуванні квоти Gemini (`geminiQuotaLocked`), оминаючи увесь каскад.
-  - **last-resort**: підхоплює після вичерпання всіх Gemini-моделей.
-  - Rate limiter: 30 RPM, burst=1.
-- На початку кожного сканування квота Gemini скидається (`ResetQuotaLock`), тому відновлена квота буде використана в наступній сесії.
+  - Активується після вичерпання доступних моделей Gemini в каскаді або на початку виклику з уже встановленим `quotaLocked`.
+- На початку кожного сканування `ResetQuotaLock` дозволяє знову звертатися до Gemini. [Каскад і ліміти](docs/architecture/STORAGE_LIFECYCLE.md#межі-запитів-у-коді)
 
 «Моделі ШІ» містить дві таблиці: Gemini і Groq. При відкритті показується збережений вибір; окремі кнопки отримують каталоги провайдерів. Прапорці та стрілки порядку зберігають вибір автоматично, без кнопки збереження. Поточна операція продовжує використовувати свій зафіксований каскад, новий вибір діє з наступної операції. Збережені `selected_gemini_models` і `selected_groq_models` у `app_state` мають пріоритет над `.env`. Каталог Groq отримується через `GET https://api.groq.com/openai/v1/models`; аудіо, модерація й системи з вбудованими інструментами виключаються. GPT-OSS використовує підтримуваний `reasoning_effort=low`, Qwen — `none`; для інших моделей параметр не передається.
 
 Для сумісності старий ключ Groq із префіксом `gsk_` у `GROK_API_KEY` розпізнається як Groq, якщо `GROQ_API_KEY` не задано. Параметри й збережений вибір xAI залишаються окремими; без налаштованого Groq зберігається попередній Grok fallback.
 
-### 🔍 Pipeline розпізнавання (11 кроків)
+### 🔍 Розпізнавання
 
-1. Парсинг імені файлу (`go-ptn` + власні regex: `reNakedLang`, `reLangTag`)
-2. Пошук за IMDB ID (якщо присутній у назві)
-3. Типізований пошук TMDB (`/movie` або `/tv`, ніколи `/multi`)
-4. Транслітераційний fallback (кирилиця → латиниця)
-5. Fallback за батьківською папкою (generic-назви фільтруються)
-6. Скоринг та верифікація через Jaro-Winkler
-7. Водоспад метаданих: `uk-UA → ru-RU → en-US`
-8. Merge TMDB + Gemini (Gemini пропускається, якщо TMDB уже дав валідний український `TitleUA` і опис)
-9. Batch-збереження через `SaveMoviesBatch` (єдина транзакція)
-10. Черга Gemini-розпізнавання (нерозпізнані файли)
-11. Черга перекладу (локалізація через AI)
+Під час сканування MovieList розбирає ім’я файла, використовує IMDb ID за наявності й шукає у типізованих TMDB endpoints. Пошук може спробувати очищені назви, назву папки й транслітерацію. Для нерозпізнаних файлів AI може запропонувати назву, яку застосунок перевіряє через TMDB. Локалізація доповнює вже підтверджені метадані. [Алгоритми й ручні дії](docs/architecture/RECOGNITION.md)
 
 Успішна локалізація зберігається також тоді, коли AI залишив точну оригінальну назву. Наступні сканування не надсилають незмінений запис повторно, зокрема після перезапуску. Зміна назви, опису або TMDB-ідентичності дозволяє нову автоматичну спробу; явні дії редактора залишаються доступними. Помилки запиту, відсутні або непридатні результати не позначаються як завершені.
 
@@ -97,11 +85,11 @@ License: MIT License
 
 ### ⚡ Production-Grade архітектура
 
-- **Shutdown-safe:** `RunScan` і `FixSelected` відстежуються через `a.wg` → `db.Close()` викликається тільки після повного завершення всіх горутин.
+- **Життєвий цикл:** `shutdown` скасовує scan і Repair та чекає завдань `App.wg` перед `db.Close()`. [Контракт завершення](docs/architecture/STORAGE_LIFECYCLE.md#скасування-й-зовнішні-ефекти)
 - **SQLite WAL:** `journal_mode=WAL`, `busy_timeout=5000`, `SetMaxOpenConns(1)`.
 - **Batch DB:** `SaveMoviesBatch` — єдина транзакція на batch, `filenameChunkSize=500` для `IN` запитів.
 - **Structured logging:** `log/slog` у форматі JSON із Trace ID на кожен файл.
-- **Кешування (L1/L2):** L1 — `sync.Map` для TMDB-результатів у межах сесії; L2 — SQLite `ai_resolutions` для Gemini-рішень між сесіями.
+- **Кешування (L1/L2):** L1 — TMDB-результати в пам’яті; L2 — перевірені AI-підказки в SQLite `ai_resolutions`.
 
 ---
 
@@ -112,12 +100,12 @@ License: MIT License
 | Таблиця | Призначення | Первинний ключ |
 |---------|-------------|----------------|
 | `movies` | Основний каталог локальних файлів і перевірених метаданих TMDB | `filename` |
-| `ai_resolutions` | L2-кеш результатів Gemini для повторного TMDB-пошуку без нового AI-запиту | `original_filename` |
+| `ai_resolutions` | L2-кеш підказок AI для повторного TMDB-пошуку без нового AI-запиту | `original_filename` |
 | `app_state` | Службові значення стану застосунку у форматі `key → value` | `key` |
 
 ### `movies`
 
-Один рядок відповідає одному локальному медіафайлу. `filename` містить повний відносний шлях і є єдиним стабільним ідентифікатором запису. Таблиця також зберігає `tmdb_id`, тип `movie`/`tv`, українську й оригінальну назви, рік, жанри, акторів, опис та шляхи до постера.
+Один рядок відповідає одному локальному медіафайлу. `filename` є стабільним ідентифікатором запису, з префіксом джерела для шляхів поза початковим коренем. Таблиця також зберігає `tmdb_id`, тип `movie`/`tv`, українську й оригінальну назви, рік, жанри, акторів, опис та шляхи до постера. [Схема й джерела](docs/architecture/STORAGE_LIFECYCLE.md)
 
 - `tmdb_id > 0` — запис перевірено через TMDB і він вважається розпізнаним.
 - `tmdb_id = 0` — unresolved placeholder, який показується в «Потребують перевірки» і не губиться між скануваннями.
@@ -128,7 +116,7 @@ License: MIT License
 
 ### `ai_resolutions`
 
-Зберігає розпізнану Gemini назву, рік, media type і confidence за ключем `original_filename`. При повторній обробці програма може використати цей результат як кешовану пошукову підказку, але все одно перевіряє її через TMDB: сам запис у кеші не робить файл розпізнаним і не є джерелом `TmdbID`.
+Зберігає запропоновані AI назву, рік, media type і confidence за ключем `original_filename`. При повторній обробці програма може подати цю підказку до TMDB для нової перевірки.
 
 Під час видалення медіазапису через UI або очищення відсутніх на диску файлів відповідний AI-кеш також видаляється. Foreign key між таблицями немає; узгодженість підтримує storage layer за значенням filename.
 
@@ -136,11 +124,11 @@ License: MIT License
 
 ### `app_state`
 
-Містить невеликі службові параметри: `last_scan_at` — час останнього **успішного** сканування; `selected_gemini_models` і `selected_groq_models` — збережені каскади моделей; `selected_grok_models` — попередній вибір xAI для сумісності. `scan_folders` і `excluded_folders` зберігають списки джерел та виключень. Помилка або зупинка користувачем не оновлює час сканування.
+Містить списки джерел і виключень, вибір моделей та `last_scan_at`. Час оновлюється в гілці успішного завершення scan або пакетного уточнення. STOP і помилка обходу диска залишають попередній час. [Умови завершення](docs/architecture/STORAGE_LIFECYCLE.md#скасування-й-зовнішні-ефекти)
 
 ### Перевірка розпізнавання
 
-У редакторі ручна підказка працює разом із selector `Авто / Фільм / Серіал`. Стримана кнопка `Варіанти` показує до п’яти детерміновано впорядкованих альтернативних TMDB-кандидатів (назва, original title, рік, тип та ID) без постерів; поточний `media_type + tmdb_id` зі списку виключається. Без ручної підказки пошук використовує назву файла, а не потенційно помилкову назву з БД; для транслітерату виконується обмежений fallback.
+У редакторі ручна підказка працює разом із перемикачем `Авто / Фільм / Серіал`. Кнопка `Варіанти` показує до п’яти TMDB-кандидатів з назвою, оригіналом, роком, типом та ID. Для запису з позначкою review список може показати поточний твір для повторного підтвердження. [Порядок пошуку](docs/architecture/RECOGNITION.md#редактор)
 
 `Нерозпізнаний` означає `tmdb_id = 0`. `Сумнівний` уже має перевірений TMDB ID, але потребує перегляду; ці стани рахуються окремо. Ручне підтвердження очищає стан сумнівності.
 
@@ -148,9 +136,9 @@ License: MIT License
 
 Розпізнана назва показує той самий details preview при наведенні миші або фокусі клавіатури, а натискання надалі відкриває офіційну сторінку TMDB. Preview рендериться поверх scroll-контейнера та автоматично переміщується вгору, якщо під назвою бракує місця.
 
-Після дії `Обрати` TMDB metadata та правильний ID зберігаються одразу, тому список не чекає на повільну AI-локалізацію. Завантаження локального постера і переклад виконуються у shutdown-safe background task; після завершення подія `movie-updated` автоматично освіжає відповідний запис. Background task перевіряє актуальний TMDB ID, тому запізнілий переклад не може перезаписати новіший ручний вибір.
+Після дії `Обрати` TMDB ID і метадані зберігаються до фонового завантаження постера та локалізації. Фонова задача перевіряє актуальну identity перед записом і повідомляє UI про завершення подією `movie-updated`. [Сховище і перевірки запису](docs/architecture/STORAGE_LIFECYCLE.md)
 
-`movies.vote_average` і `movies.vote_count` зберігають рейтинг TMDB. Він відображається в редакторі, локальній та мобільній Вітрині й синхронізується з Google Sheets. Перший scan після оновлення дозаповнює рейтинг старих розпізнаних записів одним batch save; наступні scan пропускають уже заповнені записи.
+`movies.vote_average` і `movies.vote_count` зберігають рейтинг TMDB. Він відображається в редакторі, локальній та мобільній вітрині й синхронізується з Google Sheets. Під час scan застосунок пробує дозаповнювати рейтинг підтверджених записів без голосів. [backfillMissingRatings](app.go#L914)
 
 Gemini використовує задані у `GEMINI_MODELS` production-моделі у вказаному порядку та discovered `generateContent` моделі. Назви моделей мають надходити з Gemini Models API: недоступні configured-моделі ігноруються, а порядок решти зберігається. Типовий каскад: `gemini-2.5-flash,gemini-flash-lite-latest`; після вичерпання Gemini доступний послідовний Groq fallback, а без налаштованого Groq — попередній xAI Grok.
 
@@ -185,13 +173,13 @@ Gemini використовує задані у `GEMINI_MODELS` production-мо�
 ## 🛠️ Вимоги для збірки
 
 - **Go 1.27.1+**
-- **Node.js 20.19+ або 22.12+ та npm**
+- **Node.js `^20.19.0 || >=22.12.0` та npm**
 - **Wails CLI 2.16.0:** `go install github.com/wailsapp/wails/v2/cmd/wails@v2.16.0` (перевстановіть після оновлення Go)
 
 **API ключі:**
 
 - [TMDB API Key](https://www.themoviedb.org/settings/api) (v3)
-- [Google Gemini API Key](https://aistudio.google.com/)
+- [Google Gemini API Key](https://aistudio.google.com/) — для розпізнавання та локалізації через Gemini
 - [Groq API Key](https://console.groq.com/keys) — опційно, для резервного AI-розпізнавання та перекладу
 - [xAI Grok API Key](https://console.x.ai/) — опційно, для сумісності з попереднім резервним провайдером
 - `credentials.json` (Google Cloud) — для Google Sheets sync
@@ -225,12 +213,12 @@ cd movielist2
 Файл можна редагувати в застосунку через «Налаштування → Конфігурація». Текст зберігається автоматично після паузи та при виході з редактора; некоректний синтаксис не замінює попередній файл. Зміни застосовуються після перезапуску. Папки й моделі, вибрані в інтерфейсі та збережені в базі, мають пріоритет над початковими значеннями `.env`.
 
 ```env
-# Обов'язкові
+# Джерело і метадані
 TMDB_API_KEY=your_key
-GEMINI_API_KEY=your_key
 MEDIA_FOLDER_PATH=/path/to/your/media
 
 # AI (опційно)
+GEMINI_API_KEY=your_key
 GROQ_API_KEY=your_key          # Резервний AI-провайдер
 GROQ_MODEL=openai/gpt-oss-120b  # Модель Groq (default: openai/gpt-oss-120b)
 GEMINI_MODELS=gemini-2.5-flash,gemini-flash-lite-latest
@@ -280,55 +268,10 @@ EXCLUDE_FOLDERS=downloads,temp # Папки для ігнорування при
 
 ## 🧪 Тести
 
-Для перевірки frontend та синхронізації версії виконайте `npm --prefix frontend test`. Звичайні Go-тести ізолюють зовнішні API. Реальні Groq-перевірки вмикаються окремо через `MOVIELIST_LIVE_GROQ=1` (каталог) або `MOVIELIST_LIVE_GROQ_INFERENCE=1` (розпізнавання/переклад); останні витрачають квоту. `MOVIELIST_LIVE_GROQ_MODELS` задає список моделей для перевірки розпізнавання.
-
-Реальні синтетичні перевірки підтвердили GPT-OSS 120B/20B, зокрема невідомий файл без вигаданої назви, та український переклад через 120B. Відповідь розпізнавання повинна містити явний `confidence` у межах 0–1. Qwen для поточного пакетного запиту повернув HTTP 429 (1426 токенів за ліміту 1000 цього облікового запису); повний production-скан і ручні UI-перевірки залишаються відкритими.
-
-```bash
-go test ./...          # Всі тести
-go test ./... -v       # З детальним виводом
-go test ./... -cover   # З покриттям коду
-```
-
-**Тестові файли:**
-
-| Файл | Що тестує |
-|------|-----------|
-| `internal/tmdb/parser_test.go` | Парсинг імен файлів, homoglyph-заміна |
-| `internal/tmdb/search_test.go` | Скоринг, buildAttempts, generic folder filter |
-| `internal/tmdb/translit_test.go` | Транслітерація кирилиці |
-| `internal/ai/gemini_test.go` | TTS-фільтр, Gemini cascade, Grok fallback при quota lock |
-| `internal/ai/grok_test.go` | HTTP happy path, ReasoningEffort, error handling |
-| `internal/ai/groq_test.go` | Groq HTTP, confidence, параметри моделей, cancellation, секрети та переклад |
-| `internal/ai/groq_live_test.go` | Opt-in перевірки розпізнавання та перекладу через реальний Groq |
-| `app_env_test.go` | Валідація .env, UTF-8/LF, ревізії та атомарне збереження |
-| `app_groq_models_test.go` | Каталог Groq, фільтрація та opt-in перевірка реального API |
-| `scripts/sync-version.test.mjs` | Синхронізація метаданих та відхилення некоректної версії |
-| `internal/storage/storage_test.go` | Merge-upsert, CleanMissing, versioned AI cache, poster cleanup, відносні шляхи як PK |
-| `internal/tmdb/candidate_details_test.go` | Details cache/singleflight, cancellation, runtime та short-film marker |
-| `internal/utils/path_display_test.go` | DisplayFileLabel (movie/tv/unresolved) |
-| `app_getaimodels_test.go` | Gemini catalog, persisted checkbox selection, Grok-only mode, no keys |
-| `app_group_test.go` | Strong/weak grouped-TV markers, mixed folders, `Superkopy.80` regression |
-| `app_candidates_test.go` | Candidate search/confirmation, async localization та stale-result guard |
-| `app_updatemovie_test.go` | Bypass Gemini при валідній українській локалізації TMDB |
-
----
+Для локальних перевірок використовуйте `go test ./...`, `go vet ./...` і `npm --prefix frontend test`. Остання команда перевіряє JS-модулі й синхронізацію версії. Звичайні Go-тести ізолюють зовнішні API. Для live-перевірок діють окремі опт-іни. [Команди, тестові групи та межі перевірки](docs/operations/DEVELOPMENT.md#вибір-перевірки)
 
 ## 📁 Архітектура
 
-```
-├── main.go                 # Wails bootstrap, global panic handler
-├── app.go                  # Orchestrator (Wails API, scan lifecycle, shutdown)
-└── internal/
-    ├── ai/                 # Gemini + Groq, legacy xAI (cascade, quota lock, rate limiting)
-    ├── config/             # .env завантаження
-    ├── scanner/            # Disk I/O, path filtering
-    ├── storage/            # SQLite (WAL, upsert, L2 AI cache, PatchMovie)
-    ├── tmdb/               # TMDB client (L1 cache, scoring, transliteration)
-    ├── sheets/             # Google Sheets sync
-    ├── utils/              # slog JSON logger, Trace context, FileLabel, Cyrillic helpers
-    ├── version/            # Єдине embedded-джерело версії VERSION
-    └── web/                # HTML generator (local + mobile showcase)
-```
+[Карта підсистем](docs/architecture/OVERVIEW.md) містить entry points і напрямки викликів. Для роботи з агентом почніть з [AGENTS.md](AGENTS.md) та [індексу задач](docs/agents/INDEX.md).
 
 📜 **Ліцензія:** MIT. Створено з любов'ю до кіно та чистого коду.

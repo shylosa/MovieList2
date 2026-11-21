@@ -328,3 +328,179 @@ All notable changes to this project. Dates are approximate (session-based).
 * Невідомий IMDb ID повертає явну помилку й не запускає неточний текстовий пошук.
 * `FixSelected` очищає TMDB cache, рахує фактичні успіхи та не додає невдалі записи
   до черги перекладу.
+
+## Архів нотаток з AGENTS.md за попередні раунди
+
+Перенесено з історичного розділу AGENTS.md у стані на коміті `cdf44e0`. Згадки про тести, логи та чеклисти описують спостереження того часу.
+
+### Audit Round 24 — Вересень 2026 (automatic exact disambiguation)
+
+* Gemini results first use exact typed movie+TV lookup; reported AI media type is only a weak tie-breaker.
+* Exact localized search titles are validated aliases for post-verification.
+* `scan_completed.processed_total` is the denominator for `tmdb_accepted + ai_accepted + unresolved`; `disk_total` remains the collection size.
+
+### Manual media type selector — Вересень 2026
+
+* `FixRequest.media_type` приймає `auto`, `movie` або `tv`; порожнє значення сумісне з `auto`.
+* Strict manual type обмежує пошук відповідним typed TMDB endpoint.
+* В Auto exact original/localized/alias titles рівноправні; popularity/year/type використовуються лише для deterministic tie-break.
+
+### Audit Round 23 — Вересень 2026 (authoritative manual titles)
+
+* Точна ручна назва не передається Gemini: typed TMDB exact search перевіряє primary/original/localized/alias titles, а filename year/type є лише tie-breakers.
+* Gemini discovery допускає лише `generateContent` production-моделі у configured order; недоступні 404-моделі вимикаються до refresh.
+* Default Gemini cascade: `gemini-2.5-flash,gemini-flash-lite-latest`.
+* Scan/fix summaries повідомляють фактичні unresolved counters.
+
+### Audit Round 22 — Вересень 2026 (lifecycle і deployment tests)
+
+* `finalizeScan` завжди використовує lifecycle-контекст; cancellation і disk errors не очищають showcase та не оновлюють `last_scan_at`.
+* GitHub Pages git execution і Wails event emission мають вузькі test adapters; публічні API та events незмінні.
+* Додано ізольовані тести scan lifecycle, GitHub deployment, web generator, config та Sheets row mapping.
+* Production `wails build` і повний набір Go-перевірок проходять.
+
+### Audit Round 21 — Вересень 2026 (IMDb manual hints)
+
+* `FixSelected` / `UpdateMovie` accept full IMDb title URLs and bare `tt...` IDs.
+* IMDb hints use TMDB `/find` directly and never fall through to title scoring or Gemini.
+* Unknown authoritative IDs return an explicit error instead of silently retrying as text.
+* FixSelected clears TMDB caches and reports actual resolved/unresolved counts.
+
+### Audit Round 20 — Вересень 2026
+
+* TMDB no-year fallback preserves the parsed target year for ranking and cache identity.
+* Gemini verification requires a strong original/validated-alias match; localized titles
+  are diagnostic-only signals.
+* Gemini batch outputs correlate by `request_id`; a missing item gets at most one
+  sequential retry and cancellation prevents retry.
+* Year-like homoglyph normalization is limited to four-digit year tokens.
+* `scan_completed` reports deterministic and AI recognition counts plus AI call metrics.
+
+### Audit Round 15 — Липень 2026
+
+Лог 12:58–12:59: FIX-15, FIX-16, FIX-20 підтверджені. Нуль багів.
+
+* `app_updatemovie_test.go`: `TestMaxTitleSimilarity_CyrillicCandidate` +
+  `TestMaxTitleSimilarity_MatchedAlias` — тести для FIX-20, пропущені в R14.
+* `CHECKLIST.md`: Очищено (раунди 1–15 закриті).
+
+### Audit Round 14 Fix Patch — Липень 2026 (Аналіз логів)
+
+Підтверджено логами: FIX-15 (warmup a.ctx) — нуль warmup_failed. FIX-16 (app_closed у
+shutdown) — рівно один app_closed в кінці сесії. FIX-17 (folder_en_fallback) — активний.
+
+* `app.go` / `maxTitleSimilarity()`: Додано перевірку `info.TitleUA` між `TitleEN` і
+  `SearchTitle`. Раніше кириличний кандидат ("Скарпетта") отримував similarity=0 проти
+  TitleEN="Scarpetta" (JaroWinkler між різними алфавітами = 0), хоча TitleUA="Скарпетта" —
+  точний збіг. Rescue витрачав 2 зайвих TMDB-запити і знаходив відповідь лише через
+  borrowedLatinVariants. Після фіксу: accepted на першому кандидаті (similarity=1).
+
+### Round 13b — Аналіз логів після FIX-17 (Липень 2026)
+
+Підтверджено: FIX-15 (warmup a.ctx), FIX-17 (folder_en_fallback) — в логах присутні.
+`ai_models_warmup_failed` не спостерігається.
+
+Спостереження:
+* `"Скарпетта"→"Skarpetta"` через folder_en_fallback: технічно правильна транслітерація,
+  але TMDB назва `"Scarpetta"` (італійська) — не знайдено. Файл коректно перенаправлено
+  в Gemini, який повернув правильний EN title. Post-recognition lookup знайшов серіал через
+  TV endpoint. Каскад відпрацював.
+* `internal/utils/lang.go` / `CyrillicToLatin()`: FIX-19 — подвоєні приголосні (тт→tt тощо)
+  обробляються окремим replacer до одинарних (BGN/PCGN). Тест `TestCyrillicToLatinDoubleConsonants`.
+
+---
+
+### Audit Round 13 Fix Patch — Липень 2026 (Код + Аналіз логів)
+
+* `app.go` / `RunScan()` warmup goroutine: `fetchAIModels(scanCtx)` → `fetchAIModels(a.ctx)`.
+  Warmup кешує AI-моделі для lifecycle додатку; `scanCtx` скасовується при миттєвому
+  завершенні скана (нових файлів нема) і передчасно вбивав HTTP-запит (`context canceled`).
+* `internal/utils/logger.go` / `CloseLogger()`: Видалено `slog.Info("app_closed")`.
+* `app.go` / `shutdown()`: Додано `slog.Info("app_closed")` першим рядком. Усуває подвійні
+  `app_closed` при WebView2 retry (~15с) або повторному запуску exe на Windows.
+* `internal/tmdb/search.go`: Варіант "Папка" пробує EN cascade після провалу CYR — усуває
+  cache hit блокування EN-пошуку для кириличних назв папок.
+* `internal/tmdb/client.go` / `pipelineLatin()`: Guard `!HasCyrillic(cleanTitle)` → пропуск
+  lat→cyr транслітерації для чисто ASCII назв (заощаджує 2+ зайвих TMDB-запити).
+
+---
+
+### Audit Round 12 Fix Patch — Липень 2026
+
+* `app.go` / `finalizeScan()`: Додано параметр `success bool`. `SetState("last_scan_at")`
+  тепер викликається лише при `success = true` — виключає STOP користувачем і disk error
+  як хибні мітки часу "останнього сканування". Оновлено всі 5 викликів.
+* `app.go` / `processTranslationQueue()`: Виправлено коментар — `movies` є результатом
+  `GetMoviesByFilenames(filenames)`, а не "all movies in the DB".
+* `internal/storage/storage_test.go`: Додано `TestSetAndGetState` — базовий set/get,
+  upsert і відсутній ключ для `SetState`/`GetState`.
+* `CHECKLIST.md`: Очищено (всі раунди 1–12 закриті).
+
+---
+
+### Audit Round 8 Fix Patch — Червень 2026
+
+* `app.go` / `updateMovie()`: Варіант 1.5 (прямий пошук за hint) більше не робить безумовний `return`, коли TMDB знаходить запис без українського перекладу (`TitleUA` порожній або не кириличний). Тепер потік провалюється у Варіант 2 (Gemini) для локалізації — раніше Gemini fallback був недосяжний у цьому сценарії, попри лог-повідомлення що обіцяло протилежне.
+* `config.go`: Видалено невикористану функцію `getEnvRequired`.
+* `system.go`: Видалено `utils.OpenLogsFolder` — мертвий дублікат `App.OpenLogs` (app.go), ніде не викликався.
+
+---
+
+### Audit Round 9 Fix Patch — Липень 2026
+
+* `internal/ai/gemini.go` / `TranslateBulk()`: Додано `else`-гілку при `empty Candidates` — тепер логується `Warn("bulk_translate_empty_candidates")` і оновлюється `lastErr`. Раніше порожня відповідь від Gemini (safety block / content filter) мовчки пропускалась, що давало оманливий error message після вичерпання всіх моделей.
+* `app.go` / `RunScan()`: Warmup goroutine (`fetchAIModels`) тепер tracked у `a.wg` (`wg.Add(1)` + `defer wg.Done()`). Раніше горутина могла пережити shutdown і звернутись до `a.aiClient` після `db.Close()`.
+* `app.go`: Видалено мертву змінну `russianMarkers []string` — артефакт рефакторингу, замінений на `russianMarkersRE`.
+* `internal/storage/storage.go`: Видалено мертвий метод `GetAllFilenames` і реліктовий коментар над ним.
+
+---
+
+### Audit Round 11 Fix Patch — Липень 2026
+
+* `internal/utils/path_display.go` / `reSeasonCut`: Видалено year-альтернатив (`[.\s]\d{4}[\s._].*`) — регекс більше не обрізає рік якщо він є частиною назви серіалу (The.1984.Show, 1923...). Обрізання відбувається тільки від маркера сезону `S\d{2}`. Додано регресійні тести.
+* `app.go` / `GetStats()`: Замінено `os.Stat(DBPath).ModTime()` на `db.GetState("last_scan_at")` — час останнього сканування тепер записується явно після завершення scan і не залежить від WAL checkpoint-ів SQLite.
+* `internal/storage/storage.go`: Додано таблицю `app_state (key TEXT PK, value TEXT)` і методи `SetState` / `GetState`.
+* `CHECKLIST.md`: Очищено (всі раунди 1–11 закриті).
+
+---
+
+### DisplayFileLabel: фінальна семантика — Липень 2026
+
+* `internal/utils/path_display.go`: Переписано повністю. Видалено `reSeason`, `reEpisode`,
+  `reSeasonCut`, `cleanFolderLabel`, імпорт `"regexp"`. Нова логіка: є каталог → сира назва
+  першого рівня; плоский файл → ім'я файлу. Badge слугує навігаційною міткою для пошуку
+  файлу на диску, тому потрібна точна сира назва, а не очищений UX-заголовок.
+* `internal/web/generator.go`: `title="{{.Filename}}"` → `title="{{.FileLabel}}"`.
+* Сигнатура `DisplayFileLabel` скорочена до 1 параметра. Оновлено всі 3 виклики
+  (app.go, generator.go, sheets.go) і тести.
+
+---
+
+### Audit Round 19 Fix Patch — Вересень 2026
+
+* TMDB network errors redact `api_key` inside error strings without breaking `errors.Is(err, context.Canceled)`.
+* Search attempts, language/endpoint loops, metadata waterfalls and poster downloads stop immediately when the scan context is cancelled; cancellation no longer appears as file-level WARN noise.
+* `RunScan` emits one structured `scan_cancelled` INFO event with trace ID and duration.
+* Regression tests verify secret redaction and that cancellation permits only the already-started transport request.
+
+### Audit Round 18 Fix Patch — Вересень 2026
+
+* `frontend/src/main.js`: scan UI керується подіями `scan-started` / `scan-finished`, тому асинхронний backend scan не втрачає активну кнопку STOP після повернення RPC. Movie editor використовує DOM API (`textContent`, properties, `dataset`) замість HTML-конкатенації зовнішніх даних; TMDB-посилання обмежені офіційним HTTPS-host.
+* `internal/scanner/scanner.go`: `GetDiskFiles(ctx)` і вкладений `WalkDir` перевіряють cancellation та повертають помилки. Неповний disk scan завершується до `CleanMissingMovies`, захищаючи валідні записи і постери від помилкового cleanup.
+* `internal/tmdb/client.go`: постер записується у temporary-файл і з'являється за фінальним шляхом лише після успішного непорожнього download та atomic rename.
+* Додано `internal/scanner/scanner_test.go` і `internal/tmdb/poster_test.go`. Повний набір тестів стабільно проходить у 10 послідовних прогонах.
+
+### Audit Round 17 Fix Patch — Липень 2026 (StopScan race fix)
+
+* `app.go` / `RunScan()`: `ctx, cancel` і `a.setScanCancel(cancel)` перенесено перед
+  `a.wg.Add(1)` — поза горутиною. Усуває race: `StopScan()` міг викликатись до
+  реєстрації cancel у горутині → `cancelScan()` був silent no-op → скан не зупинявся.
+* `app.go` / `StopScan()`: Додано перевірку `scanCancel != nil` під `scanMutex`. Якщо
+  активного сканування немає — попередження `"⚠️ [СТОП] Немає активного сканування"`
+  замість хибного `"🚨 Сигнал отримано"`.
+
+---
+
+### Стан на 3 жовтня 2026
+
+Знімок AGENTS.md фіксував синтетичне розпізнавання Groq через GPT-OSS 120B/20B, переклад через 120B і HTTP 429 `request_too_large` для повної Qwen-пачки на тодішньому обліковому записі (1426 токенів за ліміту 1000). У ньому також залишалися відкритими повний production-скан, ручний Wails-прогін і перевірки кількох дисків. Це історичні результати, повідомлені в попередній документації.
