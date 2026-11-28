@@ -4,7 +4,7 @@
 
 | Задача | Що відкрити |
 | --- | --- |
-| Парсер, IMDb, TMDB, scoring, ручне уточнення, Repair | [Розпізнавання](../architecture/RECOGNITION.md), [тести пошуку](../../internal/tmdb/search_test.go), [тести ручного уточнення](../../app_updatemovie_test.go) |
+| Парсер, IMDb, TMDB, scoring, ручне уточнення, Repair | [Розпізнавання](../architecture/RECOGNITION.md), [координатор автоматичного розпізнавання R9-A](../../recognition_coordinator.go), [тести пошуку](../../internal/tmdb/search_test.go), [тести ручного уточнення](../../app_updatemovie_test.go) |
 | Gemini, Groq, legacy Grok, quota, локалізація | [Розпізнавання](../architecture/RECOGNITION.md#ai-гіпотеза-та-перевірка), [ліміти та контексти](../architecture/STORAGE_LIFECYCLE.md#межі-запитів-у-коді), [збережений вибір моделей](../../app_models.go) |
 | SQLite, джерела, STOP, shutdown, cleanup | [Сховище й життєвий цикл](../architecture/STORAGE_LIFECYCLE.md), [тести SQLite](../../internal/storage/storage_test.go), [тести lifecycle](../../app_lifecycle_github_test.go) |
 | Wails API, навігація, події, Редактор | [Контракти Wails і UI](../architecture/WAILS_UI_CONTRACTS.md), [Node suite](../../frontend/src/test-runner.mjs), [ручні сценарії](../../DESIGN_CHECKLIST.md) |

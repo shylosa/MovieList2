@@ -16,7 +16,7 @@ go install github.com/wailsapp/wails/v2/cmd/wails@v2.16.0
 
 ## Версія та генеровані файли
 
-- Єдине редаговане джерело версії — [VERSION](../../internal/version/VERSION). `internal/version` вбудовує його в EXE. Wails title, `GetAppVersion`, `app_started`, About і нові вітрини читають цю версію. Runtime `.env` не має version override. [version.go](../../internal/version/version.go), [main.go](../../main.go), [app.go](../../app.go#L283), [generator.go](../../internal/web/generator.go)
+- Єдине редаговане джерело версії — [VERSION](../../internal/version/VERSION). `internal/version` вбудовує його в EXE. Wails title, `GetAppVersion`, `app_started`, About і нові вітрини читають цю версію. Runtime `.env` не має version override. [version.go](../../internal/version/version.go), [main.go](../../main.go), [app.go](../../app.go#L252), [generator.go](../../internal/web/generator.go)
 - Wrapper синхронізує `wails.json` → `info.productVersion`, version-поля у `frontend/package.json` та `frontend/package-lock.json`, і `<title>` у `frontend/index.html` перед Wails. npm `prebuild` та `predev` викликають цей самий скрипт. Він приймає `major.minor.patch` з компонентами 0–65535 і без зайвих початкових нулів. `npm --prefix frontend test` тестує sync у тимчасовій директорії. [sync-version.mjs](../../scripts/sync-version.mjs), [sync-version.test.mjs](../../scripts/sync-version.test.mjs)
 - `frontend/wailsjs` — згенеровані tracked bindings, `frontend/dist` і `build/bin` — ігноровані результати збірки. Кореневий `index.html` генерує окремий workflow GitHub Pages. [main.go](../../main.go), [.gitignore](../../.gitignore), [WAILS_UI_CONTRACTS.md](../architecture/WAILS_UI_CONTRACTS.md)
 

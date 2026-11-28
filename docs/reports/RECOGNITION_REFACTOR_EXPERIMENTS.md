@@ -525,3 +525,57 @@ HTTP 404 завершує конкретний URL за одну спробу і
 - Якість на реальній медіатеці та фактичний HTTP-бюджет поза офлайн-вимірюванням; race detector не запускався (немає gcc).
 
 **Рішення R8 — ACCEPT за офлайн-критеріями.** `detailsGroup` повністю видалено, нового кешу/shared-request manager немає; незалежне скасування працює (регресія падає на R7 і зелена на R8), shared parent STOP працює; identity R1–R7 збережено оракулом A/B у 15 сценаріях, нових false positive немає; per-file poster правильний; preview/confirm/Repair працюють; додаткові HTTP виміряно (лише одночасні запити однієї identity); код `GetDetails` став простішим — один прямий шлях без неявного об'єднання. Wails API, події, SQLite schema, frontend не змінено. Наступний етап R9 — спрощення координації автоматичного розпізнавання в пакеті main.
+
+## R9-A. Coordinator of Automatic Recognition
+
+Базова лінія A — HEAD R8 (`e84b7b092d0b3112f516bf0108aaf867e6eee404`), гілка `main`, робоче дерево чисте. B — робоче дерево після R9-A: новий файл `recognition_coordinator.go` у пакеті `main`, з `app.go` вирізано блоки verbatim. A/B проводилося структурно: увесь перенесений код byte-identical до HEAD (перевірено `diff` витягнутих з `git show HEAD:app.go` діапазонів проти нового файла), єдиний новий код — тип `automaticRecognitionResult` і метод `recognizeAutomaticScan` (~40 рядків), а в `RunScan` замість інлайн-ланцюжка — один виклик координатора з подальшою локалізацією.
+
+### Що виділено
+
+- Єдина точка входу автоматичного розпізнавання: `(*App).recognizeAutomaticScan(ctx, paths) automaticRecognitionResult` у [recognition_coordinator.go](../../recognition_coordinator.go#L44). Послідовність незмінна: `runTMDBScan` → `processScanResults` → `saveRecognitionBatch("tmdb_scan")` → за `ctx.Err()==nil` і непорожньою чергою `processGeminiQueue` → збирання `tmdbAccepted`/`aiAccepted`/`unresolved`/`translationQueue`.
+- До координатора фізично перенесено без зміни поведінки: `scanResult`, константи `aiConfidenceThreshold`/`geminiTMDBVerifyMinJW`, regexи й типи grouped TV, `runTMDBScan`, `detectGroupedTV` та хелпери, `processScanResults`, `buildUnresolvedMovie`, `appendUnresolvedFromMap`, `processGeminiQueue`, `mergeGeminiWithTMDB(ForType)`, `rescueEmptyGeminiWithFolder` та rescue-хелпери, `maxTitleSimilarity`, `maxLocalizedTitleSimilarity`, `geminiTMDBYearCompatible`, `absInt`, `movieFromTMDB`, `movieInfoNeedsTranslation`.
+- У `RunScan` лишилися: створення/реєстрація context, `StopScan`/shutdown lifecycle, події `scan-started`/`scan-progress`/`scan-finished`, збір метрик `scan_completed`, дисковий обхід, `CleanMissingMovies`, `backfillMissingRatings`, `filterUnprocessed`, запуск координатора, `processTranslationQueue` і `localizeStoredMovies` після розпізнавання, `cleanOrphanPostersAfterSuccess`, `finalizeScan`.
+- Нових пакетів, інтерфейсів, фабрик, DI, кешів і стратегій немає. Новий лише один приватний тип результату з чотирма полями — усі мають споживача в `RunScan` (лог `scan_completed` і черга локалізації). `processGeminiQueue` не дубльовано: ручний `FixSelected` і далі викликає ту саму функцію з `app.go`.
+
+### Перевірка на дублювання
+
+| Перевірка | Результат у B |
+| --- | --- |
+| Один шлях TMDB → AI для auto scan | `runTMDBScan` має єдиний call site — `recognizeAutomaticScan` |
+| Одна класифікація FOUND/NO_MATCH/TMDB_ERROR/CANCELED | єдине визначення `processScanResults` |
+| Один підрахунок accepted/unresolved | лише в `recognizeAutomaticScan` |
+| Одна translation queue | формується в `processScanResults`/`recognizeAutomaticScan`, споживається в `RunScan` |
+| Один запис TMDB batch | `saveRecognitionBatch` лишається в `app_recognition_log.go`, call sites: координатор (`tmdb_scan`) і `processGeminiQueue` (`gemini_queue`) |
+| Обгортки без користі | немає — координатор містить лише послідовність наявних викликів |
+
+### A/B
+
+Поведінка не змінювалася за побудовою: перенесені функції verbatim (доведено diff), заміна в `RunScan` зберігає порядок операцій і семантику лічильників (позитивний AI — лише після успішного commit; помилка commit TMDB-пачки очищає translation queue; STOP між етапами перевіряється на тих самих місцях). Наявні офлайн-фікстури R4/R5/R6 (mixed пачка, STOP у трьох точках, відмова COMMIT, 8+2, переставлені/дубльовані request_id, порожня EN, rescue, захист confirmed, rescan тієї самої БД, FixSelected як контроль) пройшли на B у повному прогоні root-пакета без змін тестів.
+
+| Сценарій (наявні фікстури) | A (R8) | B (R9-A) |
+| --- | --- | --- |
+| identity, TMDB HTTP, AI inference, порядок commit, SQLite-рядки, translation queue | за фіксованими оракулами R4–R6 | паритет — тести не змінювалися й пройшли |
+| STOP під час TMDB / між TMDB і AI / під час AI | `TestR4AppScanOutcomes`, `TestRunScanCancellationPreservesShowcaseAndState` | ті самі тести зелені, ×4 повтори |
+| Помилка SQLite COMMIT | `TestRecognitionSaveFailureDoesNotLogSuccess`, R5 rollback | зелено, ×5 повторів |
+| FixSelected із AI | `TestR5AppCorrelation`, `app_updatemovie_test.go` | зелено без змін ручного шляху |
+
+Окремого запуску A через overlay не потребувалося: зміни B — чисте перенесення (доведено byte-identical diff) плюс одна точка входу, тому wire/SQLite-поведінка A/B тотожна за побудовою; це підтверджено прогоном наявних A/B-фікстур R1–R8 на B.
+
+### Перевірки
+
+| Команда | Результат |
+| --- | --- |
+| `go build ./...`, `go vet ./...` | exit 0 |
+| `go test ./internal/tmdb ./internal/ai ./internal/storage . -count=1` | ok, 4 пакети |
+| `go test ./... -count=1` | ok, усі 10 пакетів (root ~88 с) |
+| Адресні регресії `TestR[1-8].* + cancellation/commit/correlation/confirmed` у `.`, `internal/tmdb`, `internal/ai`, `internal/storage` | ok |
+| `go test ./internal/tmdb -run '^(TestR8\|TestR2ParallelFileContexts\|TestR3AliasParallel\|TestR3DetailsCancellation\|TestGetDetailsConcurrentReadersIndependentRequests)$' -count=50` | ok, 50 повторів |
+| `go test . -run '^TestR5AppCorrelation/(...)$' -count=5`, `go test . -run '^TestR4AppScanOutcomes' -count=4` | ok |
+| `gofmt -l`, `git diff --check` | чисто |
+| `CGO_ENABLED=1 go test -race ...` | недоступний: `gcc` відсутній у PATH (CGO_ENABLED=0 за замовчуванням), як у R1–R8; конкурентні тести прогнано ×50 без флейків |
+| Verbatim-доказ перенесення | `diff` діапазонів `git show HEAD:app.go` проти `recognition_coordinator.go` — порожній |
+| Live API, production SQLite, реальна медіатека | не використовувалися |
+
+Робочий Go-код (non-test): увесь репозиторій 10644 → 10696 рядків (+52: заголовок, тип результату й метод координатора); пакет `main` 4113 → 4165. `app.go` 2912 → 2007 рядків.
+
+**Рішення R9-A — ACCEPT за офлайн-критеріями.** Один приватний координатор `recognizeAutomaticScan` у пакеті `main` володіє всією послідовністю автоматичного розпізнавання; `RunScan` лишився lifecycle + диск + події + метрики + локалізація. Перенесений код byte-identical, дублювань немає, ручні сценарії (`FixSelected`, редактор, Repair) не змінено, всі наявні офлайн-регресії R1–R8 зелені. R9-A готує архітектуру до наступних окремих змін (уніфікація дубльованих перевірок, обмежений повтор AI для unresolved, варіанти назв) — вони не реалізовані.
