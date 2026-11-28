@@ -20,7 +20,7 @@ import (
 )
 
 func TestR4AppScanOutcomes(t *testing.T) {
-	for _, mode := range []string{"mixed", "outage", "stop_before_ai", "stop_before_next_batch", "rollback", "ai_rollback", "l2_outage"} {
+	for _, mode := range []string{"mixed", "outage", "stop_before_ai", "stop_before_next_batch", "rollback", "ai_rollback", "l2_replay"} {
 		t.Run(mode, func(t *testing.T) {
 			const aFile, bFile, cFile, dFile, eFile = "Alpha.2024.mkv", "Beta.2024.mkv", "Charlie.2024.mkv", "Delta.2024.mkv", "Echo.2024.mkv"
 			ctx, cancel := context.WithCancel(t.Context())
@@ -44,7 +44,7 @@ func TestR4AppScanOutcomes(t *testing.T) {
 			switch mode {
 			case "outage":
 				files = []string{aFile, bFile}
-			case "stop_before_ai", "ai_rollback", "l2_outage":
+			case "stop_before_ai", "ai_rollback", "l2_replay":
 				files = []string{bFile}
 			case "stop_before_next_batch":
 				files = nil
@@ -132,13 +132,22 @@ func TestR4AppScanOutcomes(t *testing.T) {
 				return &http.Response{StatusCode: status, Body: io.NopCloser(strings.NewReader(body))}, nil
 			}))
 
-			if mode == "l2_outage" || mode == "mixed" {
+			// Історичний запис ai_resolutions (як у старій БД користувача) сідаємо
+			// сирим SQL: робоча логіка R6 не повинна його читати, змінювати чи дописувати.
+			if mode == "l2_replay" || mode == "mixed" {
 				file := bFile
 				if mode == "mixed" {
 					file = cFile
 				}
-				err := a.db.SaveAIResolution(ctx, storage.AIResolution{OriginalFilename: file, ResolvedTitle: "Cached Hypothesis", MediaType: "movie", Confidence: 0.99, PipelineVersion: recognitionPipelineVersion})
+				raw, err := sql.Open("sqlite", filepath.Join(dir, "movies.db"))
 				if err != nil {
+					t.Fatal(err)
+				}
+				_, err = raw.ExecContext(ctx, `INSERT INTO ai_resolutions (original_filename, resolved_title, year, media_type, confidence, pipeline_version, provider, model, updated_at) VALUES (?, 'Cached Hypothesis', 2024, 'movie', 0.99, 25, 'gemini', 'gemini-2.5-flash', '2026-01-01T00:00:00Z')`, file)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := raw.Close(); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -233,8 +242,8 @@ func TestR4AppScanOutcomes(t *testing.T) {
 				for _, path := range queue[:min(len(queue), 10)] {
 					wantRows[filepath.Base(path)] = 0
 				}
-			case "l2_outage":
-				wantQueue, wantAI = nil, 0
+			case "l2_replay":
+				// R6: історичний L2 ігнорується, файл іде до AI, гіпотеза не верифікується — unresolved.
 				wantRows[bFile] = 0
 			}
 			mu.Lock()
@@ -270,17 +279,33 @@ func TestR4AppScanOutcomes(t *testing.T) {
 			if len(accepted) != 0 {
 				t.Errorf("reported uncommitted or unverified identities: %v", accepted)
 			}
-			if mode == "ai_rollback" || mode == "mixed" {
-				resolution, _, err := a.db.GetAIResolution(t.Context(), bFile, recognitionPipelineVersion)
-				if err != nil || resolution != nil {
-					t.Errorf("uncommitted/unverified L2 identity: %+v, %v", resolution, err)
-				}
+			// R6: жодних нових записів L2; засіяні історичні рядки недоторкані.
+			wantL2 := 0
+			if mode == "mixed" || mode == "l2_replay" {
+				wantL2 = 1
 			}
-			if mode == "mixed" {
+			raw, err := sql.Open("sqlite", filepath.Join(dir, "movies.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var l2Count int
+			if err := raw.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM ai_resolutions").Scan(&l2Count); err != nil {
+				t.Fatal(err)
+			}
+			if err := raw.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if l2Count != wantL2 {
+				t.Errorf("ai_resolutions rows = %d, want %d (no L2 reads/writes in working logic)", l2Count, wantL2)
+			}
+			if mode == "mixed" || mode == "l2_replay" {
 				endpointMu.Lock()
 				defer endpointMu.Unlock()
-				if wire["/3/search/movie Echo"] != 1 || wire["/3/search/movie Cached Hypothesis"] != 0 {
-					t.Errorf("canceled file retried or outage used L2: %v", wire)
+				if mode == "mixed" && wire["/3/search/movie Echo"] != 1 {
+					t.Errorf("canceled file retried: %v", wire)
+				}
+				if wire["/3/search/movie Cached Hypothesis"] != 0 {
+					t.Errorf("historical L2 title was searched in TMDB: %v", wire)
 				}
 			}
 		})

@@ -214,7 +214,7 @@ func TestR5AppCorrelation(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			stored, hypotheses := make(map[string]int), make(map[string]string)
+			stored := make(map[string]int)
 			var correct, wrong, unresolved int
 			for _, movie := range rows {
 				file := movie.Filename
@@ -230,25 +230,23 @@ func TestR5AppCorrelation(t *testing.T) {
 					wrong++
 				}
 			}
-			for i, file := range files {
-				resolution, _, err := a.db.GetAIResolution(t.Context(), file, recognitionPipelineVersion)
-				if err != nil {
-					t.Fatal(err)
-				}
-				if resolution != nil {
-					hypotheses[file] = resolution.ResolvedTitle
-				}
-				if wantMap[file] == 101+i {
-					if resolution == nil || resolution.ResolvedTitle != titles[i] || resolution.Provider != "gemini" ||
-						resolution.Model != "gemini-2.5-flash" || resolution.Confidence != 0.98 {
-						t.Errorf("wrong committed hypothesis or provenance for %s: %+v", file, resolution)
-					}
-				} else if resolution != nil {
-					t.Errorf("unexpected positive L2 for %s: %+v", file, resolution)
-				}
+			// R6: робоча логіка не пише ai_resolutions — таблиця залишається порожньою.
+			raw, err := sql.Open("sqlite", filepath.Join(dir, "movies.db"))
+			if err != nil {
+				t.Fatal(err)
 			}
-			t.Logf("R5 %s files=%v wire=%v hypotheses=%v IDs=%v correct/wrong/unresolved=%d/%d/%d AI=%d TMDB=%d rows=%d",
-				mode, files, wire, hypotheses, stored, correct, wrong, unresolved, aiCalls.Load(), tmdbCalls, len(rows))
+			var l2Rows int
+			if err := raw.QueryRowContext(t.Context(), "SELECT COUNT(*) FROM ai_resolutions").Scan(&l2Rows); err != nil {
+				t.Fatal(err)
+			}
+			if err := raw.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if l2Rows != 0 {
+				t.Errorf("R6: processGeminiQueue wrote %d ai_resolutions rows, want 0", l2Rows)
+			}
+			t.Logf("R5 %s files=%v wire=%v IDs=%v correct/wrong/unresolved=%d/%d/%d AI=%d TMDB=%d rows=%d l2=%d",
+				mode, files, wire, stored, correct, wrong, unresolved, aiCalls.Load(), tmdbCalls, len(rows), l2Rows)
 			if !maps.Equal(stored, wantMap) || !slices.Equal(accepted, wantAccepted) || wrong != 0 {
 				t.Errorf("stored=%v accepted=%v, want %v and %v", stored, accepted, wantMap, wantAccepted)
 			}

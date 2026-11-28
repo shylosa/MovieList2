@@ -303,3 +303,87 @@ HTTP 404 завершує конкретний URL за одну спробу і
 | `gofmt`, `git diff --check` | Формат Go і пробіли в diff перевірено. |
 
 **Рішення R5 — ACCEPT за офлайн-критеріями.** Провайдер може повернути фактично хибну назву з узгодженими ключами. Для legacy без `request_id` та `original_file` єдиний доказ належності — однозначний явний числовий ID. Наявні записи L2 і підтверджені раніше записи не перевірялися повторно в межах R5. Усі запити, файли й БД у перевірках синтетичні. Частоту конфліктів та якість на реальній медіатеці не виміряно.
+
+## R6 — Remove AI L2 Cache
+
+Вихідний HEAD на `main` — `cc8d6933a2ab702d0628814319c6f8c4b5ebe363` (R5), робоче дерево чисте. A — Go overlay із файлами цього HEAD (`app.go`, `internal/storage/storage.go` та пов’язані тести), B — робоче дерево R6. Нові фікстури R6 сідають історичні рядки `ai_resolutions` сирим SQL, тому один і той самий тестовий файл компілюється й на A, і на B: [app_r6_l2_test.go](../../app_r6_l2_test.go). TMDB — fake RoundTripper із записом wire, AI — локальний `httptest`, SQLite — тимчасова. Усі вхідні дані синтетичні.
+
+### Що видалено з робочої логіки
+
+| Функція | Дія з L2 до R6 | Після R6 |
+| --- | --- | --- |
+| `processScanResults` | читання `GetAIResolution` після NO_MATCH + окрема TMDB-верифікація кешованої гіпотези (JW, рік, тип) | видалено; NO_MATCH → одразу AI-черга |
+| `processGeminiQueue` | запис `SaveAIResolution` після commit пачки | видалено |
+| `SearchTMDBCandidates` | читання `GetAIResolution` → `resolvedTitle` у список запитів | видалено |
+| `candidateSearchQueries` | параметр `resolvedTitle` (пріоритет перед stored titles) | параметр прибрано |
+| `ConfirmTMDBCandidate` | `DeleteAIResolution` після підтвердження | видалено |
+| `updateMovieWithMediaType` | `DeleteAIResolution` у гілках IMDb/TMDB ID/ручної назви + `SaveAIResolution` у Gemini-гілці | видалено |
+| `DeleteMovie` | `DeleteAIResolution` | видалено |
+| `storage.CleanMissingMovies` | `DELETE FROM ai_resolutions` для відсутніх файлів | видалено |
+| `internal/storage` | тип `AIResolution`, методи `GetAIResolution`/`SaveAIResolution`/`DeleteAIResolution` | видалено як мертвий код після від'єднання всіх читачів/письменників |
+| `app.go` | константа `recognitionPipelineVersion` | видалено |
+
+Схема SQLite не змінена: `CREATE TABLE IF NOT EXISTS ai_resolutions` і lazy `ALTER TABLE` залишені, тому наявні БД відкриваються без міграції, історичні рядки не читаються й не видаляються (перевірено в `TestInitSchemaUpgradesRound24Database`). Нова таблиця, новий кеш, нові прапорці не створювалися.
+
+### R6-A. A/B автоматичного скану
+
+Один файл на сценарій, крім rescan. `cachedSearched` — кількість TMDB-пошуків саме за історичною L2-назвою (проксі читання L2); `l2 a→b` — рядки `ai_resolutions` до/після (проксі записів). AI — фактичні batch-виклики.
+
+| Сценарій | identity A → B | AI batch A → B | cachedSearched A → B | l2 rows A → B | search/details HTTP A → B |
+| --- | --- | --- | --- | --- | --- |
+| fresh, без L2 | 201 → 201 | 1 → 1 | 0 → 0 | **0→1 → 0→0** | 5/1 → 5/1 |
+| L2 хіт, AI дає іншу гіпотезу | **555 → 0** | **0 → 1** | 1 → 0 | 1→1 → 1→1 | 4/1 → 11/0 |
+| L2 хіт = гіпотеза AI | 555 → 555 | **0 → 1** | 1 → 1* | 1→1 → 1→1 | 4/1 → 5/1 |
+| L2 stale (pipeline 24) | 201 → 201 | 1 → 1 | 0 → 0 | 1→1 → 1→1 | 5/1 → 5/1 |
+| L2 confidence 0,10 | 201 → 201 | 1 → 1 | 0 → 0 | 1→1 → 1→1 | 5/1 → 5/1 |
+| L2 wrong year (1999) | 201 → 201 | 1 → 1 | **2 → 0** | 1→1 → 1→1 | 7/1 → 5/1 |
+| L2 wrong type (tv) | **tv:777 → movie:201** | **0 → 1** | 1 → 0 | 1→1 → 1→1 | 4/1 → 5/1 |
+| confirmed 900 + L2, TMDB 500 | 900 → 900 (недоторканий) | 0 → 0 | 0 → 0 | 1→1 → 1→1 | 9/0 → 9/0 |
+| TMDB outage + L2 | 0 → 0, AI не йде | 0 → 0 | 0 → 0 | 1→1 → 1→1 | 9/0 → 9/0 |
+| STOP між TMDB і AI | черга є, AI=0 | 0 → 0 | 0 → 0 | 0→0 → 0→0 | 3/0 → 3/0 |
+| відмова COMMIT | рядка немає, accepted порожній | 0 → 1 | 1 → 0 | 1→1 → 1→1 | 4/1 → 5/1 |
+| rescan тієї самої БД (№18) | 201 → 201; **другий scan: AI 0 → 1** | 1+0 → 1+1 | 0 → 0 | **0→1 → 0→0** | 4/1 → 5/1 |
+
+\* у B цей пошук — верифікація свіжої AI-гіпотези, яка випадково збігається з L2-назвою, а не читання кешу.
+
+- У B автоматичних читань L2 (за wire-проксі) і записів L2 (за row delta) — **нуль у всіх 12 сценаріях**. У A читання були в 5 сценаріях, записи — у 2 (fresh, перший scan rescan).
+- Додаткові AI inference у B: рівно **+1 batch на кожен файл, де A брав відповідь із L2** (divergent, same_as_ai, wrong_type, другий scan у rescan) — сумарно **+4 batch на 12 сценаріїв**, жодного нового кеша чи semantic retry для компенсації. Фінальна identity в B збігається з A всюди, крім двох задокументованих розбіжностей: `l2_hit_divergent_ai` (A прийняв кешовану гіпотезу 555 без AI; B її не має, свіжа гіпотеза не верифікується → unresolved, придатний до повторного скану) і `l2_wrong_type` (A відновив **tv:777** із кешу без AI; B верифікує свіжу movie-гіпотезу → movie:201). Це саме ті дубльовані політики підтвердження (рік/тип/similarity/походження), які R6 усуває.
+- `l2_wrong_year` у A витратив 2 зайві TMDB-пошуки на верифікацію кешованої назви перед AI; у B їх немає.
+- STOP, outage, rollback і захист confirmed 900 — паритет A/B, регресійна матриця №6/16/28 збережена.
+
+### R6-B. Редактор кандидатів
+
+12 фікстур `TestR6CandidateSearchWithoutL2`. У B послідовність запитів — лише manual → stored TitleEN/TitleUA (для підтвердженого запису) → filename → папка; L2-назва не з’являється в жодній фікстурі. Порівняння з A:
+
+| Фікстура | queries A | queries B | candidates A → B |
+| --- | --- | --- | --- |
+| L2 = TitleEN | [Alpha, Альфа, Name, Dir] | той самий (дедуплікація) | порожньо → порожньо |
+| L2 = TitleUA | **[Альфа, Alpha, Name, Dir]** | [Alpha, Альфа, Name, Dir] | порожньо → порожньо |
+| L2 = інша назва | **[Ghost Alias, Alpha, Альфа, Name, Dir]** | [Alpha, Альфа, Name, Dir] | порожньо → порожньо |
+| L2 = хибна назва / іншого типу | L2-назва першим запитом | без неї | порожньо → порожньо |
+| L2 stale (pipeline 24) | як без L2 (A теж пропускала stale) | [Alpha, Альфа, Name, Dir] | порожньо → порожньо |
+| без L2 | [Alpha, Альфа, Name, Dir] | той самий | порожньо → порожньо |
+| unresolved, без L2 / з L2 | [Name, Dir] — A не читала L2 при `TmdbID=0` | [Name, Dir] | порожньо → порожньо |
+| ручна назва | [Manual Title] перший | той самий | [202] → [202] |
+| confirmed + NeedsReview | [Ghost Alias, Alpha] → current першим | [Alpha] → current першим | [100, 201] → [100, 201] |
+| п’ять позицій із 6 кандидатів | [Name] | [Name] | [301..305] → [301..305] |
+
+- Різниця A/B лише для **підтвердженого запису з історичним L2-рядком**: A ставила L2-назву першим запитом (додатковий typed HTTP і потенційно додаткові кандидати). Оскільки L2-рядок існував лише після успішної AI→TMDB верифікації, його назва відповідає TMDB-оригіналу (збереженому в `TitleEN`), тому покриття кандидатів через stored titles зберігається; окремий перевірений кейс — колишній `TestSearchTMDBCandidatesUsesVerifiedAIResolvedAlias`, переписаний як `TestSearchTMDBCandidatesIgnoresHistoricalAIResolution`: кандидат 89844 у B знаходиться вже за stored TitleEN, а L2-only кандидат 777777 свідомо не шукається.
+- Для unresolved-записів навіть A не читала L2 (guard `TmdbID > 0`), тому втрати там немає. Ручне введення назви, поточний review-кандидат, ліміт п’яти і детермінований порядок — паритет.
+- Висновок 4.4: втрати корисного сценарію, який не покривають інші джерела, не виявлено; ручна функціональність збережена. Межа задокументована: для підтвердженого запису зі старим L2-рядком порядок перших запитів змінився (stored titles раніше за історичну AI-назву).
+
+### Перевірки
+
+| Команда | Результат |
+| --- | --- |
+| `go test . -run '^TestR6' -count=1 -v` (B) | PASS: 3 тести, 24 підсценарії; метрики в `R6A`/`R6B`-рядках журналу. |
+| `go test -overlay=<HEAD R5> . -run '^TestR6' -count=1 -v` (A) | Очікувано FAIL у 5 сценаріях R6-A (L2 читався/писався) і 4 фікстурах R6-B (L2-назва в запитах); решта — паритет. |
+| `go test -overlay=<HEAD R5> . ./internal/tmdb ./internal/ai ./internal/storage -run '^(TestR[1-5].*)' -count=1` (A) | Усі R1–R5 пройшли на базeline. |
+| `go test . ./internal/tmdb ./internal/ai ./internal/storage -run '^(TestR[1-6].*)' -count=1 -v` (B) | 26 PASS, 0 FAIL (R1–R6, включно з №6, №7, №9, №16, №18, №21, №23, №24, №28 через відповідні фікстури). |
+| `go test ./internal/ai ./internal/storage . -count=1` | Пройшли. |
+| `go test ./... -count=1` | Усі 10 пакетів пройшли (root 92 с). |
+| `go vet ./...`, `gofmt -l`, `git diff --check` | exit 0, зауважень немає. |
+| Повторний scan тої самої тимчасової SQLite | `TestR6RescanReplaySameDB`: два `RunScan` поспіль, identity 201 обидва рази, L2 0→0, AI 1+1 у B. Restart із тою самою БД — `TestInitSchemaUpgradesRound24Database` (reopen + InitSchema на старій схемі з `ai_resolutions`, рядок збережено). |
+| Race detector | `CGO_ENABLED=0`, `gcc` відсутній — пропущено, як у R1–R5. Live API, production БД, реальна медіатека, export/sync/push — не використовувалися. |
+
+**Рішення R6 — ACCEPT за офлайн-критеріями.** Автоматичне розпізнавання не читає й не пише `ai_resolutions` (0 читань/записів у B за wire- і row-проксі), редактор не залежить від L2, ручні підказки збережені, identity R1–R5 не змінилися, нових false positive немає, confirmed-записи захищені, STOP і rollback працюють. Ціна — +1 AI inference на кожен файл, що раніше брався з L2 (+4 batch на 12 синтетичних сценаріїв), виміряно й не компенсовано новим кешем. Схема SQLite не змінена, історична таблиця й рядки на місці. Якість на реальній медіатеці та фактичний бюджет AI поза вимірюванням.

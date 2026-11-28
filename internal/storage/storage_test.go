@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 
 	_ "modernc.org/sqlite"
 )
@@ -57,7 +56,7 @@ func TestCleanMissingMoviesKeepsRelativePathKeys(t *testing.T) {
 	}
 }
 
-func TestRecognitionFieldsAndVersionedAICache(t *testing.T) {
+func TestRecognitionFieldsPreserved(t *testing.T) {
 	ctx := context.Background()
 	db, err := New(filepath.Join(t.TempDir(), "movies.db"))
 	if err != nil {
@@ -78,20 +77,6 @@ func TestRecognitionFieldsAndVersionedAICache(t *testing.T) {
 	}
 	if got.RecognitionSource != want.RecognitionSource || !got.NeedsReview || got.ReviewReason != want.ReviewReason || got.VoteAverage != want.VoteAverage || got.VoteCount != want.VoteCount {
 		t.Fatalf("recognition fields lost: %+v", got)
-	}
-
-	updated := time.Date(2026, 9, 12, 10, 0, 0, 0, time.UTC)
-	cache := AIResolution{OriginalFilename: want.Filename, ResolvedTitle: "The Bureau", MediaType: "tv", Confidence: .9, PipelineVersion: 25, Provider: "gemini", Model: "gemini-2.5-flash", UpdatedAt: updated}
-	if err := db.SaveAIResolution(ctx, cache); err != nil {
-		t.Fatal(err)
-	}
-	hit, stale, err := db.GetAIResolution(ctx, want.Filename, 25)
-	if err != nil || stale || hit == nil || hit.Provider != "gemini" || !hit.UpdatedAt.Equal(updated) {
-		t.Fatalf("current cache = %+v stale=%v err=%v", hit, stale, err)
-	}
-	hit, stale, err = db.GetAIResolution(ctx, want.Filename, 26)
-	if err != nil || !stale || hit != nil {
-		t.Fatalf("stale cache = %+v stale=%v err=%v", hit, stale, err)
 	}
 }
 
@@ -121,9 +106,14 @@ func TestInitSchemaUpgradesRound24Database(t *testing.T) {
 	if err != nil || m == nil || m.TmdbID != 7 || m.TitleEN != "Old" {
 		t.Fatalf("old movie lost: %+v %v", m, err)
 	}
-	hit, stale, err := db.GetAIResolution(ctx, "old.mkv", 25)
-	if err != nil || hit != nil || !stale {
-		t.Fatalf("old cache must be stale: %+v stale=%v err=%v", hit, stale, err)
+	// Історична таблиця ai_resolutions має зберігатися як є: рядок не втрачено,
+	// lazy ALTER додав колонки, але робоча логіка таблицю більше не використовує.
+	var cacheRows, pipelineVersion int
+	if err := db.db.QueryRowContext(ctx, "SELECT COUNT(*), COALESCE(MAX(pipeline_version), 0) FROM ai_resolutions").Scan(&cacheRows, &pipelineVersion); err != nil {
+		t.Fatalf("historical ai_resolutions not readable after migration: %v", err)
+	}
+	if cacheRows != 1 || pipelineVersion != 0 {
+		t.Fatalf("historical ai_resolutions changed: rows=%d pipeline_version=%d", cacheRows, pipelineVersion)
 	}
 }
 
@@ -455,30 +445,6 @@ func TestCleanOrphanPostersReportsCheckedAndPreservesDatabasePaths(t *testing.T)
 	}
 	if _, err := os.Stat(orphan); !os.IsNotExist(err) {
 		t.Fatalf("orphan still exists: %v", err)
-	}
-}
-
-func TestStaleAIResolutionCannotOverwriteNewPipeline(t *testing.T) {
-	ctx := context.Background()
-	db, err := New(filepath.Join(t.TempDir(), "movies.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	if err := db.InitSchema(ctx); err != nil {
-		t.Fatal(err)
-	}
-	newer := AIResolution{OriginalFilename: "Film.mkv", ResolvedTitle: "Correct", PipelineVersion: 26, UpdatedAt: time.Now().UTC()}
-	if err := db.SaveAIResolution(ctx, newer); err != nil {
-		t.Fatal(err)
-	}
-	stale := AIResolution{OriginalFilename: "Film.mkv", ResolvedTitle: "Old wrong value", PipelineVersion: 25, UpdatedAt: newer.UpdatedAt.Add(time.Hour)}
-	if err := db.SaveAIResolution(ctx, stale); err != nil {
-		t.Fatal(err)
-	}
-	got, isStale, err := db.GetAIResolution(ctx, "Film.mkv", 26)
-	if err != nil || isStale || got == nil || got.ResolvedTitle != "Correct" {
-		t.Fatalf("new pipeline overwritten: got=%+v stale=%v err=%v", got, isStale, err)
 	}
 }
 

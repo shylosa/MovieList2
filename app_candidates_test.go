@@ -2,12 +2,14 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -59,26 +61,34 @@ func TestSearchTMDBCandidatesUsesFilenameInsteadOfWrongStoredTitle(t *testing.T)
 	}
 }
 
-func TestSearchTMDBCandidatesUsesVerifiedAIResolvedAlias(t *testing.T) {
+func TestSearchTMDBCandidatesIgnoresHistoricalAIResolution(t *testing.T) {
 	ctx := context.Background()
+	var mu sync.Mutex
 	queries := make([]string, 0, 4)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		query := r.URL.Query().Get("query")
+		mu.Lock()
 		queries = append(queries, query)
-		if query == "The Bureau" {
+		mu.Unlock()
+		switch query {
+		case "AI Only Alias":
+			// Кандидат, який повертає лише історична L2-назва. R6: її не має бути у запитах.
+			io.WriteString(w, `{"results":[{"id":777777,"title":"AI Only Alias","original_title":"AI Only Alias","release_date":"2020-01-01"}]}`)
+		case "Le Bureau des légendes":
 			if r.URL.Path == "/3/search/movie" {
-				io.WriteString(w, `{"results":[{"id":802663,"title":"The Bureau","original_title":"The Bureau","release_date":"2020-01-01"}]}`)
+				io.WriteString(w, `{"results":[]}`)
 				return
 			}
-			io.WriteString(w, `{"results":[{"id":62476,"name":"The Bureau","original_name":"Le Bureau des légendes","first_air_date":"2015-04-27"},{"id":89844,"name":"The Bureau","original_name":"The Bureau","first_air_date":"2015-01-01"}]}`)
-			return
+			io.WriteString(w, `{"results":[{"id":62476,"name":"Le Bureau des légendes","original_name":"Le Bureau des légendes","first_air_date":"2015-04-27"},{"id":89844,"name":"The Bureau","original_name":"The Bureau","first_air_date":"2015-01-01"}]}`)
+		default:
+			io.WriteString(w, `{"results":[]}`)
 		}
-		io.WriteString(w, `{"results":[]}`)
 	}))
 	defer server.Close()
 	u, _ := url.Parse(server.URL)
-	db, err := storage.New(filepath.Join(t.TempDir(), "movies.db"))
+	dbDir := t.TempDir()
+	db, err := storage.New(filepath.Join(dbDir, "movies.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,7 +100,16 @@ func TestSearchTMDBCandidatesUsesVerifiedAIResolvedAlias(t *testing.T) {
 	if err := db.SaveMoviesBatch(ctx, []storage.Movie{{Filename: filename, TmdbID: 62476, TitleEN: "Le Bureau des légendes", TitleUA: "Бюро легенд", Year: "2015", MediaType: "tv"}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.SaveAIResolution(ctx, storage.AIResolution{OriginalFilename: filename, ResolvedTitle: "The Bureau", PipelineVersion: recognitionPipelineVersion}); err != nil {
+	// Історичний запис ai_resolutions у старій БД: редактор R6 його не читає.
+	raw, err := sql.Open("sqlite", filepath.Join(dbDir, "movies.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = raw.ExecContext(ctx, `INSERT INTO ai_resolutions (original_filename, resolved_title, year, media_type, confidence, pipeline_version, provider, model, updated_at) VALUES (?, 'AI Only Alias', 2020, 'movie', 0.99, 25, 'gemini', 'gemini-2.5-flash', '2026-01-01T00:00:00Z')`, filename)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
 		t.Fatal(err)
 	}
 	cfg := &config.Config{TMDBAPIKey: "test", PostersDir: t.TempDir()}
@@ -102,10 +121,18 @@ func TestSearchTMDBCandidatesUsesVerifiedAIResolvedAlias(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 2 || got[0].TMDBID != 89844 || got[1].TMDBID != 802663 {
+	// Поточний запис відфільтровано; лишається лише 89844 зі stored_title-запиту.
+	if len(got) != 1 || got[0].TMDBID != 89844 {
 		t.Fatalf("candidates=%+v", got)
 	}
-	if len(queries) < 2 || queries[0] != "The Bureau" || queries[1] != "The Bureau" {
+	mu.Lock()
+	defer mu.Unlock()
+	for _, q := range queries {
+		if q == "AI Only Alias" {
+			t.Fatalf("historical L2 title used as candidate query: %v", queries)
+		}
+	}
+	if len(queries) == 0 || queries[0] != "Le Bureau des légendes" {
 		t.Fatalf("queries=%v", queries)
 	}
 }
@@ -312,7 +339,7 @@ func TestCandidateSearchTitleRejectsFullAndBasenamePlaceholders(t *testing.T) {
 
 func TestCandidateSearchQueriesAreCleanAndDeterministic(t *testing.T) {
 	filename := "Bjuro legend.HDTVRip.GeneralFilm/Bjuro legend.08.HDTVRip.GeneralFilm.avi"
-	queries := candidateSearchQueries(filepath.Base(filename), filename, nil, "")
+	queries := candidateSearchQueries(filepath.Base(filename), filename, nil)
 	if len(queries) == 0 || queries[0].source != "filename" || queries[0].title != "Bjuro legend" {
 		t.Fatalf("queries=%+v", queries)
 	}
@@ -328,7 +355,7 @@ func TestCandidateSearchQueriesAreCleanAndDeterministic(t *testing.T) {
 
 func TestCandidateSearchQueriesPreferManualThenStoredTitle(t *testing.T) {
 	current := &storage.Movie{TmdbID: 62476, TitleEN: "The Bureau", TitleUA: "Бюро легенд", Year: "2015", MediaType: "tv"}
-	queries := candidateSearchQueries("Le Bureau des légendes", "Bjuro legend.08.avi", current, "The Bureau")
+	queries := candidateSearchQueries("Le Bureau des légendes", "Bjuro legend.08.avi", current)
 	want := []candidateQuery{{"manual", "Le Bureau des légendes"}, {"stored_title", "The Bureau"}, {"stored_title", "Бюро легенд"}, {"filename", "Bjuro legend"}}
 	if len(queries) != len(want) {
 		t.Fatalf("queries=%+v", queries)

@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"movielist-app/internal/utils"
 
@@ -40,18 +39,9 @@ type Movie struct {
 	VoteCount             int     `json:"vote_count"`
 }
 
-// AIResolution is the Gemini recognition cache entry (L2 Cache)
-type AIResolution struct {
-	OriginalFilename string
-	ResolvedTitle    string
-	Year             int
-	MediaType        string
-	Confidence       float64
-	PipelineVersion  int
-	Provider         string
-	Model            string
-	UpdatedAt        time.Time
-}
+// Таблиця ai_resolutions залишається в схемі для сумісності з наявними БД,
+// але робоча логіка її більше не читає й не пише (R6). Фізичне видалення —
+// окреме майбутнє рішення.
 
 type DB struct {
 	db *sql.DB
@@ -532,11 +522,6 @@ func (db *DB) CleanMissingMovies(ctx context.Context, actualFiles []string) (int
 				slog.String("file", fname), slog.Any("error", err))
 			return 0, err
 		}
-		if _, err := tx.ExecContext(ctx, "DELETE FROM ai_resolutions WHERE original_filename = ?", fname); err != nil {
-			slog.Warn("clean_ai_resolution_delete_failed",
-				slog.String("file", fname), slog.Any("error", err))
-			return 0, err
-		}
 	}
 	if err := tx.Commit(); err != nil {
 		return 0, err
@@ -598,37 +583,6 @@ func (db *DB) CleanOrphanPosters(ctx context.Context, postersDir string) (int, i
 func (db *DB) DeleteMovieByFilename(ctx context.Context, filename string) error {
 	query := `DELETE FROM movies WHERE filename = ?`
 	_, err := db.db.ExecContext(ctx, query, filename)
-	return err
-}
-
-func (db *DB) GetAIResolution(ctx context.Context, filename string, pipelineVersion int) (*AIResolution, bool, error) {
-	query := `SELECT original_filename, resolved_title, year, media_type, confidence, pipeline_version, provider, model, updated_at FROM ai_resolutions WHERE original_filename = ?`
-	row := db.db.QueryRowContext(ctx, query, filename)
-	var r AIResolution
-	var updated string
-	err := row.Scan(&r.OriginalFilename, &r.ResolvedTitle, &r.Year, &r.MediaType, &r.Confidence, &r.PipelineVersion, &r.Provider, &r.Model, &updated)
-	if err != nil {
-		if err == sql.ErrNoRows {
-			return nil, false, nil
-		}
-		return nil, false, err
-	}
-	r.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updated)
-	if r.PipelineVersion != pipelineVersion {
-		return nil, true, nil
-	}
-	return &r, false, nil
-}
-
-func (db *DB) SaveAIResolution(ctx context.Context, r AIResolution) error {
-	query := `INSERT INTO ai_resolutions (original_filename, resolved_title, year, media_type, confidence, pipeline_version, provider, model, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-	ON CONFLICT(original_filename) DO UPDATE SET resolved_title=excluded.resolved_title, year=excluded.year, media_type=excluded.media_type, confidence=excluded.confidence, pipeline_version=excluded.pipeline_version, provider=excluded.provider, model=excluded.model, updated_at=excluded.updated_at
-	WHERE excluded.pipeline_version > ai_resolutions.pipeline_version
-	   OR (excluded.pipeline_version = ai_resolutions.pipeline_version AND excluded.updated_at >= ai_resolutions.updated_at)`
-	if r.UpdatedAt.IsZero() {
-		r.UpdatedAt = time.Now().UTC()
-	}
-	_, err := db.db.ExecContext(ctx, query, r.OriginalFilename, r.ResolvedTitle, r.Year, r.MediaType, r.Confidence, r.PipelineVersion, r.Provider, r.Model, r.UpdatedAt.Format(time.RFC3339Nano))
 	return err
 }
 
@@ -711,12 +665,6 @@ func (db *DB) GetMoviesByFilenames(ctx context.Context, filenames []string) (map
 	}
 
 	return result, nil
-}
-
-func (db *DB) DeleteAIResolution(ctx context.Context, filename string) error {
-	query := `DELETE FROM ai_resolutions WHERE original_filename = ?`
-	_, err := db.db.ExecContext(ctx, query, filename)
-	return err
 }
 
 // SetState зберігає довільне значення у app_state за ключем (upsert).

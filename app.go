@@ -86,9 +86,8 @@ type AIModelCatalog struct {
 	Available []string `json:"available"`
 }
 
-// aiConfidenceThreshold — єдиний поріг для Gemini, L2-кешу та merge.
+// aiConfidenceThreshold — єдиний поріг confidence для AI-гіпотези та її merge з TMDB.
 const aiConfidenceThreshold = 0.55
-const recognitionPipelineVersion = 25
 
 // geminiTMDBVerifyMinJW — мінімальна схожість EN-назви Gemini і TMDB після верифікації.
 const geminiTMDBVerifyMinJW = 0.85
@@ -300,11 +299,6 @@ func (a *App) DeleteMovie(filename string) error {
 		oldID = m.TmdbID
 	}
 	logger.Debug("catalog_record_deleted", slog.String("file", filename), slog.Int("previous_tmdb_id", oldID))
-
-	// 🔴 ХІРУРГІЧНЕ ВТРУЧАННЯ: Очищаємо сліди з L2 кешу ШІ
-	if err := a.db.DeleteAIResolution(a.ctx, filename); err != nil {
-		slog.Warn("delete_ai_resolution_failed", slog.String("file", filename), slog.Any("error", err))
-	}
 
 	a.logFront(fmt.Sprintf("🗑 Видалено: %s", filename))
 	return nil
@@ -1197,47 +1191,9 @@ func (a *App) processScanResults(ctx context.Context, results <-chan scanResult)
 				translationQueue = append(translationQueue, res.fname)
 			}
 		} else {
-			// 🟢 ПЕРЕВІРКА L2 КЕШУ: Чи не розпізнавали ми цей файл раніше через ШІ?
-			cached, stale, err := a.db.GetAIResolution(ctx, res.fname, recognitionPipelineVersion)
-			if err != nil {
-				utils.LoggerWithTrace(ctx).Warn("get_ai_resolution_failed", slog.String("file", res.fname), slog.Any("error", err))
-			}
-			if stale {
-				utils.LoggerWithTrace(ctx).Info("ai_cache_stale", slog.String("file", res.fname), slog.Int("pipeline_version", recognitionPipelineVersion))
-			}
-			if cached != nil && cached.Confidence >= aiConfidenceThreshold {
-				utils.LoggerWithTrace(ctx).Info("ai_cache_hit", slog.String("file", res.fname), slog.String("resolved", cached.ResolvedTitle), slog.Int("pipeline_version", cached.PipelineVersion))
-
-				// Використовуємо кешовану назву для пошуку в TMDB
-				info, err := a.tmdbClient.FetchByCleanTitle(ctx, cached.ResolvedTitle, strconv.Itoa(cached.Year), tmdb.MediaType(cached.MediaType))
-				if ctx.Err() != nil || errors.Is(err, context.Canceled) {
-					continue
-				}
-				if err != nil {
-					utils.LoggerWithTrace(ctx).Warn("tmdb_l2_verification_failed", slog.String("file", res.fname), slog.Any("error", err))
-					a.logFront(fmt.Sprintf("⚠️ TMDB помилка перевірки L2 для '%s': %v", res.fname, err))
-					toSave = append(toSave, buildUnresolvedMovie(res.fname, res.path))
-					continue
-				}
-				if info != nil && info.TMDBID > 0 {
-					jw := tmdb.TitleSimilarity(cached.ResolvedTitle, info.TitleEN)
-					if info.MatchedAlias != "" {
-						if jwAlias := tmdb.TitleSimilarity(cached.ResolvedTitle, info.MatchedAlias); jwAlias > jw {
-							jw = jwAlias
-						}
-					}
-					cachedYear := cached.Year
-					if jw >= geminiTMDBVerifyMinJW && geminiTMDBYearCompatible(0, &cachedYear, info.Year) {
-						movie := movieFromTMDB(res.fname, info)
-						toSave = append(toSave, movie)
-						a.logFront(fmt.Sprintf("⚡ L2-Кеш: '%s' → '%s'", res.fname, info.TitleUA))
-						if a.movieInfoNeedsTranslation(info) {
-							translationQueue = append(translationQueue, res.fname)
-						}
-						continue
-					}
-				}
-			}
+			// Чистий промах TMDB (NO_MATCH): файл іде до чинної AI-черги.
+			// Історичний кеш ai_resolutions не читається — нова AI-гіпотеза
+			// перевіряється через TMDB тим самим механізмом, що й будь-яка інша.
 			if ctx.Err() == nil {
 				geminiQueue = append(geminiQueue, res.path)
 			}
@@ -1347,7 +1303,6 @@ func (a *App) processGeminiQueue(ctx context.Context, paths []string, aiClient *
 
 		var moviesToSave []storage.Movie
 		var batchRecognized []string
-		var resolutions []storage.AIResolution
 		for j, path := range batch {
 			if ctx.Err() != nil {
 				return recognizedFiles
@@ -1424,16 +1379,6 @@ func (a *App) processGeminiQueue(ctx context.Context, paths []string, aiClient *
 			}
 			moviesToSave = append(moviesToSave, movie)
 			batchRecognized = append(batchRecognized, fname)
-			resolutions = append(resolutions, storage.AIResolution{
-				OriginalFilename: fname,
-				ResolvedTitle:    rec.ENTitle,
-				Year:             yearVal,
-				MediaType:        rec.MediaType,
-				Confidence:       rec.Confidence,
-				PipelineVersion:  recognitionPipelineVersion,
-				Provider:         rec.Provider,
-				Model:            rec.Model,
-			})
 		}
 
 		if len(moviesToSave) > 0 {
@@ -1442,16 +1387,6 @@ func (a *App) processGeminiQueue(ctx context.Context, paths []string, aiClient *
 				continue
 			}
 			recognizedFiles = append(recognizedFiles, batchRecognized...)
-			for _, resolution := range resolutions {
-				if ctx.Err() != nil {
-					return recognizedFiles
-				}
-				if err := a.db.SaveAIResolution(ctx, resolution); err != nil {
-					utils.LoggerWithTrace(ctx).Warn("save_ai_resolution_failed", slog.String("file", resolution.OriginalFilename), slog.Any("error", err))
-				} else {
-					utils.LoggerWithTrace(ctx).Info("ai_cache_updated", slog.String("file", resolution.OriginalFilename), slog.Int("pipeline_version", recognitionPipelineVersion))
-				}
-			}
 		}
 	}
 
@@ -1905,13 +1840,7 @@ func (a *App) SearchTMDBCandidates(request CandidateSearchRequest) ([]tmdb.TMDBC
 	if getErr != nil {
 		return nil, fmt.Errorf("candidate lookup current movie: %w", getErr)
 	}
-	resolvedTitle := ""
-	if cached, stale, cacheErr := a.db.GetAIResolution(ctx, request.Filename, recognitionPipelineVersion); cacheErr != nil {
-		return nil, fmt.Errorf("candidate lookup AI resolution: %w", cacheErr)
-	} else if cached != nil && !stale {
-		resolvedTitle = cached.ResolvedTitle
-	}
-	queries := candidateSearchQueries(request.Title, request.Filename, current, resolvedTitle)
+	queries := candidateSearchQueries(request.Title, request.Filename, current)
 	if len(queries) == 0 {
 		return []tmdb.TMDBCandidate{}, nil
 	}
@@ -2058,7 +1987,7 @@ func candidateSearchTitle(title, filename string) string {
 
 type candidateQuery struct{ source, title string }
 
-func candidateSearchQueries(title, filename string, current *storage.Movie, resolvedTitle string) []candidateQuery {
+func candidateSearchQueries(title, filename string, current *storage.Movie) []candidateQuery {
 	queries := make([]candidateQuery, 0, 4)
 	seen := make(map[string]bool)
 	add := func(source, value string) {
@@ -2072,7 +2001,6 @@ func candidateSearchQueries(title, filename string, current *storage.Movie, reso
 	}
 	add("manual", candidateSearchTitle(title, filename))
 	if current != nil && current.TmdbID > 0 {
-		add("stored_title", resolvedTitle)
 		add("stored_title", current.TitleEN)
 		add("stored_title", current.TitleUA)
 	}
@@ -2150,9 +2078,6 @@ func (a *App) ConfirmTMDBCandidate(request CandidateConfirmRequest) error {
 	utils.LoggerWithTrace(ctx).Info("candidate_confirmed",
 		slog.String("file", request.Filename), slog.Int("tmdb_id", request.TMDBID), slog.String("media_type", string(mediaType)),
 		slog.Duration("details_duration", detailsDuration), slog.Duration("foreground_duration", time.Since(startedAt)))
-	if err := a.db.DeleteAIResolution(ctx, request.Filename); err != nil {
-		return err
-	}
 	needsTranslation := a.aiClient != nil && (existing.TitleUA == "" || needsTranslation(existing.TitleUA) || existing.Plot == "" || needsTranslation(existing.Plot))
 	if info.PosterURL != "" || needsTranslation {
 		filename, expectedID, expectedMediaType := request.Filename, request.TMDBID, string(mediaType)
@@ -2413,7 +2338,6 @@ func (a *App) updateMovieWithMediaType(ctx context.Context, filename, hint, requ
 		if err := a.db.SaveMoviesBatch(ctx, []storage.Movie{*existing}); err != nil {
 			return err
 		}
-		_ = a.db.DeleteAIResolution(ctx, filename)
 		logger.Info("imdb_hint_resolved",
 			slog.Int("tmdb_id", info.TMDBID),
 			slog.String("media_type", string(info.MediaType)),
@@ -2438,14 +2362,14 @@ func (a *App) updateMovieWithMediaType(ctx context.Context, filename, hint, requ
 				if err := a.db.SaveMoviesBatch(ctx, []storage.Movie{*existing}); err != nil {
 					return err
 				}
-				return a.db.DeleteAIResolution(ctx, filename)
+				return nil
 			}
 			applyTMDBToMovie(existing, info)
 
 			if err := a.db.SaveMoviesBatch(ctx, []storage.Movie{*existing}); err != nil {
 				return err
 			}
-			return a.db.DeleteAIResolution(ctx, filename)
+			return nil
 		}
 		return fmt.Errorf("TMDB ID %d не знайдено", tmdbID)
 	}
@@ -2481,7 +2405,6 @@ func (a *App) updateMovieWithMediaType(ctx context.Context, filename, hint, requ
 		if err := a.db.SaveMoviesBatch(ctx, []storage.Movie{*existing}); err != nil {
 			return err
 		}
-		_ = a.db.DeleteAIResolution(ctx, filename)
 		logger.Info("manual_title_resolved", slog.Int("tmdb_id", info.TMDBID), slog.String("media_type", string(info.MediaType)), slog.String("title", info.TitleEN))
 		logger.Debug("manual_title_saved", slog.String("title_ua", existing.TitleUA), slog.Bool("needs_title_localization", existing.TitleUA == "" || needsTranslation(existing.TitleUA)))
 		return nil
@@ -2517,28 +2440,6 @@ func (a *App) updateMovieWithMediaType(ctx context.Context, filename, hint, requ
 		existing.NeedsReview = true
 		existing.ReviewReason = "identity_conflict"
 		return a.db.SaveMoviesBatch(ctx, []storage.Movie{*existing})
-	}
-
-	if movie.TmdbID > 0 {
-		yearVal := 0
-		if rec.Year != nil {
-			yearVal = *rec.Year
-		}
-		if err := a.db.SaveAIResolution(ctx, storage.AIResolution{
-			OriginalFilename: filename,
-			ResolvedTitle:    rec.ENTitle,
-			Year:             yearVal,
-			MediaType:        rec.MediaType,
-			Confidence:       rec.Confidence,
-			PipelineVersion:  recognitionPipelineVersion,
-			Provider:         rec.Provider,
-			Model:            rec.Model,
-		}); err != nil {
-			slog.Warn("save_ai_resolution_failed",
-				slog.String("file", filename), slog.Any("error", err))
-		} else {
-			utils.LoggerWithTrace(ctx).Info("ai_cache_updated", slog.String("file", filename), slog.Int("pipeline_version", recognitionPipelineVersion))
-		}
 	}
 
 	// Доповнюємо прогалини лише для тієї самої identity. Під час ручної
