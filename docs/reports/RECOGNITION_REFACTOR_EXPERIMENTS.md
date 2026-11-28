@@ -973,3 +973,78 @@ U означає SQLite placeholder з `NeedsReview=true` та `ReviewReason=unr
 | `CGO_ENABLED=1 go test -race . ./internal/ai ./internal/tmdb -run '^TestR(12A\|10A\|8)' -count=1` | Збірку зупинила відсутність `gcc` у PATH. |
 
 Перевірки використали офлайн-транспорти, тимчасову SQLite, тимчасовий `GOCACHE` і `GOPROXY=off`.
+
+## R13-A. Розширення у ParseFilename
+
+A — `main` на `3496a60b4779909c6418164aa1ee679be149f2b0`. B — робоче дерево з локальною зміною `ParseFilename`. Обидві версії перевірено тим самим набором фікстур. Для повторення A після зміни достатньо Go overlay, який підміняє `internal/tmdb/parser.go` версією із зазначеного коміту. [Перевірки парсера](../../internal/tmdb/parser_test.go), [офлайн-сценарій координатора](../../app_r13a_filename_extensions_test.go)
+
+Підтверджено два дефекти. По-перше, `ParseFilename` знімав суфікс із basename, а потім додавав його до входу `go-ptn`. Прямий виклик `go-ptn v1.0.0` для `Охрана звёзд.mkv` повернув `Container=mkv` і `Title="Охрана звёзд.mkv"`. Для `Film.mp4` повернув `Title="Film mp4"`. Бібліотека прибирає контейнер з рядка, за яким шукає технічні маркери, і формує назву зі зрізу вхідного рядка. Без маркера, який обмежує кінець зрізу, до заголовка потрапляє контейнер. Рік або роздільна здатність відсікали його у фікстурах Guarding Stars.
+
+По-друге, `filepath.Ext` трактував останній фрагмент після крапки як розширення. Це скорочувало `OriginalName` заголовків і папок та приховувало фрагмент від попередніх детекторів. Для точного `Назва.2026` рік 2026 повертав сам `go-ptn`. Для `Назва.2О26` попередня нормалізація року не бачила суфікса і результатом був рік 0. Аналогічно `S07` у назві без розширення не доходив до детектора сезону. Парсер повторно використовує чинний `reExt` із пакета TMDB, який охоплює ті самі чотири формати, що й сканер. У `go-ptn` надходить підготовлена назва без повторного додавання суфікса. [Реалізація](../../internal/tmdb/parser.go#L38), [reExt](../../internal/tmdb/search.go#L1097), [формати сканера](../../internal/scanner/scanner.go#L22)
+
+### A/B парсера
+
+У кожній фікстурі тест звіряє сім полів `ParsedFile`. У колонці «Різниця» наведено всі поля, для яких A і B повернули різні значення. `TitleLang`, `ParentDir` та `IMDBID` збіглися у всіх фікстурах. `TT1375666` у шляху дав `IMDBID=tt1375666` і `ParentDir=TT1375666` в обох версіях.
+
+| Сценарій | CleanTitle A | CleanTitle B | Year A/B | Type A/B | Різниця |
+| --- | --- | --- | --- | --- | --- |
+| `Охрана звёзд.mkv` | Охрана звёзд.mkv | Охрана звёзд | 0/0 | movie/movie | Контейнер у заголовку |
+| `Охрана звёзд.2026.mkv` | Охрана звёзд | Охрана звёзд | 2026/2026 | movie/movie | Збіг |
+| `Охрана звёзд.1080p.mkv` | Охрана звёзд | Охрана звёзд | 0/0 | movie/movie | Збіг |
+| `Охрана звёзд.2026.1080p.mkv` | Охрана звёзд | Охрана звёзд | 2026/2026 | movie/movie | Збіг |
+| `Film.mp4` | Film mp4 | Film | 0/0 | movie/movie | Контейнер у заголовку |
+| `Film.2024.avi` | Film | Film | 2024/2024 | movie/movie | Збіг |
+| `Film.mov` | Film mov | Film | 0/0 | movie/movie | Контейнер у заголовку |
+| `Film.MKV` | Film MKV | Film | 0/0 | movie/movie | Контейнер у заголовку |
+| `Film.Mp4` | Film Mp4 | Film | 0/0 | movie/movie | Контейнер у заголовку |
+| `Mr. & Mrs. Smith.mkv` | Mr. & Mrs. Smith.mkv | Mr. & Mrs. Smith | 0/0 | movie/movie | Контейнер у заголовку |
+| `Dr. Strangelove.1964.mkv` | Dr. Strangelove | Dr. Strangelove | 1964/1964 | movie/movie | Збіг |
+| `WALL.E.2008.mkv` | WALL E | WALL E | 2008/2008 | movie/movie | Збіг |
+| `Назва.2026` | Назва | Назва | 2026/2026 | movie/movie | Повний `OriginalName` |
+| `Назва` | Назва | Назва | 0/0 | movie/movie | Збіг |
+| `Mr. & Mrs. Smith` | Mr. & Mrs. Smith | Mr. & Mrs. Smith | 0/0 | movie/movie | Повний `OriginalName` |
+| `Dr. Strangelove` | Dr. Strangelove | Dr. Strangelove | 0/0 | movie/movie | Повний `OriginalName` |
+| `WALL.E` | WALL E | WALL E | 0/0 | movie/movie | Повний `OriginalName` |
+| `Movies/Назва.2026`, папка | Назва | Назва | 2026/2026 | movie/movie | Повний `OriginalName` |
+| `Shows/S01E01.The.Boys.mkv` | The Boys | The Boys | 0/0 | tv/tv | Збіг |
+| `Shows/The.Rookie.S07.mkv` | The Rookie mkv | The Rookie | 0/0 | tv/tv | Контейнер у заголовку |
+| `Movies/TT1375666/Початок.2010.mkv` | Початок | Початок | 2010/2010 | movie/movie | Збіг |
+| `Film.Title.2xUkr.[2xUkr,Eng].2021.mkv` | Film Title | Film Title | 2021/2021 | movie/movie | Збіг |
+| `Fracture.Open.Matte.2007.WEB-DLRip.by.Seven.avi` | Fracture | Fracture | 2007/2007 | movie/movie | Збіг |
+| `Once.Upon.a.Time` | Once Upon a Time | Once Upon a Time | 0/0 | movie/movie | Повний `OriginalName` |
+| `Movies/Далека планета.mov` | Далека планета.mov | Далека планета | 0/0 | movie/movie | Контейнер у заголовку |
+| `Назва.2О26`, кирилична `О` | Назва 2О26 | Назва | 0/2026 | movie/movie | `OriginalName`, `CleanTitle`, `Year` |
+| `Shows/The.Rookie.S07`, без розширення | The Rookie S07 | The Rookie | 0/0 | movie/tv | `OriginalName`, `CleanTitle`, `MediaType` |
+
+### A/B автоматичного пошуку Guarding Stars
+
+Один синтетичний шлях у корені джерела передано до `recognizeAutomaticScan` для кожного запуску. Тестовий транспорт TMDB повертає результат пошуку тільки на точний `query=Охрана звёзд`. Деталі повертають `movie:1551025` з українським заголовком та описом. Gemini замінено loopback-сервером, SQLite створено в тимчасовій директорії. [Фікстура](../../app_r13a_filename_extensions_test.go), [координатор](../../recognition_coordinator.go#L44)
+
+Нижче наведено фактичну послідовність HTTP із декодованим `query` та вилученим параметром `api_key`. Усі запити використовують GET. Запит `D` означає `/3/movie/1551025?append_to_response=credits&language=uk-UA`.
+
+| Файл | URL у A | URL у B | Search HTTP | TMDB HTTP разом | AI inference |
+| --- | --- | --- | ---: | ---: | ---: |
+| `Охрана звёзд.mkv` | 1. `/3/search/movie?language=uk-UA&query=Охрана звёзд mkv`<br>2. `/3/search/movie?language=ru-RU&query=Охрана звёзд mkv`<br>3. `/3/search/movie?language=uk-UA&query=Охрана звёзд`<br>4. `D` | 1. `/3/search/movie?language=uk-UA&query=Охрана звёзд`<br>2. `D` | 3 → 1 | 4 → 2 | 0 → 0 |
+| `Охрана звёзд.2026.mkv` | 1. `/3/search/movie?language=uk-UA&query=Охрана звёзд&year=2026`<br>2. `D` | 1. `/3/search/movie?language=uk-UA&query=Охрана звёзд&year=2026`<br>2. `D` | 1 → 1 | 2 → 2 | 0 → 0 |
+| Разом | | | 4 → 2 | 6 → 4 | 0 → 0 |
+
+Для обох файлів правильна identity `movie:1551025 → movie:1551025`. За двома фікстурами correct identity становить 2 → 2, false positive 0 → 0, unresolved 0 → 0. Для простого файла A доходить до чистого запиту завдяки чинному кандидату з оригінального basename. B має чисту назву на першій спробі. У кожному прогоні збережено один SQLite-рядок із відповідним `filename`, `tmdb_id=1551025`, `media_type=movie`, `year="2026"`, `title_en="Guarding Stars"`, `title_ua="Охорона зірок"`, `recognition_source=tmdb`, `needs_review=false` і порожнім `review_reason`. Для файла без року `ParsedFile.Year=0`, а збережений рік походить із деталей TMDB. [Формування кандидатів](../../internal/tmdb/search.go#L1172)
+
+Історичний скан Guarding Stars уже використовував чисту назву та рік 2026. Відповідь живого TMDB на цей запит і результат повторного реального скану після R13-A залишаються неперевіреними. Кінцівку текстової назви, яка буквально збігається з одним із чотирьох відеосуфіксів, парсер за самим рядком трактує як розширення. [Історичний аудит](AI_TMDB_FALLBACK_AUDIT.md#5-guarding-stars)
+
+### Перевірки
+
+| Команда | Результат |
+| --- | --- |
+| `go test ./internal/tmdb -run '^TestR13AParseFilenameExtensions$' -v -count=1` | На A 16 із 27 фікстур виявили розбіжності з контрактом. На B пройшли всі 27. |
+| `go test . -run '^TestR13AFilenameExtensionsAutomaticScan$' -v -count=1` | На A через Go overlay простий файл виконув два зайві пошукові HTTP. На B обидві фікстури пройшли. |
+| `go test ./internal/tmdb -count=3`, `go test ./internal/ai -count=1`, `go vet ./...` | Пройшли. |
+| `go test . -count=1`, `go test ./... -count=1` | Пройшли. Повний прогін охопив 10 пакетів. |
+| `go test . ./internal/tmdb ./internal/ai ./internal/utils ./internal/storage -run '^(TestR([1-9]\|1[013])([^0-9]\|$)\|TestTypedSearchBaseline.*\|TestHasCyrillic\|TestRunScan\|TestRecognitionSave\|TestDetectGroupedTV\|TestGroupedTVConflict)' -count=1` | Іменовані регресії R1–R11 і R13-A пройшли. Фільтр не вибрав окремих тестів storage. |
+| `go test . -run '^(TestR13AFilenameExtensionsAutomaticScan\|TestRunScanCancellationPreservesShowcaseAndState\|TestDetectGroupedTVCancellation\|TestFixSelectedCompletionTreatsCancellationAsFailure)$' -count=1` | Пройшли. |
+| `go test ./internal/tmdb -run '^(TestR8\|TestR2Cancellation\|TestR3DetailsCancellation\|TestR4AutomaticCancellation\|TestSearchWithFallbacksStopsAfterCancellation)' -count=3` | Три повтори пройшли. |
+| `.\testdata\r12a\compare.ps1` | 25 фікстур і паралельна перевірка пройшли в обох варіантах R12-A. Штатний маршрут R12-A зберіг 4 правильні identity і 0 хибних. Відхилений прототип знову відтворив 2 хибні identity. |
+| `CGO_ENABLED=1 go test -race . ./internal/ai ./internal/tmdb -run '^TestR(13A\|12A\|10A\|8)' -count=1` | Збірку зупинила відсутність компілятора `gcc` у PATH. |
+| `gofmt -l` для всіх Go-файлів у Git і нового тесту, `git diff --check` | Без діагностик. |
+
+**Рішення R13-A — ACCEPT за офлайн-критеріями.** У робочому Go-коді 4 додані й 5 вилучених рядків. Тести додали 153 рядки. Перевірки виконано з офлайн-транспортами, тимчасовою SQLite й вимкненими live opt-in.

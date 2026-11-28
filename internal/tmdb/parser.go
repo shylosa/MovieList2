@@ -34,11 +34,9 @@ var reFrontEpisode = regexp.MustCompile(`(?i)^(s\d{2}e\d{2}[\.\.\-\s_]+)(.*)`)
 // reIMDB — детектор IMDb ID (tt1234567)
 var reIMDB = regexp.MustCompile(`(?i)\btt\d{7,10}\b`)
 
-// Оновлюємо ParseFilename, щоб він приймав ПОВНИЙ шлях
+// ParseFilename приймає шлях або назву файла чи папки, а також текстову назву.
 func ParseFilename(fullPath string) ParsedFile {
-	name := filepath.Base(fullPath)
-	ext := filepath.Ext(name)
-	name = strings.TrimSuffix(name, ext)
+	name := reExt.ReplaceAllString(filepath.Base(fullPath), "")
 
 	result := ParsedFile{
 		OriginalName: name,
@@ -85,7 +83,8 @@ func ParseFilename(fullPath string) ParsedFile {
 	nameForPTN = trimTechnicalReleaseTail(nameForPTN)
 	nameForPTN = strings.TrimSpace(nameForPTN)
 
-	info, err := ptn.Parse(nameForPTN + ext)
+	// go-ptn може повернути контейнер у Title, навіть якщо розпізнав розширення.
+	info, err := ptn.Parse(nameForPTN)
 	if err != nil || info == nil {
 		result.CleanTitle = cleanFallback(name)
 		result.MediaType = MediaTypeMovie
