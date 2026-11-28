@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -756,74 +757,190 @@ func TestR9BQueueOutcomes(t *testing.T) {
 }
 
 func TestR9BFixSelectedVerificationOutcome(t *testing.T) {
-	fixSelectedApp := func(t *testing.T, titles map[string]int, failQuery string) (*App, string, *atomic.Int32, map[int]string) {
-		a, dir := newTestAppDB(t, nil)
-		a.cfg.MediaFolderPath = dir
-		a.cfg.PostersDir = t.TempDir()
-		a.cfg.TMDBAPIKey = "fixture"
-		a.cfg.GeminiAPIKey = "fixture"
-		a.cfg.GeminiModels = []string{"gemini-2.5-flash"}
-		rec := &r9bRecorder{}
-		a.tmdbClient = tmdb.NewClient(a.cfg)
-		t.Cleanup(func() { a.tmdbClient.Close() })
-		a.tmdbClient.SetTransport(rec.roundTrip(r9bQueueTMDB(t, titles, failQuery, nil)))
-		a.aiClient = ai.NewClient(a.cfg)
-		aiCalls := &atomic.Int32{}
-		pending := map[int]string{0: "Alpha Origin"}
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			body, _ := io.ReadAll(r.Body)
-			aiCalls.Add(1)
-			var rows []map[string]any
-			for slot, title := range pending {
-				if strings.Contains(string(body), fmt.Sprintf("recognition-%d", slot)) {
-					rows = append(rows, map[string]any{
-						"id": slot, "request_id": fmt.Sprintf("recognition-%d", slot),
-						"original_file": "A.2024.mkv", "en_title": title,
-						"year": 2024, "media_type": "movie", "status": "resolved", "confidence": 0.98,
-					})
+	const filename = "F00.2024.mkv"
+	const title = "Alpha Origin"
+	const id = 10101
+	confirmed := storage.Movie{
+		Filename: filename, TmdbID: 900, MediaType: "movie", TitleEN: "Previous Title",
+		Year: "2024", Plot: "Previous English plot.", NeedsReview: true, ReviewReason: "previous_review",
+	}
+	unresolved := storage.Movie{
+		Filename: filename, TitleEN: "Previous Hypothesis", NeedsReview: true, ReviewReason: "unresolved",
+	}
+	transportErr := errors.New("fixture transport error")
+	for _, tc := range []struct {
+		name, hint, mediaType string
+		failure, wantErr      string
+		fix, wantFailed, stop bool
+		existing              []storage.Movie
+		wantID, writes, http  int
+		aiCalls               int32
+	}{
+		{name: "24a_update_movie_found", wantID: id, writes: 1, aiCalls: 1, http: 3},
+		{name: "24b_update_movie_http_500_returns_error", failure: "500", wantErr: "TMDB HTTP 500", aiCalls: 1, http: 3},
+		{name: "update_movie_no_match", failure: "no_match", writes: 1, aiCalls: 1, http: 8},
+		{name: "update_movie_transport", failure: "transport", wantErr: transportErr.Error(), existing: []storage.Movie{confirmed}, wantID: 900, aiCalls: 1, http: 3},
+		{name: "update_movie_invalid_json", failure: "json", wantErr: "invalid TMDB response", existing: []storage.Movie{unresolved}, aiCalls: 1, http: 3},
+		{name: "update_movie_details_id_mismatch", failure: "identity", wantErr: "TMDB details identity mismatch", aiCalls: 1, http: 3},
+		{name: "update_movie_stop_before_tmdb", failure: "stop_before", stop: true, aiCalls: 1},
+		{name: "update_movie_stop_during_tmdb", failure: "stop_during", stop: true, aiCalls: 1, http: 1, existing: []storage.Movie{unresolved}},
+		{name: "update_movie_commit_failure", failure: "commit", wantErr: "batch commit failed", aiCalls: 1, http: 3},
+		{name: "fix_selected_empty_hint_queue", fix: true, failure: "500", wantFailed: true, existing: []storage.Movie{unresolved}, writes: 1, aiCalls: 1, http: 3},
+		{name: "fix_selected_empty_hint_confirmed", fix: true, failure: "500", wantFailed: true, existing: []storage.Movie{confirmed}, wantID: 900, aiCalls: 1, http: 3},
+		{name: "fix_selected_explicit_type", fix: true, mediaType: "movie", wantID: id, writes: 1, aiCalls: 1, http: 2},
+		{name: "fix_selected_explicit_type_error", fix: true, mediaType: "movie", failure: "500", wantFailed: true, aiCalls: 1, http: 3},
+		{name: "fix_selected_stop_during_tmdb", fix: true, mediaType: "movie", failure: "stop_during", stop: true, aiCalls: 1, http: 1},
+		{name: "fix_selected_exact_title", fix: true, hint: title, wantID: id, writes: 1, http: 3},
+		{name: "fix_selected_tmdb_id", fix: true, hint: "10101", wantID: id, writes: 1, http: 1},
+		{name: "fix_selected_imdb_id", fix: true, hint: "tt1234567", wantID: id, writes: 1, http: 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			stop := func() { cancel() }
+
+			titles := map[string]int{title: id}
+			if tc.failure == "no_match" {
+				titles = nil
+			}
+			respond := r9bQueueTMDB(t, titles, "", nil)
+			a, dir, rec, aiCalls := r9bQueueHarness(t, tc.existing, func(req *http.Request) r9bResp {
+				switch req.URL.Path {
+				case "/3/find/tt1234567":
+					return r9bOK(`{"movie_results":[{"id":10101,"title":"Alpha Origin","release_date":"2024-01-01"}]}`)
+				case "/3/movie/10101":
+					if tc.failure == "identity" {
+						return r9bOK(`{"id":10102,"title":"Alpha Origin"}`)
+					}
+				case "/3/search/movie":
+					switch tc.failure {
+					case "500":
+						return r9bOutage()
+					case "transport":
+						return r9bResp{err: transportErr}
+					case "json":
+						return r9bOK("{")
+					case "stop_during":
+						stop()
+						return r9bResp{err: req.Context().Err()}
+					}
+				}
+				return respond(req)
+			}, map[int]string{0: title})
+			a.ctx = ctx
+			if tc.fix {
+				stop = a.StopScan
+			}
+			var completion string
+			localizations := 0
+			a.eventEmitter = func(_ context.Context, name string, args ...interface{}) {
+				switch name {
+				case "log-message":
+					message := args[0].(string)
+					if tc.failure == "stop_before" && strings.Contains(message, "Gemini: '") {
+						cancel()
+					}
+					if strings.Contains(message, "Аналіз локалізації") {
+						localizations++
+					}
+				case "scan-finished":
+					completion = args[0].(string)
 				}
 			}
-			reply, _ := json.Marshal(rows)
-			w.Header().Set("Content-Type", "application/json")
-			fmt.Fprintf(w, `{"candidates":[{"content":{"parts":[{"text":%q}]}}]}`, reply)
-		}))
-		t.Cleanup(server.Close)
-		t.Setenv("GOOGLE_GEMINI_BASE_URL", server.URL)
-		return a, dir, aiCalls, pending
+
+			raw, err := sql.Open("sqlite", filepath.Join(dir, "movies.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer raw.Close()
+			// Рахуємо також upsert, який залишає значення рядка такими самими.
+			_, err = raw.ExecContext(t.Context(), `
+				CREATE TABLE movie_writes(id INTEGER);
+				CREATE TRIGGER count_insert AFTER INSERT ON movies BEGIN INSERT INTO movie_writes VALUES (NEW.tmdb_id); END;
+				CREATE TRIGGER count_update AFTER UPDATE ON movies BEGIN INSERT INTO movie_writes VALUES (NEW.tmdb_id); END;`)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.failure == "commit" {
+				_, err = raw.ExecContext(t.Context(), `
+					CREATE TABLE fixture_parent(id INTEGER PRIMARY KEY);
+					CREATE TABLE fixture_guard(id INTEGER REFERENCES fixture_parent(id) DEFERRABLE INITIALLY DEFERRED);
+					CREATE TRIGGER fixture_abort AFTER INSERT ON movies BEGIN INSERT INTO fixture_guard VALUES (1); END;`)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			before, err := a.db.GetAllMovies(t.Context())
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			var updateErr error
+			if tc.fix {
+				a.FixSelected([]FixRequest{{Filename: filename, Hint: tc.hint, MediaType: tc.mediaType}})
+			} else {
+				updateErr = a.UpdateMovie(filename, "")
+			}
+
+			after, err := a.db.GetAllMovies(t.Context())
+			if err != nil {
+				t.Fatal(err)
+			}
+			var writes int
+			if err := raw.QueryRowContext(t.Context(), "SELECT count(*) FROM movie_writes").Scan(&writes); err != nil {
+				t.Fatal(err)
+			}
+			var ids []int
+			for _, row := range after {
+				ids = append(ids, row.TmdbID)
+			}
+			recognitions := a.aiClient.CallMetrics().RecognitionBatch
+			t.Logf("R11A recognition=%d ai=%d tmdb=%v writes=%d ids=%v unchanged=%t localization=%d canceled=%t error=%t completion=%q",
+				recognitions, aiCalls.Load(), rec.snapshot(), writes, ids, slices.Equal(before, after), localizations,
+				errors.Is(updateErr, context.Canceled), updateErr != nil, completion)
+
+			if tc.fix {
+				want := "Успішно виправлено: 1; не виправлено: 0"
+				if tc.wantFailed {
+					want = "Успішно виправлено: 0; не виправлено: 1"
+				}
+				if tc.stop {
+					want = "Виправлення перервано користувачем"
+				}
+				if completion != want {
+					t.Errorf("completion = %q, want %q", completion, want)
+				}
+			} else if tc.stop {
+				if !errors.Is(updateErr, context.Canceled) || updateErr != ctx.Err() {
+					t.Errorf("error = %v, want ctx.Err()", updateErr)
+				}
+			} else if tc.wantErr == "" {
+				if updateErr != nil {
+					t.Errorf("unexpected error: %v", updateErr)
+				}
+			} else if updateErr == nil || !strings.Contains(updateErr.Error(), tc.wantErr) {
+				t.Errorf("error = %v, want %q", updateErr, tc.wantErr)
+			}
+			if tc.failure == "transport" && !errors.Is(updateErr, transportErr) {
+				t.Errorf("transport cause missing from error: %v", updateErr)
+			}
+
+			if tc.stop && a.db.GetState(t.Context(), "last_scan_at") != "" {
+				t.Error("last_scan_at changed after STOP")
+			}
+			if writes != tc.writes || rec.count() != tc.http || aiCalls.Load() != tc.aiCalls || recognitions != int64(tc.aiCalls) || localizations != 0 {
+				t.Errorf("writes/TMDB/AI/recognition/localization = %d/%d/%d/%d/%d, want %d/%d/%d/%d/0",
+					writes, rec.count(), aiCalls.Load(), recognitions, localizations, tc.writes, tc.http, tc.aiCalls, tc.aiCalls)
+			}
+			if tc.writes == 0 && !slices.Equal(before, after) {
+				t.Errorf("SQLite row changed: before=%+v after=%+v", before, after)
+			}
+			if (tc.writes != 0 || len(tc.existing) != 0) && !slices.Equal(ids, []int{tc.wantID}) {
+				t.Errorf("stored TMDB IDs = %v, want [%d]", ids, tc.wantID)
+			}
+			if tc.wantID == id && tc.aiCalls == 1 && len(after) == 1 && (after[0].MediaType != "movie" || after[0].RecognitionSource != "gemini") {
+				t.Errorf("unexpected confirmed identity or source: %+v", after[0])
+			}
+		})
 	}
-
-	t.Run("24a_fix_selected_found", func(t *testing.T) {
-		a, _, aiCalls, _ := fixSelectedApp(t, map[string]int{"Alpha Origin": 101}, "")
-		if err := a.updateMovieWithMediaType(context.Background(), "A.2024.mkv", "", ""); err != nil {
-			t.Fatalf("FixSelected FOUND: err=%v, want nil", err)
-		}
-		got, err := a.db.GetMovieByFilename(t.Context(), "A.2024.mkv")
-		if err != nil || got == nil || got.TmdbID != 101 || got.RecognitionSource != "gemini" {
-			t.Fatalf("FixSelected FOUND row: %+v err=%v, want TmdbID=101 source=gemini", got, err)
-		}
-		if aiCalls.Load() != 1 {
-			t.Fatalf("FixSelected FOUND: AI calls=%d, want 1", aiCalls.Load())
-		}
-	})
-
-	t.Run("24b_fix_selected_tmdb_error_keeps_current_behavior", func(t *testing.T) {
-		// Знахідка R9-B: ручний шлях не повертає TMDB_ERROR як error з
-		// updateMovieWithMediaType — merge повертає його явно, але updateMovie
-		// лише логує й іде чинною логікою movie.TmdbID == 0.
-		a, _, aiCalls, _ := fixSelectedApp(t, map[string]int{}, "Alpha Origin")
-		err := a.updateMovieWithMediaType(context.Background(), "A.2024.mkv", "", "")
-		if err != nil {
-			t.Fatalf("FixSelected TMDB_ERROR: чинна поведінка — err=nil, got %v", err)
-		}
-		got, dbErr := a.db.GetMovieByFilename(t.Context(), "A.2024.mkv")
-		if dbErr != nil {
-			t.Fatal(dbErr)
-		}
-		if got == nil || got.TmdbID != 0 {
-			t.Fatalf("FixSelected TMDB_ERROR row: %+v, want unresolved TmdbID=0", got)
-		}
-		if aiCalls.Load() != 1 {
-			t.Fatalf("FixSelected TMDB_ERROR: AI calls=%d, want 1", aiCalls.Load())
-		}
-	})
 }
