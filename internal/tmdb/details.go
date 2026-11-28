@@ -335,8 +335,9 @@ func (c *Client) loadTypedDetails(ctx context.Context, mediaType MediaType, id i
 
 // GetDetails — публічний диспетчер: викликає movie або tv залежно від типу.
 // originalFilename використовується тільки для іменування файлу постера.
-// Одночасні запити тієї самої identity об'єднує singleflight; повторний
-// незалежний виклик завжди отримує свіжу відповідь TMDB.
+// Кожен виклик — незалежний запит до TMDB із власним context: результат не
+// кешується й не об'єднується з одночасними запитами інших операцій, тому
+// скасування одного caller не впливає на інших.
 func (c *Client) GetDetails(ctx context.Context, mediaType MediaType, id int, originalFilename string) (*MovieInfo, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -344,23 +345,8 @@ func (c *Client) GetDetails(ctx context.Context, mediaType MediaType, id int, or
 	if id <= 0 || (mediaType != MediaTypeMovie && mediaType != MediaTypeTV) {
 		return nil, fmt.Errorf("valid TMDB identity required")
 	}
-	key := fmt.Sprintf("%s:%d", mediaType, id)
-	result := c.detailsGroup.DoChan(key, func() (any, error) {
-		return c.loadTypedDetails(ctx, mediaType, id)
-	})
-	var info *MovieInfo
-	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	case loaded := <-result:
-		if loaded.Err != nil || loaded.Val == nil {
-			return nil, loaded.Err
-		}
-		// Кожен читач отримує власну копію: LocalPosterPath залежить від файла.
-		copy := *(loaded.Val.(*MovieInfo))
-		info = &copy
-	}
-	if err := ctx.Err(); err != nil {
+	info, err := c.loadTypedDetails(ctx, mediaType, id)
+	if err != nil {
 		return nil, err
 	}
 	if info.PosterURL != "" && originalFilename != "" {

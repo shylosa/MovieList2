@@ -23,7 +23,6 @@ import (
 	"movielist-app/internal/config"
 	"movielist-app/internal/utils"
 
-	"golang.org/x/sync/singleflight"
 	"golang.org/x/time/rate"
 )
 
@@ -84,9 +83,6 @@ type Client struct {
 	mediaRootMu sync.RWMutex
 	rateLimiter *rate.Limiter
 
-	// detailsGroup об'єднує лише одночасні запити тієї самої identity; це не
-	// кеш між операціями, результат ніде не зберігається.
-	detailsGroup singleflight.Group
 	searchCalls  atomic.Int64
 	detailsCalls atomic.Int64
 }

@@ -452,3 +452,76 @@ HTTP 404 завершує конкретний URL за одну спробу і
 - Якість на реальній медіатеці та фактичний HTTP-бюджет поза офлайн-вимірюванням.
 
 **Рішення R7 — ACCEPT за офлайн-критеріями.** `detailsCache` і `candidateDetailsCache` вилучено без заміни; читань/записів цих кешів немає; нових кешів немає; identity R1–R6 збережено (оракул A/B); R3 identity validation, локалізаційний водоспад, preview, confirm, Repair, per-file постери, cancellation і STOP працюють; метрики не містять фіктивного cache-hit; додаткові HTTP виміряно. Wails API, події, SQLite schema, frontend не змінено.
+
+## R8. Remove TMDB Details Singleflight
+
+Базова лінія A — HEAD R7 (`b43d4c4f6224bf29d4b28371abb25b4f70a72197`, окремий git worktree `/d/movielist2/r8-baseline-a`). B — робоче дерево після R8. Однакові офлайн-фікстури: `internal/tmdb/r8_ab_test.go` і `internal/tmdb/r8_independent_details_test.go` скопійовано у worktree A; обидва файли використовують лише публічний API клієнта та хелпери, що існують на обох сторонах, тому компілюються й на A, і на B. Оракул: `(MediaType, TMDB ID)` для кожного результату `GetDetails`/`RefreshDetails`/`GetCandidateDetails` і per-file `LocalPosterPath`; HTTP-лічильники логуються `R8_AB`-рядками й порівнюються вручну. Усі вхідні дані синтетичні, без sleep — бар'єри, канали й `testing/synctest`.
+
+### R8-A. Що видалено
+
+- Поле `Client.detailsGroup singleflight.Group` і import `golang.org/x/sync/singleflight` з `internal/tmdb` (`golang.org/x/sync` лишається в `go.mod`: `modelsGroup` у `app.go` для catalog RPC не є частиною R8).
+- `GetDetails` спрощено до одного шляху: перевірка ctx → валідація `id > 0` і типу → прямий `loadTypedDetails(ctx, mediaType, id)` → per-file `DownloadPoster` → повернення. Без `DoChan`, без копії shared-результату (кожен виклик і так отримує власний `*MovieInfo`), без додаткового select. Публічні сигнатури `GetDetails`, `RefreshDetails`, `GetCandidateDetails` не змінено. Нового кешу, координатора чи shared context не додано. [client.go](../../internal/tmdb/client.go), [details.go](../../internal/tmdb/details.go)
+
+### R8-C. Незалежне скасування (детерміновані регресії)
+
+| Тест B | Результат на B | На A (R7) |
+| --- | --- | --- |
+| `TestR8FirstCallerCancelDoesNotAffectIndependentWaiter` | перший caller — `context.Canceled`, другий із живим ctx — успіх `movie:42`, 2 незалежні HTTP, наступний виклик — ще 1 HTTP | **FAIL**: waiter успадкував `context.Canceled` від першого caller (1 HTTP) — колишній дефект `TestR7SingleflightFirstCallerCancelAffectsWaiters` |
+| `TestR8SecondCallerCancelDoesNotAffectFirst` | другий — `context.Canceled`, перший успішний | PASS (цей напрямок R7 уже підтримував) |
+| `TestR8SharedParentCancelStopsBothCallers` | обидва `context.Canceled`, лише uk-UA у wire, жодного постера, ≤2 HTTP | PASS (1 HTTP) |
+| `TestR8CancelDuringPosterDownload` | `context.Canceled`, wire = 1 details + 1 poster, каталог постерів порожній | PASS (так само) |
+| `TestR8ErrorIsolationBetweenIndependentCallers` | caller A — HTTP 500 після 9 спроб (3 мови × 3 retry), caller B — успіх; помилки не переходять | **FAIL**: B успадкував 500 від shared-запуску A |
+| `TestR8ConcurrentReadersFetchIndependently` | 20 читачів → 20 HTTP, усі `movie:42`, далі ще 1 свіжий | **FAIL**: 1 HTTP (singleflight) |
+| `TestR8TwoFilesSameIdentityConcurrentSeparatePosters` | 2 details + 2 постери, окремі `42_a_mkv.jpg`/`42_b_mkv.jpg` на диску | **FAIL за лічильником**: details=1 (постери й так per-file) |
+| `TestR8IndependentScanAndEditorContexts` | scan і editor із незалежними ctx — 2 HTTP; cancel editor не шкодить scan, наступний scan-виклик — ще 1 HTTP | **FAIL**: 1 HTTP (shared запуск) |
+
+### R8-D. A/B HTTP та identity (однакові фікстури, оракул identity зійшовся на A і B у всіх 15 сценаріях)
+
+| Сценарій | HTTP A (R7) | HTTP B (R8) | Деталі A→B | Постери A→B | Identity A/B |
+| --- | ---: | ---: | ---: | ---: | --- |
+| 1. один GetDetails `movie:42` + файл | 2 | 2 | 1 → 1 | 1 → 1 | movie:42 / movie:42 |
+| 2. послідовні повтори GetDetails | 3 | 3 | 2 → 2 | 1 → 1 | обидва свіжі (versioned title змінюється) |
+| 3. 2 одночасні callers однієї identity | **1** | **2** | 1 → 2 | 0 | обидва movie:42 |
+| 4. 20 одночасних callers однієї identity | **1** | **20** | 1 → 20 | 0 | 20 × movie:42 |
+| 5. 20 callers різних identity (100–119) | 20 | 20 | 20 → 20 | 0 | усі правильні |
+| 6. movie:42 + tv:42 одночасно | 2 | 2 | 2 → 2 | 0 | типи не змішані (`Фільм`/`Серіал`) |
+| 7. cancel першого caller | 1; waiter = `context.Canceled` (дефект A) | 2; waiter = успіх | 1 → 2 | 0 | — / другий успішний |
+| 8. cancel другого caller | 1 | 2 | 1 → 2 | 0 | перший ok / перший ok |
+| 9. cancel спільного parent | 1 | 2 | 1 → 2 | 0 | обидва canceled, лише uk-UA |
+| 10. outage 500 + retry + recovery | 10 | 10 | 9 + 1 → 9 + 1 | 0 | помилка 500, далі успіх |
+| 11. два filename, одна identity | 4 | 4 | 2 → 2 | 2 → 2 | окремі постери на диску |
+| 12. preview → confirm | 3 | 3 | 2 → 2 | 1 → 1 | movie:42 |
+| 13. Refresh після GetDetails | 2 | 2 | 2 → 2 | 0 | movie:42, свіжа відповідь |
+| 14. Repair-рівень: RefreshDetails `tv:42` | 1 | 1 | 1 → 1 | 0 | tv:42 |
+| 15. cancel під час постера | 2 | 2 | 1 → 1 | 1 → 1 | context.Canceled, каталог порожній |
+
+Додаткові HTTP лише в одночасних сценаріях тої самої identity: 2→2 замість 1 (сценарій 3), 1→20 (сценарій 4), +1 у cancel-сценаріях 7–9. Послідовні, різні identity, outage/retry, preview/confirm/refresh/repair, per-file постери — паритет. Retry (3 спроби на URL, паузи 1/2 с, без retry на 404 і cancellation) і rate limiter не змінено; лічильники `detailsCalls`/`searchCalls` працюють у тих самих точках.
+
+### R8-E. Оновлені тести
+
+- `r7_singleflight_test.go` видалено; на заміну `r8_independent_details_test.go` (8 тестів вище + `TestR8FreshDetailsAfterTMDBChange`, `TestR8PreviewFreshAfterTMDBChange`, перенесені без змін суті). Колишній дефект `TestR7SingleflightFirstCallerCancelAffectsWaiters` замінено позитивною регресією `TestR8FirstCallerCancelDoesNotAffectIndependentWaiter`, яка детерміновано падає на R7 (перевірено запуском у worktree A) і проходить на B.
+- `candidate_details_test.go`: `TestGetDetailsConcurrentReadersShareMetadataWaterfall` (20 читачів = 1 запит) адаптовано до нового контракту як `TestGetDetailsConcurrentReadersIndependentRequests` (20 читачів = 20 запитів, усі з правильною identity); `TestGetDetailsWaitingReaderHonorsCancellation` збережено з фіксом подвійного `close(started)` — другий читач тепер робить власний HTTP, і скасування його ctx перериває лише його запит.
+- `r8_ab_test.go` — A/B-фікстури 15 сценаріїв, оракул identity + лог HTTP; `r7_ab_test.go` лишено без змін і проходить на B.
+
+### Перевірки
+
+| Команда | Результат |
+| --- | --- |
+| `go test ./internal/tmdb -run '^TestR8' -count=1 -v` на B | PASS; `R8_AB`-рядки дають таблицю вище |
+| ті самі файли скопійовано у worktree A (HEAD R7): `go test ./internal/tmdb -run '^TestR8' -count=1` | `TestR8ABScenarios` PASS (оракул identity збігся); 5 регресійних тестів FAIL із фіксованими повідомленнями shared-ctx/merged-requests — доказ, що регресії справді падають на R7 |
+| `go test ./internal/tmdb -count=3` | ok (23 s) |
+| `go test ./... -count=1` | усі 10 пакетів ok (root 90 s) |
+| `go test ./internal/tmdb . -run '^(TestR[1-8].*\|…регресії R1–R7, cancellation, Repair…)$' -count=1` | ok — адресні регресії R1–R8 разом |
+| `go test ./internal/tmdb -run '^(TestR8\|TestGetDetailsConcurrentReadersIndependentRequests\|TestGetDetailsWaitingReaderHonorsCancellation\|TestR2ParallelFileContexts\|TestR3DetailsCancellation)$' -count=50` | 50 повторів пройшли без флейків |
+| `go vet ./...`, `gofmt -l`, `git diff --check` | exit 0, зауважень немає |
+| `CGO_ENABLED=1 go test -race ./internal/tmdb -run '^TestR8'` | `cgo: C compiler "gcc" not found` — race detector недоступний у цьому середовищі (як у R1–R7); race-safety не заявляється як доведена |
+| Live TMDB/AI API, production SQLite, реальна медіатека | не використовувалися |
+
+### Ризики та межі
+
+- Одночасні запити однієї identity більше не об'єднуються: +1 details HTTP на кожного додаткового одночасного читача (20 читачів: 1 → 20). Для персонального каталогу (~100 фільмів, до 10 воркерів) це прийнятно; rate limiter (50 мс, burst 5) залишається єдиним захистом.
+- Скасування тепер діє лише на власний context запиту: STOP scan перериває лише операції scan, ручна операція редактора зі своїм ctx не страждає від STOP і навпаки — це і є мета R8.
+- Послідовні повтори, outage/retry, preview/confirm/refresh/repair, per-file постери — паритет HTTP із R7; свіжість відповідей збережена.
+- Якість на реальній медіатеці та фактичний HTTP-бюджет поза офлайн-вимірюванням; race detector не запускався (немає gcc).
+
+**Рішення R8 — ACCEPT за офлайн-критеріями.** `detailsGroup` повністю видалено, нового кешу/shared-request manager немає; незалежне скасування працює (регресія падає на R7 і зелена на R8), shared parent STOP працює; identity R1–R7 збережено оракулом A/B у 15 сценаріях, нових false positive немає; per-file poster правильний; preview/confirm/Repair працюють; додаткові HTTP виміряно (лише одночасні запити однієї identity); код `GetDetails` став простішим — один прямий шлях без неявного об'єднання. Wails API, події, SQLite schema, frontend не змінено. Наступний етап R9 — спрощення координації автоматичного розпізнавання в пакеті main.

@@ -62,7 +62,9 @@ func TestPreferredLocalizedTextPriorities(t *testing.T) {
 	}
 }
 
-func TestGetDetailsConcurrentReadersShareMetadataWaterfall(t *testing.T) {
+// R8: singleflight видалено — 20 одночасних читачів виконують 20 незалежних
+// waterfall-запитів (раніше об'єднувалися в 1), кожен отримує правильну identity.
+func TestGetDetailsConcurrentReadersIndependentRequests(t *testing.T) {
 	var calls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		calls.Add(1)
@@ -92,16 +94,19 @@ func TestGetDetailsConcurrentReadersShareMetadataWaterfall(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if got := calls.Load(); got != 1 {
-		t.Fatalf("metadata waterfall requests=%d, want 1", got)
+	if got := calls.Load(); got != readers {
+		t.Fatalf("independent waterfall requests=%d, want %d (one per reader, no singleflight)", got, readers)
 	}
 }
 
+// R8: без singleflight другий читач робить власний HTTP-запит; скасування його
+// власного context перериває лише його запит — перший завершується успішно.
 func TestGetDetailsWaitingReaderHonorsCancellation(t *testing.T) {
 	started := make(chan struct{})
+	var once sync.Once
 	release := make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		close(started)
+		once.Do(func() { close(started) })
 		<-release
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"id":43,"title":"Українська назва","original_title":"English","release_date":"2024-01-01","overview":"Український опис","genres":[],"credits":{"cast":[]}}`))
