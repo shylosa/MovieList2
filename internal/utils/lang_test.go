@@ -2,6 +2,29 @@ package utils
 
 import "testing"
 
+func TestHasCyrillic(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		text string
+		want bool
+	}{
+		{"cyrillic", "Назва", true},
+		{"latin", "Signal", false},
+		{"mixed", "Signal і місто", true},
+		{"unicode_other_scripts", "é東京🙂", false},
+		{"unicode_extended_cyrillic", "🙂Ꙁ", true},
+		{"yo", "ё", true},
+		{"ye", "е", true},
+		{"empty", "", false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := HasCyrillic(tt.text); got != tt.want {
+				t.Errorf("HasCyrillic(%q) = %v; want %v", tt.text, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestCyrillicToLatinDoubleConsonants(t *testing.T) {
 	tests := []struct {
 		input    string

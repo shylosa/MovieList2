@@ -45,12 +45,11 @@ func (c *Client) SearchCandidates(ctx context.Context, title string, year int, r
 			if err := ctx.Err(); err != nil {
 				return err
 			}
-			searchURL := fmt.Sprintf("%s/search/%s?api_key=%s&query=%s&language=%s", baseURL, mediaType, c.apiKey, url.QueryEscape(query), language)
-			var resp tmdbSearchResponse
-			if err := c.doRequestWithRetry(ctx, searchURL, &resp); err != nil {
+			results, err := c.searchTyped(ctx, mediaType, query, language, 0)
+			if err != nil {
 				return err
 			}
-			for _, result := range resp.Results {
+			for _, result := range results {
 				if err := ctx.Err(); err != nil {
 					return err
 				}
@@ -128,7 +127,7 @@ func (c *Client) SearchCandidates(ctx context.Context, title string, year int, r
 	return out, nil
 }
 
-// tmdbSearchResult — один результат з /search/multi
+// tmdbSearchResult — один результат типізованого пошуку.
 type tmdbSearchResult struct {
 	ID               int     `json:"id"`
 	MediaType        string  `json:"media_type"`
@@ -145,6 +144,30 @@ type tmdbSearchResult struct {
 // tmdbSearchResponse is shared by typed /search/movie and /search/tv responses.
 type tmdbSearchResponse struct {
 	Results []tmdbSearchResult `json:"results"`
+}
+
+func (c *Client) searchTyped(ctx context.Context, mediaType MediaType, query, language string, queryYear int) ([]tmdbSearchResult, error) {
+	searchURL := fmt.Sprintf("%s/search/%s?api_key=%s&query=%s&language=%s",
+		baseURL, mediaType, c.apiKey, url.QueryEscape(query), language)
+	if queryYear > 0 {
+		yearParam := "year"
+		if mediaType == MediaTypeTV {
+			yearParam = "first_air_date_year"
+		}
+		searchURL += fmt.Sprintf("&%s=%d", yearParam, queryYear)
+	}
+
+	utils.LoggerWithTrace(ctx).Debug("search_attempt",
+		slog.String("component", "tmdb_search_cascade"),
+		slog.String("lang", language),
+		slog.String("endpoint", string(mediaType)),
+		slog.String("url", maskAPIKey(searchURL)),
+	)
+	var resp tmdbSearchResponse
+	if err := c.doRequestWithRetry(ctx, searchURL, &resp); err != nil {
+		return nil, err
+	}
+	return resp.Results, nil
 }
 
 // scoredResult — кандидат з підрахованим балом
@@ -171,35 +194,31 @@ func (c *Client) SearchExactTitle(ctx context.Context, title string, year int, p
 	norm := normalizeForCompare(title)
 	var best *scoredResult
 	var exactCandidates []*scoredResult
-	endpoints := []struct {
-		name      string
-		typeValue MediaType
-	}{{"movie", MediaTypeMovie}, {"tv", MediaTypeTV}}
+	types := []MediaType{MediaTypeMovie, MediaTypeTV}
 	if strictType {
 		if preferredType == MediaTypeTV {
-			endpoints = endpoints[1:]
+			types = types[1:]
 		} else {
-			endpoints = endpoints[:1]
+			types = types[:1]
 		}
 	}
-	for _, ep := range endpoints {
-		searchURL := fmt.Sprintf("%s/search/%s?api_key=%s&query=%s&language=en-US", baseURL, ep.name, c.apiKey, url.QueryEscape(title))
-		var resp tmdbSearchResponse
-		if err := c.doRequestWithRetry(ctx, searchURL, &resp); err != nil {
+	for _, mediaType := range types {
+		results, err := c.searchTyped(ctx, mediaType, title, "en-US", 0)
+		if err != nil {
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
 			}
 			return nil, err
 		}
-		for index, result := range resp.Results {
-			result.MediaType = string(ep.typeValue)
+		for index, result := range results {
+			result.MediaType = string(mediaType)
 			score, resultYear, exact := manualCandidateScore(result, norm, year, preferredType)
 			matchedAlias := ""
 			if exact && normalizeForCompare(coalesce(result.OriginalTitle, result.OriginalName)) != norm {
 				matchedAlias = coalesce(result.Title, result.Name)
 			}
 			if !exact && index < 3 {
-				aliases, aliasErr := c.getAlternativeTitles(ctx, result.ID, ep.typeValue)
+				aliases, aliasErr := c.getAlternativeTitles(ctx, result.ID, mediaType)
 				if aliasErr == nil {
 					for _, alias := range aliases {
 						if normalizeForCompare(alias) == norm {
@@ -416,7 +435,7 @@ func (c *Client) SearchWithFallbacks(
 
 		// Після провалу CYR-пошуку для варіанта "Папка" — EN cascade через латинську транслітерацію.
 		// Інакше cached null по кириличному запиту блокує EN-пошук (напр. "Скарпетта" → "Scarpetta").
-		if a.label == "Папка" && hasCyrillicChars(a.query) {
+		if a.label == "Папка" && utils.HasCyrillic(a.query) {
 			if err := ctx.Err(); err != nil {
 				return nil, err
 			}
@@ -528,7 +547,7 @@ func isScanRootParent(filename, mediaRoot string) bool {
 	return rel == "."
 }
 
-// searchAndFetch виконує один запит до TMDB, ранжує результати,
+// searchAndFetch виконує каскад пошукових запитів до TMDB, ранжує результати,
 // і якщо знайшов переможця — витягує повні деталі.
 // 🔴 КАСКАД ПОШУКУ: Шукаємо в обох індексах (UA + RU) для кириличних запитів
 func (c *Client) searchAndFetch(
@@ -562,9 +581,17 @@ func (c *Client) searchAndFetch(
 
 	// 🔴 КАСКАД ПОШУКУ: Шукаємо в обох індексах для кириличних запитів
 	langs := []string{"en-US"}
-	if hasCyrillicChars(query) {
+	if utils.HasCyrillic(query) {
 		// Для кириличних запитів пробуємо спочатку UA, потім RU
 		langs = []string{"uk-UA", "ru-RU"}
+	}
+
+	types := []MediaType{MediaTypeMovie, MediaTypeTV}
+	switch preferredType {
+	case MediaTypeMovie:
+		types = types[:1]
+	case MediaTypeTV:
+		types = types[1:]
 	}
 
 	var bestGlobal *scoredResult
@@ -575,56 +602,12 @@ LANG_LOOP:
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		type searchEndpoint struct {
-			name             string
-			yearParam        string
-			defaultMediaType string
-		}
-
-		var endpoints []searchEndpoint
-		switch preferredType {
-		case MediaTypeMovie:
-			yearParam := ""
-			if queryYear > 0 {
-				yearParam = fmt.Sprintf("&year=%d", queryYear)
-			}
-			endpoints = []searchEndpoint{{"movie", yearParam, "movie"}}
-		case MediaTypeTV:
-			yearParam := ""
-			if queryYear > 0 {
-				yearParam = fmt.Sprintf("&first_air_date_year=%d", queryYear)
-			}
-			endpoints = []searchEndpoint{{"tv", yearParam, "tv"}}
-		default:
-			movieYear := ""
-			tvYear := ""
-			if queryYear > 0 {
-				movieYear = fmt.Sprintf("&year=%d", queryYear)
-				tvYear = fmt.Sprintf("&first_air_date_year=%d", queryYear)
-			}
-			endpoints = []searchEndpoint{
-				{"movie", movieYear, "movie"},
-				{"tv", tvYear, "tv"},
-			}
-		}
-
-		for _, ep := range endpoints {
+		for _, mediaType := range types {
 			if err := ctx.Err(); err != nil {
 				return nil, err
 			}
-			searchURL := fmt.Sprintf(
-				"%s/search/%s?api_key=%s&query=%s&language=%s%s",
-				baseURL, ep.name, c.apiKey, url.QueryEscape(query), langParam, ep.yearParam,
-			)
-
-			logger.Debug("search_attempt",
-				slog.String("lang", langParam),
-				slog.String("endpoint", ep.name),
-				slog.String("url", maskAPIKey(searchURL)),
-			)
-
-			var resp tmdbSearchResponse
-			if err := c.doRequestWithRetry(ctx, searchURL, &resp); err != nil {
+			results, err := c.searchTyped(ctx, mediaType, query, langParam, queryYear)
+			if err != nil {
 				if ctx.Err() != nil {
 					return nil, ctx.Err()
 				}
@@ -632,29 +615,29 @@ LANG_LOOP:
 				continue
 			}
 
-			for i := range resp.Results {
-				if resp.Results[i].MediaType == "" {
+			for i := range results {
+				if results[i].MediaType == "" {
 					if preferredType != "" {
-						resp.Results[i].MediaType = string(preferredType)
+						results[i].MediaType = string(preferredType)
 					} else {
-						resp.Results[i].MediaType = ep.defaultMediaType
+						results[i].MediaType = string(mediaType)
 					}
 				}
 			}
 
-			if len(resp.Results) == 0 {
-				logger.Debug("no_results_for_lang", slog.String("lang", langParam), slog.String("endpoint", ep.name))
+			if len(results) == 0 {
+				logger.Debug("no_results_for_lang", slog.String("lang", langParam), slog.String("endpoint", string(mediaType)))
 				continue
 			}
 
-			bestForLang := c.rankResults(ctx, resp.Results, query, targetYear, preferredType)
+			bestForLang := c.rankResults(ctx, results, query, targetYear, preferredType)
 			if err := ctx.Err(); err != nil {
 				return nil, err
 			}
 			if bestForLang != nil {
 				logger.Debug("best_for_lang",
 					slog.String("lang", langParam),
-					slog.String("endpoint", ep.name),
+					slog.String("endpoint", string(mediaType)),
 					slog.String("title", coalesce(bestForLang.result.Title, bestForLang.result.Name)),
 					slog.Int("score", bestForLang.score),
 				)
@@ -708,7 +691,7 @@ LANG_LOOP:
 		}
 		// Keep the returned title, never the query. Cyrillic titles are trusted
 		// as verification aliases only after an exact TMDB response match.
-		if !hasCyrillicChars(query) || normalizeForCompare(query) == normalizeForCompare(coalesce(bestGlobal.result.Title, bestGlobal.result.Name)) {
+		if !utils.HasCyrillic(query) || normalizeForCompare(query) == normalizeForCompare(coalesce(bestGlobal.result.Title, bestGlobal.result.Name)) {
 			info.SearchTitle = coalesce(bestGlobal.result.Title, bestGlobal.result.Name)
 		}
 		info.AmbiguousExact = bestGlobal.ambiguous
@@ -930,7 +913,7 @@ func (c *Client) scoreResult(
 	identityScore := score
 
 	// --- Мова оригіналу ---
-	queryIsCyrillic := hasCyrillicChars(normQuery)
+	queryIsCyrillic := utils.HasCyrillic(normQuery)
 	switch res.OriginalLanguage {
 	case "uk":
 		langScore = ScoreLangUA
@@ -1199,14 +1182,4 @@ func abs(x int) int {
 		return -x
 	}
 	return x
-}
-
-// hasCyrillicChars перевіряє, чи містить рядок кириличні символи
-func hasCyrillicChars(s string) bool {
-	for _, r := range s {
-		if unicode.Is(unicode.Cyrillic, r) {
-			return true
-		}
-	}
-	return false
 }

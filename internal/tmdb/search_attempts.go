@@ -3,6 +3,8 @@ package tmdb
 import (
 	"context"
 	"strings"
+
+	"movielist-app/internal/utils"
 )
 
 type searchAttemptsKey struct{}
@@ -23,7 +25,7 @@ func withSearchAttempts(ctx context.Context) context.Context {
 func claimSearchAttempt(ctx context.Context, query string, queryYear, targetYear int, mediaType MediaType) bool {
 	seen := ctx.Value(searchAttemptsKey{}).(map[attemptIdentity]bool)
 	locales := "en-US"
-	if hasCyrillicChars(query) {
+	if utils.HasCyrillic(query) {
 		locales = "uk-UA,ru-RU"
 	}
 	key := attemptIdentity{SearchCacheKey{strings.ToLower(strings.TrimSpace(query)), queryYear, targetYear, mediaType}, locales}

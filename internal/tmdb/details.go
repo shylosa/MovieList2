@@ -91,12 +91,12 @@ func (c *Client) getMovieDetails(ctx context.Context, id int, originalFilename s
 			}
 		} else {
 			// Якщо поточний опис порожній АБО він англійський, а новий - кириличний (RU) -> перезаписуємо!
-			if finalInfo.Plot == "" || (!hasCyrillicChars(finalInfo.Plot) && hasCyrillicChars(d.Overview)) {
+			if finalInfo.Plot == "" || (!utils.HasCyrillic(finalInfo.Plot) && utils.HasCyrillic(d.Overview)) {
 				finalInfo.Plot = d.Overview
 			}
 
 			// Те саме робимо для назви
-			if finalInfo.TitleUA == "" || finalInfo.TitleUA == finalInfo.TitleEN || (!hasCyrillicChars(finalInfo.TitleUA) && hasCyrillicChars(d.Title)) {
+			if finalInfo.TitleUA == "" || finalInfo.TitleUA == finalInfo.TitleEN || (!utils.HasCyrillic(finalInfo.TitleUA) && utils.HasCyrillic(d.Title)) {
 				if d.Title != "" {
 					finalInfo.TitleUA = d.Title
 				}
@@ -178,10 +178,10 @@ func (c *Client) getTVDetails(ctx context.Context, id int, originalFilename stri
 				finalInfo.PosterURL = imageBaseURL + d.PosterPath
 			}
 		} else {
-			if finalInfo.Plot == "" || (!hasCyrillicChars(finalInfo.Plot) && hasCyrillicChars(d.Overview)) {
+			if finalInfo.Plot == "" || (!utils.HasCyrillic(finalInfo.Plot) && utils.HasCyrillic(d.Overview)) {
 				finalInfo.Plot = d.Overview
 			}
-			if finalInfo.TitleUA == "" || finalInfo.TitleUA == finalInfo.TitleEN || (!hasCyrillicChars(finalInfo.TitleUA) && hasCyrillicChars(d.Name)) {
+			if finalInfo.TitleUA == "" || finalInfo.TitleUA == finalInfo.TitleEN || (!utils.HasCyrillic(finalInfo.TitleUA) && utils.HasCyrillic(d.Name)) {
 				if d.Name != "" {
 					finalInfo.TitleUA = d.Name
 				}
