@@ -97,7 +97,7 @@ func TestGeminiCascadeFallback(t *testing.T) {
 		w.Write([]byte(`{
 			"candidates": [{
 				"content": {
-					"parts": [{"text": "[{\"original_file\":\"test.mkv\",\"en_title\":\"Success Movie\",\"media_type\":\"movie\"}]"}]
+					"parts": [{"text": "[{\"request_id\":\"recognition-0\",\"original_file\":\"test.mkv\",\"en_title\":\"Success Movie\",\"media_type\":\"movie\"}]"}]
 				}
 			}]
 		}`))

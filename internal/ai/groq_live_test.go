@@ -95,6 +95,10 @@ func TestLiveGroqRecognition(t *testing.T) {
 			}
 			for i, item := range cases {
 				got := result[i]
+				if got == nil {
+					t.Errorf("missing recognition for item %d", i)
+					continue
+				}
 				year := 0
 				if got.Year != nil {
 					year = *got.Year

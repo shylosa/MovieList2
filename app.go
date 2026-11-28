@@ -1345,11 +1345,6 @@ func (a *App) processGeminiQueue(ctx context.Context, paths []string, aiClient *
 			continue
 		}
 
-		recognizedMap := make(map[int]ai.RecognizedTitle, len(results))
-		for _, r := range results {
-			recognizedMap[r.ID] = r
-		}
-
 		var moviesToSave []storage.Movie
 		var batchRecognized []string
 		var resolutions []storage.AIResolution
@@ -1359,9 +1354,9 @@ func (a *App) processGeminiQueue(ctx context.Context, paths []string, aiClient *
 			}
 			processed++
 			fname := a.getFileIdentifier(path)
-			rec, ok := recognizedMap[j]
+			rec := results[j]
 
-			if !ok {
+			if rec == nil {
 				utils.LoggerWithTrace(ctx).Warn("gemini_recognition_missing",
 					slog.String("file", fname),
 					slog.Int("batch", currentBatchIdx),
@@ -1419,7 +1414,7 @@ func (a *App) processGeminiQueue(ctx context.Context, paths []string, aiClient *
 
 			a.emitProgress(processed, total, "🤖 Gemini: "+rec.ENTitle)
 
-			movie := a.mergeGeminiWithTMDB(ctx, path, rec)
+			movie := a.mergeGeminiWithTMDB(ctx, path, *rec)
 			if ctx.Err() != nil {
 				return recognizedFiles
 			}
@@ -2497,12 +2492,12 @@ func (a *App) updateMovieWithMediaType(ctx context.Context, filename, hint, requ
 
 	geminiCtx := ai.FileRecognitionContextFromPath(filename)
 	results, err := a.aiClient.RecognizeBulk(ctx, []ai.FileRecognitionContext{geminiCtx})
-	if err != nil || len(results) == 0 {
+	if err != nil || results[0] == nil {
 		a.logFront(fmt.Sprintf("❌ Gemini не відповів для '%s'", filename))
 		return err
 	}
 
-	rec := results[0]
+	rec := *results[0]
 	if rec.ENTitle == "" {
 		a.logFront(fmt.Sprintf("❌ Gemini не розпізнав '%s'", filename))
 		return nil

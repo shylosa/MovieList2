@@ -7,6 +7,8 @@ import (
 	"log/slog"
 	"net/http"
 	"path/filepath"
+	"reflect"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -75,7 +77,7 @@ func FileRecognitionContextFromPath(path string) FileRecognitionContext {
 type RecognizedTitle struct {
 	ID                int     `json:"id"`
 	RequestID         string  `json:"request_id"`
-	OriginalFile      string  `json:"original_file"` // ім'я файлу як є — для маппінгу
+	OriginalFile      string  `json:"original_file"` // копія basename для перевірки узгодженості
 	ENTitle           string  `json:"en_title"`      // оригінальна англійська назва (для TMDB пошуку)
 	OriginalTitle     string  `json:"original_title,omitempty"`
 	Year              *int    `json:"year"`
@@ -88,6 +90,7 @@ type RecognizedTitle struct {
 	Confidence        float64 `json:"confidence"` // Оцінка впевненості 0.0-1.0, 0 якщо не вказано
 	Provider          string  `json:"-"`
 	Model             string  `json:"-"`
+	missingID         bool
 }
 
 type Client struct {
@@ -265,18 +268,36 @@ func (c *Client) ResetQuotaLock() {
 	}
 }
 
-// RecognizeBulk — пакетне розпізнавання імен файлів через Gemini.
-// Повертає дані для пошуку в TMDB + fallback-поля для мержу.
-func (c *Client) RecognizeBulk(ctx context.Context, contexts []FileRecognitionContext) ([]RecognizedTitle, error) {
+// RecognizeBulk повертає по одній позиції на вхідний контекст у тому самому
+// порядку. nil у позиції означає відсутню або неоднозначну відповідь.
+func (c *Client) RecognizeBulk(ctx context.Context, contexts []FileRecognitionContext) ([]*RecognizedTitle, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if len(contexts) == 0 {
 		return nil, nil
 	}
 
 	prepared := append([]FileRecognitionContext(nil), contexts...)
+	usedKeys := make(map[string]bool, len(prepared))
 	for i := range prepared {
-		if prepared[i].RequestID == "" {
-			prepared[i].RequestID = fmt.Sprintf("recognition-%d", i)
+		key := prepared[i].RequestID
+		if key != "" && !usedKeys[key] {
+			usedKeys[key] = true
+			continue
 		}
+		prepared[i].RequestID = ""
+	}
+	for i := range prepared {
+		if prepared[i].RequestID != "" {
+			continue
+		}
+		key := fmt.Sprintf("recognition-%d", i)
+		for usedKeys[key] {
+			key += "-"
+		}
+		prepared[i].RequestID = key
+		usedKeys[key] = true
 	}
 	prompt, err := buildPrompt(prepared)
 	if err != nil {
@@ -292,31 +313,20 @@ func (c *Client) RecognizeBulk(ctx context.Context, contexts []FileRecognitionCo
 	return c.retryMissingRecognitions(ctx, prepared, results)
 }
 
-func (c *Client) retryMissingRecognitions(ctx context.Context, contexts []FileRecognitionContext, results []RecognizedTitle) ([]RecognizedTitle, error) {
-	matched := make(map[string]RecognizedTitle, len(results))
-	legacy := make(map[int]RecognizedTitle, len(results))
-	for _, result := range results {
-		if result.RequestID != "" {
-			matched[result.RequestID] = result
-		} else {
-			legacy[result.ID] = result
-		}
-	}
-
-	ordered := make([]RecognizedTitle, 0, len(contexts))
+func (c *Client) retryMissingRecognitions(ctx context.Context, contexts []FileRecognitionContext, results []RecognizedTitle) ([]*RecognizedTitle, error) {
+	idCounts := make(map[int]int, len(contexts))
 	for _, input := range contexts {
-		if result, ok := matched[input.RequestID]; ok {
-			ordered = append(ordered, result)
-			continue
-		}
-		// Compatibility with cached/older model responses during schema rollout.
-		if result, ok := legacy[input.ID]; ok {
-			result.RequestID = input.RequestID
-			ordered = append(ordered, result)
-			continue
-		}
+		idCounts[input.ID]++
+	}
+	ordered := make([]*RecognizedTitle, len(contexts))
+	for i, input := range contexts {
 		if err := ctx.Err(); err != nil {
 			return nil, err
+		}
+		result, seen := matchRecognition(input, results, idCounts[input.ID] == 1)
+		ordered[i] = result
+		if seen {
+			continue
 		}
 
 		utils.LoggerWithTrace(ctx).Warn("gemini_recognition_retry_missing",
@@ -337,15 +347,57 @@ func (c *Client) retryMissingRecognitions(ctx context.Context, contexts []FileRe
 				slog.String("request_id", input.RequestID), slog.Any("error", err))
 			continue
 		}
-		for _, result := range retry {
-			if result.RequestID == input.RequestID || (result.RequestID == "" && result.ID == input.ID) {
-				result.RequestID = input.RequestID
-				ordered = append(ordered, result)
-				break
-			}
+		if err := ctx.Err(); err != nil {
+			return nil, err
 		}
+		ordered[i], _ = matchRecognition(input, retry, true)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	return ordered, nil
+}
+
+// A conflicting response occupies its slot but yields no hypothesis. This
+// keeps the existing singleton budget for missing slots.
+func matchRecognition(input FileRecognitionContext, results []RecognizedTitle, uniqueID bool) (*RecognizedTitle, bool) {
+	hasRequest := slices.ContainsFunc(results, func(row RecognizedTitle) bool {
+		return row.RequestID != "" && row.RequestID == input.RequestID
+	})
+	var matched *RecognizedTitle
+	seen := false
+	for _, row := range results {
+		if hasRequest {
+			if row.RequestID != input.RequestID {
+				continue
+			}
+		} else {
+			if row.RequestID != "" || row.ID != input.ID {
+				continue
+			}
+			seen = true
+			// An omitted id previously decoded as zero and consumed that slot.
+			// Keep its retry budget without treating omission as an explicit id.
+			if row.missingID {
+				continue
+			}
+			if !uniqueID {
+				return nil, true
+			}
+		}
+		seen = true
+		if row.OriginalFile != "" && row.OriginalFile != input.OriginalFile {
+			return nil, true
+		}
+		row.ID, row.RequestID, row.OriginalFile = input.ID, input.RequestID, input.OriginalFile
+		row.missingID = false
+		if matched == nil {
+			matched = &row
+		} else if !reflect.DeepEqual(*matched, row) {
+			return nil, true
+		}
+	}
+	return matched, seen
 }
 
 func (c *Client) requestWithRetry(ctx context.Context, prompt string) ([]RecognizedTitle, error) {
@@ -460,9 +512,20 @@ func (c *Client) makeRequest(ctx context.Context, prompt, modelName string) ([]R
 
 func parseRecognizeResponse(raw string) ([]RecognizedTitle, error) {
 	cleaned := cleanJSON(raw)
-	var results []RecognizedTitle
-	if err := json.Unmarshal([]byte(cleaned), &results); err != nil {
+	var rows []struct {
+		RecognizedTitle
+		ID *int `json:"id"`
+	}
+	if err := json.Unmarshal([]byte(cleaned), &rows); err != nil {
 		return nil, fmt.Errorf("неможливо розпарсити JSON від моделі: %w", err)
+	}
+	results := make([]RecognizedTitle, len(rows))
+	for i, row := range rows {
+		results[i] = row.RecognizedTitle
+		results[i].missingID = row.ID == nil
+		if row.ID != nil {
+			results[i].ID = *row.ID
+		}
 	}
 	return results, nil
 }

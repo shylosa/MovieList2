@@ -242,3 +242,64 @@ HTTP 404 завершує конкретний URL за одну спробу і
 | Race detector | CGO вимкнено, `gcc` і `clang` недоступні. Race-прогін пропущено. |
 
 **Рішення R4 — ACCEPT за офлайн-критеріями.** У сценаріях outage заощаджено два фактичні запити inference. У всіх App-фікстурах надіслано на сім файлових елементів менше, з них п’ять через збій TMDB і два через скасування. Якість на реальній медіатеці, фактична частота збоїв провайдерів і production-бюджет лишаються поза вимірюванням.
+
+## R5 — Single AI Response Correlation
+
+Вихідний HEAD на `main` — `068b91684afbc31ff9be15b7f6bdb24c5a6b8106`. A використовує Go overlay із вихідними файлами R4, B використовує робоче дерево R5. Обидва прогони App використовують ту саму фікстуру, локальний Gemini `httptest`, контрольований TMDB RoundTripper і тимчасову SQLite. Фікстура резерву подає ті самі відповіді на R4 і R5 через транспорт кожного провайдера. [Фікстура App](../../app_ai_correlation_test.go), [фікстура AI](../../internal/ai/recognition_correlation_test.go)
+
+У R4 `retryMissingRecognitions` групував рядки за `request_id` або legacy `id`, будував стислий список у порядку входу, а для singleton брав перший придатний рядок. Потім `processGeminiQueue` повторно індексував список через `recognizedMap[r.ID] = r`. Вибраний контракт фіксованих позицій використовує вже наявний порядок входу. `[]*RecognizedTitle` має довжину вхідної пачки, `nil` позначає позицію без прийнятої відповіді. Контракт із map за `request_id` потребував би передавання згенерованих ключів до App і пошуку за ними. Фіксовані позиції дозволили видалити `recognizedMap` і читати `results[j]` за позицією вхідного файла. Ручний виклик використовує позицію 0. [AI-клієнт](../../internal/ai/gemini.go#L273), [App](../../app.go#L1357)
+
+Пачка і singleton використовують ту саму кореляцію. Точний `request_id` має перевагу, невідомий ключ відкидається. Legacy вимагає явно наданого числового `id` та єдиного відповідного входу. Однакові дублікати згортаються після нормалізації ключів. Конфліктні дублікати й непорожній суперечливий `original_file` дають `nil` для відповідної позиції. App обробляє її як unresolved, захищає confirmed movie та не пише позитивний L2. Справжній пропуск проходить чинний singleton cascade. Конфлікт нового повтору не додає. Рядок без обох ключів, який R4 декодував як `id=0`, не отримує гіпотези й не додає запиту для цієї позиції. Зіставлена порожня EN лишається у чинному folder rescue.
+
+### A/B
+
+Основні входи — `A.2024.mkv`, `B.2024.mkv`, `C.2024.mkv`. Незалежний еталон задає `Alpha Origin/movie:101`, `Beta Chronicle/movie:102`, `Crimson Horizon/movie:103` відповідно. Типове відображення `recognition-0/1/2` відповідає первинним позиціям файлів, типовий числовий `id` — `0/1/2`. У таблиці наведено правильні, хибні та unresolved рядки SQLite в цьому порядку. AI і TMDB — фактичні HTTP-виклики. Рядки — записи у SQLite після сценарію, включно з початковим confirmed у відповідній фікстурі.
+
+| Фікстура | Правильні / хибні / unresolved A → B | AI A → B | TMDB A → B | Рядки A → B |
+| --- | --- | --- | --- | --- |
+| Звичайна пачка | 3/0/0 → 3/0/0 | 1 → 1 | 9 → 9 | 3 → 3 |
+| Відповідь у порядку C, A, B | 3/0/0 → 3/0/0 | 1 → 1 | 9 → 9 | 3 → 3 |
+| Числові ID `2/0/1` | 0/3/0 → 3/0/0 | 1 → 1 | 9 → 9 | 3 → 3 |
+| Числові ID `0/0/0` | 0/1/2 → 3/0/0 | 1 → 1 | 3 → 9 | 3 → 3 |
+| Дві гіпотези за `recognition-1` | 2/1/0 → 2/0/1 | 1 → 1 | 9 → 6 | 3 → 3 |
+| Невідомий ключ B, `id=1` | 2/0/1 → 2/0/1 | 2 → 2 | 6 → 6 | 3 → 3 |
+| Legacy B, явний `id=1` | 3/0/0 → 3/0/0 | 1 → 1 | 9 → 9 | 3 → 3 |
+| Два legacy-рядки B, `id=1` | 2/1/0 → 2/0/1 | 1 → 1 | 9 → 6 | 3 → 3 |
+| Обидва ключі A відсутні | 3/0/0 → 2/0/1 | 1 → 1 | 9 → 6 | 3 → 3 |
+| Пропущений B | 2/0/1 → 2/0/1 | 2 → 2 | 6 → 6 | 3 → 3 |
+| Ключ A, `original_file` B | 2/1/0 → 2/0/1 | 1 → 1 | 8 → 6 | 3 → 3 |
+| `Source1/Film.mkv`, `Source2/Film.mkv`, ID `0/0` | 0/1/1 → 2/0/0 | 1 → 1 | 3 → 6 | 2 → 2 |
+| Порожня EN та confidence=0 для B | 2/0/1 → 2/0/1 | 1 → 1 | 6 → 6 | 3 → 3 |
+| 8+2, один singleton відновлено | 9/0/1 → 9/0/1 | 3 → 3 | 27 → 27 | 10 → 10 |
+| Дубль ключа для confirmed B | 2/1/0 → 3/0/0 | 1 → 1 | 9 → 6 | 3 → 3 |
+| Помилка на SQLite COMMIT | 0/0/0 → 0/0/0 | 1 → 1 | 9 → 9 | 0 → 0 |
+| STOP перед AI | 0/0/0 → 0/0/0 | 0 → 0 | 0 → 0 | 0 → 0 |
+| STOP на відповіді AI | 0/0/0 → 0/0/0 | 1 → 1 | 0 → 0 | 0 → 0 |
+| STOP під час singleton | 0/0/0 → 0/0/0 | 2 → 2 | 0 → 0 | 0 → 0 |
+| STOP перед TMDB | 0/0/0 → 0/0/0 | 1 → 1 | 0 → 0 | 0 → 0 |
+| STOP після TMDB до commit | 0/0/0 → 0/0/0 | 1 → 1 | 9 → 9 | 0 → 0 |
+| **Разом** | **35/9/7 → 43/0/8** | **25 → 25** | **149 → 144** | **51 → 51** |
+
+- За переставлених числових ID R4 записав під A/B/C гіпотези `Beta Chronicle` / `Crimson Horizon` / `Alpha Origin` і TMDB ID `102/103/101`. R5 записав `101/102/103` і відповідні еталонні гіпотези в L2.
+- За трьох `id=0` R4 залишив `Crimson Horizon/movie:103` під A та два unresolved. R5 верифікував усі три належні гіпотези. Два однакові basename з різними ключами SQLite дали `102/0 → 101/102`.
+- За дубля ключа B і неоднозначного legacy R4 записав останню гіпотезу `Delta Passage/movie:104` під B. R5 зберіг B як unresolved та не створив L2. Якщо B уже мав ручний `tv:900`, R5 зберіг підтверджені поля. Суперечність у `original_file` на A дала `102 → 0` лише для A.
+- У 8+2 кожен із перших восьми файлів верифіковано один раз. Повторні запити містили лише `recognition-8` і лише `recognition-9` відповідно. Після першого збережено `I.mkv/movie:109`, після другого `J.mkv` лишився unresolved. Rollback і STOP не дали позитивних L2 або переліку нових збережених identity.
+- Резервні Groq і Grok кожен отримав один batch і один singleton після Gemini 404. У singleton R4 прийняв `Wrong legacy` для B, R5 вибрав точний ключ і гіпотезу B. Для кожного резерву результат змінився з `[A, Wrong legacy, C]` на `[A, B, C]` за тих самих трьох HTTP-запитів inference, один Gemini 404 і два запити відповідного резерву. У R5 перевірено provider, model, confidence, status і reason кожної відповіді. Ці дві фікстури завершуються на межі AI, без TMDB і SQLite.
+
+Сценарії аудиту №7, 8, 9, 10, 14, 16, 24 і 28 покрито через відповідні фікстури. Окремо перевірено скасування після декодування вже зіставлюваної відповіді та відмову від legacy, коли два вхідні контексти мають той самий числовий ID.
+
+### Перевірки
+
+| Команда | Результат |
+| --- | --- |
+| `go test -overlay=<R4> . -run '^TestR5AppCorrelation$' -count=1 -v` | У 8 сценаріях із 21 R4 не виконав асерти R5. Решта показали паритет. |
+| `go test -overlay=<R4> ./internal/ai -run '^TestR5ReserveCorrelation$' -count=1 -v` | Обидва резерви в R4 вибрали хибний legacy-рядок у singleton. В адаптері фікстури для R4 враховано його тип повернення без вказівників. |
+| `go test ./internal/ai . -run '^(TestR5.*\|Test.*RecognizeBulk.*\|TestRetryMissingRecognitions.*\|TestGeminiCascadeFallback\|TestGroqFallbackUsesSnapshotAndSupportedRequest\|TestRecognitionSaveFailureDoesNotLogSuccess)$' -count=1 -v` | 21 сценарій App, адресні тести AI, provenance та облік rollback пройшли. |
+| `go test ./internal/tmdb . ./internal/ai ./internal/storage -run '^(TestR[234].*\|TestTypedSearchBaseline.*\|TestRunScanCancellationPreservesShowcaseAndState\|TestSearchWithFallbacksStopsAfterCancellation\|TestMergeGeminiWithTMDB.*\|TestSaveMoviesBatchUnresolvedDoesNotDowngradeRecognized\|TestRecognitionSaveFailureDoesNotLogSuccess\|TestRetryMissingRecognitionsDoesNotRetryCancelledContext)$' -count=1` | Адресні регресії R1–R4 пройшли. |
+| `go test ./internal/ai ./internal/tmdb . -count=1`, `go test ./... -count=1`, `go vet ./...` | Усі команди завершилися з кодом 0. |
+| `go test ./internal/ai -run '^TestR5' -count=50` | 50 повторів пройшли. |
+| `go test . -run '^TestR5AppCorrelation/(swapped_ids\|duplicate_ids\|duplicate_key\|same_basename\|confirmed\|rollback\|stop_before_commit)$' -count=5` | П’ять повторів семи сценаріїв SQLite пройшли. |
+| `go test -race ./internal/ai -run '^TestR5' -count=1` | Типове середовище має `CGO_ENABLED=0`. З `CGO_ENABLED=1` збірка зупинилася через відсутній `gcc` у `PATH`. |
+| `gofmt`, `git diff --check` | Формат Go і пробіли в diff перевірено. |
+
+**Рішення R5 — ACCEPT за офлайн-критеріями.** Провайдер може повернути фактично хибну назву з узгодженими ключами. Для legacy без `request_id` та `original_file` єдиний доказ належності — однозначний явний числовий ID. Наявні записи L2 і підтверджені раніше записи не перевірялися повторно в межах R5. Усі запити, файли й БД у перевірках синтетичні. Частоту конфліктів та якість на реальній медіатеці не виміряно.
