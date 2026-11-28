@@ -192,7 +192,10 @@ func TestMergeGeminiWithTMDBStrictTypeUsesOnlyRequestedEndpoint(t *testing.T) {
 	app.ctx, app.cfg, app.tmdbClient = ctx, cfg, client
 	app.eventEmitter = func(context.Context, string, ...interface{}) {}
 	year := 2015
-	got := app.mergeGeminiWithTMDBForType(ctx, filepath.Join(cfg.MediaFolderPath, "The.Bureau.2015.mkv"), ai.RecognizedTitle{ENTitle: "The Bureau", Year: &year, MediaType: "tv", Status: "resolved", Confidence: 1}, true)
+	got, err := app.mergeGeminiWithTMDBForType(ctx, filepath.Join(cfg.MediaFolderPath, "The.Bureau.2015.mkv"), ai.RecognizedTitle{ENTitle: "The Bureau", Year: &year, MediaType: "tv", Status: "resolved", Confidence: 1}, true)
+	if err != nil {
+		t.Fatalf("R9-B: merge must return FOUND without error, got %v", err)
+	}
 	if movieCalled || got.TmdbID != 62476 || got.MediaType != "tv" {
 		t.Fatalf("strict type lookup: movieCalled=%v movie=%+v", movieCalled, got)
 	}
@@ -269,12 +272,15 @@ func TestMergeGeminiWithTMDBAcceptsTVWhenGeminiSaysMovie(t *testing.T) {
 	app.tmdbClient = tmdb.NewClient(app.cfg)
 	app.tmdbClient.SetTransport(&mockTransport{base: http.DefaultTransport, scheme: u.Scheme, host: u.Host})
 
-	movie := app.mergeGeminiWithTMDB(ctx, filepath.Join("Скарпетта", "Скарпетта 8.WEB-DLRip.mkv"), ai.RecognizedTitle{
+	movie, err := app.mergeGeminiWithTMDB(ctx, filepath.Join("Скарпетта", "Скарпетта 8.WEB-DLRip.mkv"), ai.RecognizedTitle{
 		ENTitle:    "Scarpetta",
 		Year:       &year,
 		MediaType:  "movie",
 		Confidence: 0.95,
 	})
+	if err != nil {
+		t.Fatalf("R9-B: merge must return FOUND without error, got %v", err)
+	}
 
 	if movie.TmdbID != 98765 {
 		t.Fatalf("expected TV result to be accepted, got tmdb_id=%d", movie.TmdbID)
@@ -310,9 +316,12 @@ func TestMergeGeminiWithTMDBPrefersPopularExactTVForTheBureau(t *testing.T) {
 	app.cfg = &config.Config{MediaFolderPath: root, TMDBAPIKey: "fake", PostersDir: t.TempDir()}
 	app.tmdbClient = tmdb.NewClient(app.cfg)
 	app.tmdbClient.SetTransport(&mockTransport{base: http.DefaultTransport, scheme: u.Scheme, host: u.Host})
-	movie := app.mergeGeminiWithTMDB(ctx, filepath.Join(root, "Bjuro legend", "episode.08.avi"), ai.RecognizedTitle{
+	movie, err := app.mergeGeminiWithTMDB(ctx, filepath.Join(root, "Bjuro legend", "episode.08.avi"), ai.RecognizedTitle{
 		ENTitle: "The Bureau", MediaType: "movie", Confidence: 0.9, Status: "resolved",
 	})
+	if err != nil {
+		t.Fatalf("R9-B: merge must return FOUND without error, got %v", err)
+	}
 	if movie.TmdbID != 62476 || movie.MediaType != "tv" {
 		t.Fatalf("automatic exact merge = %+v; want TV 62476", movie)
 	}
@@ -633,7 +642,10 @@ func TestRescueEmptyGeminiWithFolderFindsBorrowedTVTitle(t *testing.T) {
 	app.tmdbClient = tmdb.NewClient(app.cfg)
 	app.tmdbClient.SetTransport(&mockTransport{base: http.DefaultTransport, scheme: u.Scheme, host: u.Host})
 
-	movie := app.rescueEmptyGeminiWithFolder(ctx, filepath.Join(mediaRoot, "Скарпетта", "Скарпетта 8.WEB-DLRip.mkv"))
+	movie, err := app.rescueEmptyGeminiWithFolder(ctx, filepath.Join(mediaRoot, "Скарпетта", "Скарпетта 8.WEB-DLRip.mkv"))
+	if err != nil {
+		t.Fatalf("R9-B: rescue must return FOUND without error, got %v", err)
+	}
 
 	if movie.TmdbID != 98765 {
 		t.Fatalf("expected rescue to find TV result, got tmdb_id=%d", movie.TmdbID)

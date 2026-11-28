@@ -56,7 +56,10 @@ func TestChecklistLiveTMDB(t *testing.T) {
 		{"Вы нам не подходите", 284725}, {"Вместе до конца", 241882},
 	} {
 		t.Run(tt.title, func(t *testing.T) {
-			got := a.rescueEmptyGeminiWithFolder(ctx, filepath.Join(cfg.MediaFolderPath, tt.title, tt.title+" 1.WEB-DLRip.avi"))
+			got, err := a.rescueEmptyGeminiWithFolder(ctx, filepath.Join(cfg.MediaFolderPath, tt.title, tt.title+" 1.WEB-DLRip.avi"))
+			if err != nil {
+				t.Fatalf("rescue returned TMDB_ERROR: %v", err)
+			}
 			if got.TmdbID != tt.id || got.MediaType != "tv" {
 				t.Fatalf("unexpected rescue: %+v", got)
 			}

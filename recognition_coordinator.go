@@ -482,9 +482,19 @@ func (a *App) processGeminiQueue(ctx context.Context, paths []string, aiClient *
 				a.logFront(fmt.Sprintf("⚠️ Gemini не розпізнав: '%s'", fname))
 				a.emitProgress(processed, total, "❓ Не розпізнано: "+fname)
 
-				movie := a.rescueEmptyGeminiWithFolder(ctx, path)
-				if ctx.Err() != nil {
+				movie, rescueErr := a.rescueEmptyGeminiWithFolder(ctx, path)
+				if ctx.Err() != nil || errors.Is(rescueErr, context.Canceled) {
+					// CANCELED: завершення без placeholder, HTTP-запиту чи наступної пачки.
 					return recognizedFiles
+				}
+				if rescueErr != nil {
+					// TMDB_ERROR: діагностика причини, далі чинна логіка unresolved placeholder.
+					utils.LoggerWithTrace(ctx).Warn("gemini_queue_rescue_tmdb_error",
+						slog.String("file", fname),
+						slog.Int("batch", currentBatchIdx),
+						slog.Any("error", rescueErr),
+					)
+					a.logFront(fmt.Sprintf("⚠️ TMDB помилка (rescue) для '%s': %v", fname, rescueErr))
 				}
 				if movie.TmdbID > 0 {
 					moviesToSave = append(moviesToSave, movie)
@@ -499,9 +509,21 @@ func (a *App) processGeminiQueue(ctx context.Context, paths []string, aiClient *
 
 			a.emitProgress(processed, total, "🤖 Gemini: "+rec.ENTitle)
 
-			movie := a.mergeGeminiWithTMDB(ctx, path, *rec)
-			if ctx.Err() != nil {
+			movie, mergeErr := a.mergeGeminiWithTMDB(ctx, path, *rec)
+			if ctx.Err() != nil || errors.Is(mergeErr, context.Canceled) {
+				// CANCELED: завершення без placeholder, HTTP-запиту чи наступної AI-пачки.
 				return recognizedFiles
+			}
+			if mergeErr != nil {
+				// TMDB_ERROR: діагностика причини, далі чинна логіка unresolved placeholder
+				// із захистом confirmed identity (R9-B не змінює продуктову політику збереження).
+				utils.LoggerWithTrace(ctx).Warn("gemini_queue_merge_tmdb_error",
+					slog.String("file", fname),
+					slog.Int("batch", currentBatchIdx),
+					slog.String("en_title", rec.ENTitle),
+					slog.Any("error", mergeErr),
+				)
+				a.logFront(fmt.Sprintf("⚠️ TMDB помилка для '%s': %v", fname, mergeErr))
 			}
 			if movie.TmdbID == 0 {
 				a.appendUnresolvedFromMap(ctx, &moviesToSave, path, existingMovies)
@@ -529,11 +551,21 @@ func (a *App) processGeminiQueue(ctx context.Context, paths []string, aiClient *
 // mergeGeminiWithTMDB — шукає фільм в TMDB за EN назвою від Gemini,
 // мержить результати: TMDB має пріоритет, Gemini заповнює прогалини.
 // filePath — повний шлях або basename (для ParseFilename).
-func (a *App) mergeGeminiWithTMDB(ctx context.Context, filePath string, rec ai.RecognizedTitle) storage.Movie {
+func (a *App) mergeGeminiWithTMDB(ctx context.Context, filePath string, rec ai.RecognizedTitle) (storage.Movie, error) {
 	return a.mergeGeminiWithTMDBForType(ctx, filePath, rec, false)
 }
 
-func (a *App) mergeGeminiWithTMDBForType(ctx context.Context, filePath string, rec ai.RecognizedTitle, strictMediaType bool) storage.Movie {
+// mergeGeminiWithTMDBForType — явний результат AI→TMDB-верифікації (R9-B):
+//
+//	movie.TmdbID > 0, err == nil     → FOUND: TMDB підтвердив identity;
+//	movie.TmdbID == 0, err == nil    → UNVERIFIED: гіпотеза непридатна/відхилена
+//	                                   або TMDB не знайшов прийнятного збігу;
+//	err != nil (не context.Canceled) → TMDB_ERROR: істотний збій API, мережі,
+//	                                   JSON або необхідної перевірки TMDB;
+//	errors.Is(err, context.Canceled) → CANCELED: операцію скасовано (ctx.Err()).
+//
+// Підтверджений збіг має пріоритет над помилками раніше дозволених спроб.
+func (a *App) mergeGeminiWithTMDBForType(ctx context.Context, filePath string, rec ai.RecognizedTitle, strictMediaType bool) (storage.Movie, error) {
 	fname := a.getFileIdentifier(filePath)
 	logger := utils.LoggerWithTrace(ctx).With(
 		slog.String("file", fname),
@@ -543,16 +575,17 @@ func (a *App) mergeGeminiWithTMDBForType(ctx context.Context, filePath string, r
 	)
 
 	// 🛡️ КРОК 1: ПЕРЕВІРКА ВАЛІДНОСТІ ВІДПОВІДІ ШІ
+	// Непридатна гіпотеза — це UNVERIFIED, а не помилка TMDB: жодного запиту yet.
 	if rec.ENTitle == "" || (rec.Status != "" && rec.Status != "resolved") {
 		logger.Warn("gemini_merge_skipped_empty_title")
 		a.logFront(fmt.Sprintf("⚠️ [GEMINI] Відсутня EN назва для '%s'. Пропускаємо пошук.", fname))
-		return storage.Movie{Filename: fname}
+		return storage.Movie{Filename: fname}, nil
 	}
 
 	if rec.Confidence < aiConfidenceThreshold {
 		logger.Warn("gemini_merge_skipped_low_confidence")
 		a.logFront(fmt.Sprintf("🛡️ [ЗАХИСТ] Gemini невпевнений (%.2f) щодо '%s'. Відхиляємо.", rec.Confidence, fname))
-		return storage.Movie{Filename: fname}
+		return storage.Movie{Filename: fname}, nil
 	}
 
 	// 🛡️ КРОК 4: КОНТРОЛЬ РОКУ
@@ -600,7 +633,7 @@ func (a *App) mergeGeminiWithTMDBForType(ctx context.Context, filePath string, r
 
 	if ctx.Err() != nil {
 		logger.Debug("gemini_merge_cancelled_before_tmdb", slog.Any("error", ctx.Err()))
-		return storage.Movie{Filename: fname}
+		return storage.Movie{Filename: fname}, ctx.Err()
 	}
 
 	targetYear := 0
@@ -629,19 +662,26 @@ func (a *App) mergeGeminiWithTMDBForType(ctx context.Context, filePath string, r
 		}
 	}
 
-	if ctx.Err() != nil || errors.Is(err, context.Canceled) {
-		logger.Debug("gemini_merge_cancelled_after_tmdb")
-		return storage.Movie{Filename: fname}
+	// CANCELED має пріоритет над рештою: операцію скасовано, причина — ctx.Err().
+	if ctx.Err() != nil {
+		logger.Debug("gemini_merge_cancelled_after_tmdb", slog.Any("error", ctx.Err()))
+		return storage.Movie{Filename: fname}, ctx.Err()
 	}
+	if errors.Is(err, context.Canceled) {
+		logger.Debug("gemini_merge_cancelled_after_tmdb", slog.Any("error", err))
+		return storage.Movie{Filename: fname}, err
+	}
+	// Помилка TMDB не перетворюється на чистий промах: повертаємо її як TMDB_ERROR.
 	if err != nil {
 		logger.Warn("gemini_merge_tmdb_error", slog.Any("error", err))
 		a.logFront(fmt.Sprintf("⚠️ TMDB помилка для '%s': %v", rec.ENTitle, err))
-		return storage.Movie{Filename: fname}
+		return storage.Movie{Filename: fname}, err
 	}
+	// Чистий промах TMDB (успішні запити, прийнятного збігу немає) — UNVERIFIED.
 	if tmdbInfo == nil {
 		logger.Warn("gemini_merge_tmdb_not_found")
 		a.logFront(fmt.Sprintf("❌ TMDB не знайшов '%s' — запис залишається нерозпізнаним", rec.ENTitle))
-		return storage.Movie{Filename: fname}
+		return storage.Movie{Filename: fname}, nil
 	}
 
 	strongJW := tmdb.TitleSimilarity(rec.ENTitle, tmdbInfo.TitleEN)
@@ -669,7 +709,8 @@ func (a *App) mergeGeminiWithTMDBForType(ctx context.Context, filePath string, r
 			"🛡️ [POST-VERIFY] Відхилено '%s': Gemini '%s' ≠ TMDB '%s' (Search: '%s', Alias: '%s', strong %.2f, localized %.2f)",
 			fname, rec.ENTitle, tmdbInfo.TitleEN, tmdbInfo.SearchTitle, tmdbInfo.MatchedAlias, strongJW, localizedJW,
 		))
-		return storage.Movie{Filename: fname}
+		// Відхилена гіпотеза — UNVERIFIED, без помилки TMDB.
+		return storage.Movie{Filename: fname}, nil
 	}
 
 	logger.Info("gemini_merge_tmdb_accepted",
@@ -713,25 +754,29 @@ func (a *App) mergeGeminiWithTMDBForType(ctx context.Context, filePath string, r
 		logger.Info("recognition_needs_review", slog.String("reason", movie.ReviewReason))
 	}
 
-	return movie
+	return movie, nil
 }
 
 // rescueEmptyGeminiWithFolder tries a deterministic TMDB lookup when AI returned
 // an empty title but the file sits in a meaningful release folder.
-func (a *App) rescueEmptyGeminiWithFolder(ctx context.Context, filePath string) storage.Movie {
+// Контракт результату — як у mergeGeminiWithTMDBForType (R9-B): FOUND /
+// UNVERIFIED / TMDB_ERROR / CANCELED. Перша істотна помилка TMDB зберігається
+// локально до завершення дозволених спроб, але пізніший підтверджений кандидат
+// (FOUND) має над нею пріоритет; без кешу помилок.
+func (a *App) rescueEmptyGeminiWithFolder(ctx context.Context, filePath string) (storage.Movie, error) {
 	fname := a.getFileIdentifier(filePath)
 	logger := utils.LoggerWithTrace(ctx).With(slog.String("file", fname))
 
 	if ctx.Err() != nil {
 		logger.Debug("gemini_empty_rescue_cancelled_before_start", slog.Any("error", ctx.Err()))
-		return storage.Movie{Filename: fname}
+		return storage.Movie{Filename: fname}, ctx.Err()
 	}
 
 	parsed := tmdb.ParseFilename(filePath)
 	parentTitle := cleanRescueParentTitle(filePath, a.cfg.RootForPath(filePath), parsed.ParentDir)
 	if parentTitle == "" {
 		logger.Warn("gemini_empty_rescue_skipped_no_parent_title")
-		return storage.Movie{Filename: fname}
+		return storage.Movie{Filename: fname}, nil
 	}
 
 	parentParsed := tmdb.ParseFilename(parentTitle)
@@ -747,7 +792,7 @@ func (a *App) rescueEmptyGeminiWithFolder(ctx context.Context, filePath string) 
 	candidates := buildGeminiEmptyRescueCandidates(parentParsed.CleanTitle)
 	if len(candidates) == 0 {
 		logger.Warn("gemini_empty_rescue_skipped_no_candidates", slog.String("parent", parentTitle))
-		return storage.Movie{Filename: fname}
+		return storage.Movie{Filename: fname}, nil
 	}
 
 	logger.Info("gemini_empty_rescue_started",
@@ -756,10 +801,13 @@ func (a *App) rescueEmptyGeminiWithFolder(ctx context.Context, filePath string) 
 		slog.String("year", yearStr),
 	)
 
+	// firstErr — перша істотна помилка TMDB серед дозволених спроб (без кешу):
+	// вона повертається лише якщо жоден кандидат не підтвердився.
+	var firstErr error
 	for _, candidate := range candidates {
 		if ctx.Err() != nil {
 			logger.Debug("gemini_empty_rescue_cancelled", slog.Any("error", ctx.Err()))
-			return storage.Movie{Filename: fname}
+			return storage.Movie{Filename: fname}, ctx.Err()
 		}
 
 		tmdbInfo, err := a.tmdbClient.FetchByCleanTitle(ctx, candidate, yearStr, tmdb.MediaTypeMovie)
@@ -768,6 +816,7 @@ func (a *App) rescueEmptyGeminiWithFolder(ctx context.Context, filePath string) 
 				slog.String("candidate", candidate),
 				slog.Any("error", err),
 			)
+			firstErr = cmp.Or(firstErr, err)
 			continue
 		}
 		if tmdbInfo == nil && ctx.Err() == nil {
@@ -778,6 +827,7 @@ func (a *App) rescueEmptyGeminiWithFolder(ctx context.Context, filePath string) 
 					slog.String("candidate", candidate),
 					slog.Any("error", err),
 				)
+				firstErr = cmp.Or(firstErr, err)
 				continue
 			}
 		}
@@ -810,11 +860,20 @@ func (a *App) rescueEmptyGeminiWithFolder(ctx context.Context, filePath string) 
 			slog.Float64("similarity", jw),
 		)
 		a.logFront(fmt.Sprintf("✅ [RESCUE] TMDB знайшов: '%s' (%s)", tmdbInfo.TitleEN, tmdbInfo.Year))
-		return movieFromTMDB(fname, tmdbInfo)
+		// Підтверджений кандидат — FOUND, пріоритет над раніше збереженою помилкою.
+		return movieFromTMDB(fname, tmdbInfo), nil
 	}
 
 	logger.Warn("gemini_empty_rescue_failed", slog.String("parent", parentTitle))
-	return storage.Movie{Filename: fname}
+	if ctx.Err() != nil {
+		return storage.Movie{Filename: fname}, ctx.Err()
+	}
+	if firstErr != nil {
+		// Прийнятного збігу немає, але була істотна помилка TMDB — TMDB_ERROR.
+		return storage.Movie{Filename: fname}, firstErr
+	}
+	// Усі необхідні запити успішні, збігу немає — UNVERIFIED.
+	return storage.Movie{Filename: fname}, nil
 }
 
 func cleanRescueParentTitle(filePath, mediaRoot, parentDir string) string {

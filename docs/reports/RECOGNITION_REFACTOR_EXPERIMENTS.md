@@ -579,3 +579,91 @@ HTTP 404 завершує конкретний URL за одну спробу і
 Робочий Go-код (non-test): увесь репозиторій 10644 → 10696 рядків (+52: заголовок, тип результату й метод координатора); пакет `main` 4113 → 4165. `app.go` 2912 → 2007 рядків.
 
 **Рішення R9-A — ACCEPT за офлайн-критеріями.** Один приватний координатор `recognizeAutomaticScan` у пакеті `main` володіє всією послідовністю автоматичного розпізнавання; `RunScan` лишився lifecycle + диск + події + метрики + локалізація. Перенесений код byte-identical, дублювань немає, ручні сценарії (`FixSelected`, редактор, Repair) не змінено, всі наявні офлайн-регресії R1–R8 зелені. R9-A готує архітектуру до наступних окремих змін (уніфікація дубльованих перевірок, обмежений повтор AI для unresolved, варіанти назв) — вони не реалізовані.
+
+## R9-B. Явний результат AI→TMDB-верифікації
+
+Базова лінія A — HEAD `db8abe2fce797a442d98bbab3bb4470990236590` (R9-A), гілка `main`, робоче дерево чисте. B — робоче дерево R9-B. Усі фікстури синтетичні: TMDB — fake `RoundTripper` із записом wire, AI — локальний `httptest`, SQLite — тимчасова БД. Live API, production БД і реальна медіатека не використовувалися.
+
+### Контракт
+
+`mergeGeminiWithTMDB` / `mergeGeminiWithTMDBForType` і `rescueEmptyGeminiWithFolder` повертають `(storage.Movie, error)`:
+
+| Результат | Умова | Значення |
+| --- | --- | --- |
+| FOUND | `movie.TmdbID > 0, err == nil` | TMDB підтвердив identity |
+| UNVERIFIED | `movie.TmdbID == 0, err == nil` | гіпотеза непридатна/відхилена або чистий промах TMDB |
+| TMDB_ERROR | `err != nil`, не `context.Canceled` | істотний збій API, мережі, JSON або перевірки TMDB |
+| CANCELED | `errors.Is(err, context.Canceled)` | `ctx.Err()`, операцію скасовано |
+
+Окремий приватний тип результату не знадобився: мінімального Go-контракту `(storage.Movie, error)` достатньо, універсальних Result/Outcome-систем не додано. У merge порядок `SearchExactTitle → FetchByCleanTitle → TV fallback`, пороги confidence/JW/року/типу, HTTP-порядок і RecognitionSource/Confidence/VerificationScore/NeedsReview/ReviewReason не змінено; помилка TMDB більше не зводиться до порожнього `Movie`. Підтверджений збіг має пріоритет над помилками раніше дозволених спроб (у каскаді merge це вже було через `tvInfo != nil → err = nil`; тепер це видно й зовні). У rescue перша істотна помилка зберігається в локальній `firstErr` до завершення дозволених спроб — без кешу; якщо пізніший кандидат підтверджено — FOUND, інакше за наявності `firstErr` — TMDB_ERROR, інакше UNVERIFIED; скасування — `ctx.Err()`.
+
+### Що змінено
+
+| Файл | Зміна |
+| --- | --- |
+| [recognition_coordinator.go](../../recognition_coordinator.go) | сигнатури `mergeGeminiWithTMDB(ForType)` і `rescueEmptyGeminiWithFolder` → `(storage.Movie, error)`; явні return для UNVERIFIED/TMDB_ERROR/CANCELED; `processGeminiQueue` розрізняє результат: CANCELED повертає функцію без placeholder/HTTP/наступної пачки, TMDB_ERROR логується (`gemini_queue_merge_tmdb_error` / `gemini_queue_rescue_tmdb_error`) і далі йде чинний unresolved placeholder із захистом confirmed; batchSize, commit і продуктова політика збереження не змінено |
+| [app.go](../../app.go) | `updateMovieWithMediaType` адаптовано до нового контракту: merge-помилка логується (`manual_merge_tmdb_error`), але поведінка ручного шляху не змінена — TMDB_ERROR не стає error-return із `updateMovieWithMediaType` (див. знахідку нижче) |
+| тести | наявні прямі виклики адаптовано до двох значень; новий [app_r9b_verify_outcome_test.go](../../app_r9b_verify_outcome_test.go) — 24 офлайн-сценарії |
+
+### Нові офлайн-сценарії R9-B (усі PASS, ×3 повтори без флейків)
+
+| № | Сценарій | Результат | TMDB HTTP |
+| --- | --- | --- | ---: |
+| 1 | гіпотеза підтверджена TMDB | FOUND `movie:101`, err=nil, source=gemini, conf=0.98, score=1.0 | 3 (exact movie+tv, details) |
+| 2 | порожня EN-назва | UNVERIFIED, err=nil | 0 |
+| 3 | confidence 0.30 < 0.55 | UNVERIFIED, err=nil | 0 |
+| 4 | AI-рік 1999 проти файла/TMDB 2024 | UNVERIFIED, err=nil | 3 |
+| 5 | тип tv проти movie-кандидата, JW=0.9846 < 0.99 | UNVERIFIED, err=nil | 3 |
+| 6 | чистий NO_MATCH усіх спроб | UNVERIFIED, err=nil | 8 (лише search, без details) |
+| 7 | SearchExactTitle → HTTP 500 | TMDB_ERROR | 3 (retry одного URL, без fallback) |
+| 8 | FetchByCleanTitle (movie+рік) → 500 | TMDB_ERROR | 10 |
+| 9 | TV fallback (tv+рік) → 500 | TMDB_ERROR | 10 |
+| 10 | рання 500, пізніший TV-кандидат підтверджено | FOUND `tv:200`, err=nil | 8 |
+| 11 | outage усіх спроб після чистого exact | TMDB_ERROR | 12 |
+| 12 | невалідний JSON відповіді | TMDB_ERROR | 3 |
+| 13 | скасування до першого запиту | CANCELED | 0 |
+| 14 | скасування між TMDB-спробами | CANCELED | 1 |
+| 15 | STOP перед commit у черзі (11 файлів, 2 пачки) | accepted=∅, рядків=0, AI calls=1 (друга пачка не стартувала) | 3 |
+| 16 | rescue без придатної папки | UNVERIFIED | 0 |
+| 17 | rescue чистий промах | UNVERIFIED | 6 |
+| 18 | rescue із TMDB-помилкою | TMDB_ERROR | 5 |
+| 19 | rescue: рання 500, пізніше FOUND `tv:98765` | FOUND, err=nil | 17 |
+| 20 | rescue під час STOP | CANCELED | 1 |
+| 21 | confirmed-рядок у SQLite (TmdbID=900) при UNVERIFIED і TMDB_ERROR | рядок недоторканий (900, усі поля), accepted=∅ | — |
+| 22 | помилка SQLite COMMIT | accepted=∅, рядків немає, AI calls=1 | 3 |
+| 23 | AI batch 8+2, у F09 TMDB_ERROR | AI calls=3; F00–F08 → 101–109; F09 → unresolved placeholder (TmdbID=0, review=unresolved) | 30 |
+| 24a | FixSelected → Gemini → TMDB FOUND | рядок `movie:101`, source=gemini, err=nil, AI calls=1 | — |
+| 24b | FixSelected → TMDB_ERROR | err=nil (чинна поведінка), рядок TmdbID=0 | — |
+
+### A/B (A = R9-A @ db8abe2, B = R9-B)
+
+Повний прогін наявних A/B-фікстур R4/R5/R6 на обох сторонах: усі детерміновані метрики ідентичні (identity, wireAI, черга, accepted, stored-рядки, search/details HTTP, ai_batches, l2=0). Єдина розбіжність у прогоні — `TestR4AppScanOutcomes/stop_before_next_batch`: склад першої AI-пачки залежить від порядку завершення паралельних TMDB-воркерів; цей флейк відтворюється і на A, і на B (на B: search=55/63/71 у трьох послідовних прогонах одного й того самого коду), тому не є регресією R9-B. У B жодних змін identity, HTTP-порядку, AI inference, SQLite-рядків, порядку commit, STOP і ручного FixSelected немає — змінився лише внутрішній контракт повернення (TMDB_ERROR тепер явний замість порожнього `Movie`) плюс нові діагностичні логи.
+
+| Метрика A → B | Значення |
+| --- | --- |
+| identity R1–R9-A (R4/R5/R6 оракули) | паритет, нових false positive немає |
+| TMDB HTTP і порядок (R4/R5/R6 wire) | паритет |
+| AI inference (ai_batches / aiCalls) | паритет (R9-B не додає inference) |
+| SQLite-рядки, порядок commit, STOP | паритет |
+| FixSelected | паритет (24a/24b) |
+| нові кеші | немає |
+
+### Знахідка ручного шляху (задокументована, без зміни)
+
+`updateMovieWithMediaType` при TMDB_ERROR із merge тепер бачить помилку явно, але поводиться як раніше: не повертає її як error, а йде чинною логікою `movie.TmdbID == 0` (захист existing або запис порожнього merge-результату). Зміна цієї поведінки — окреме погодження.
+
+### Перевірки
+
+| Команда | Результат |
+| --- | --- |
+| `go test . -run '^TestR9B' -count=1 -v` і `-count=3` | 24 сценарії PASS, стабільно ×3 |
+| `go test . -run '^(TestR4AppScanOutcomes\|TestR5AppCorrelation\|TestR6)' -count=1` на A і B | зелені; метрики R4/R5/R6 ідентичні (окрім задокументованого флейку stop_before_next_batch) |
+| `go test ./internal/tmdb ./internal/ai ./internal/storage . -count=1` | ok, 4 пакети |
+| `go test ./... -count=1` | ok, усі 10 пакетів |
+| `go vet ./...`, `gofmt -l`, `git diff --check` | exit 0, зауважень немає |
+| `CGO_ENABLED=1 go test -race ...` | недоступний: `gcc` відсутній у PATH (CGO_ENABLED=0 за замовчуванням), як у R1–R9-A; R9-B прогнано ×3 без флейків |
+| Live API, production SQLite, реальна медіатека | не використовувалися |
+
+Робочий Go-код (non-test): `git diff --stat` — 6 файлів, +125/−31 (включно з документацією й адаптацією тестів); новий тестовий файл `app_r9b_verify_outcome_test.go` — 829 рядків. `recognition_coordinator.go` 984 → 1043 рядки.
+
+**Рішення R9-B — ACCEPT за офлайн-критеріями.** AI→TMDB-верифікація явно повертає помилки; справжній промах (UNVERIFIED) відрізняється від збою (TMDB_ERROR); STOP повертається як CANCELED без placeholder/HTTP/наступної пачки; пізній підтверджений збіг має пріоритет; folder rescue не приховує істотних помилок; identity R1–R9-A, HTTP, AI inference, SQLite/commit і ручний FixSelected — паритет; нових кешів немає; реалізація — мінімальний контракт `(storage.Movie, error)` без нових пакетів чи інтерфейсів. Цього достатньо, щоб майбутній обмежений AI retry (R10) міг орієнтуватися на UNVERIFIED і не запускатися через TMDB_ERROR.

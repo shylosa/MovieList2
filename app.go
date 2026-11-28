@@ -1542,7 +1542,18 @@ func (a *App) updateMovieWithMediaType(ctx context.Context, filename, hint, requ
 	} else {
 		rec = preserveRecognizedContext(rec, existing)
 	}
-	movie := a.mergeGeminiWithTMDBForType(ctx, a.cfg.ResolveMediaPath(filename), rec, strictMediaType)
+	movie, mergeErr := a.mergeGeminiWithTMDBForType(ctx, a.cfg.ResolveMediaPath(filename), rec, strictMediaType)
+	if mergeErr != nil {
+		// R9-B: merge повертає TMDB_ERROR/CANCELED явно. Ручна поведінка без змін:
+		// помилку лише діагностуємо, далі чинна логіка за movie.TmdbID —
+		// вона не стає error-return з updateMovieWithMediaType.
+		utils.LoggerWithTrace(ctx).Warn("manual_merge_tmdb_error",
+			slog.String("file", filename),
+			slog.Bool("strict_media_type", strictMediaType),
+			slog.Any("error", mergeErr),
+		)
+		a.logFront(fmt.Sprintf("⚠️ TMDB помилка для '%s': %v", filename, mergeErr))
+	}
 	if !strictMediaType && identityReplacementConflicts(existing, movie) {
 		utils.LoggerWithTrace(ctx).Warn("identity_replacement_rejected",
 			slog.String("file", filename), slog.Int("old_tmdb_id", existing.TmdbID), slog.String("old_media_type", existing.MediaType), slog.String("old_year", existing.Year),

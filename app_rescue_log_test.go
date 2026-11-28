@@ -56,13 +56,21 @@ func TestRescueProductionLocalizedTitles(t *testing.T) {
 				a.cfg = &config.Config{MediaFolderPath: root, TMDBAPIKey: "test", PostersDir: t.TempDir()}
 				a.tmdbClient = tmdb.NewClient(a.cfg)
 				a.tmdbClient.SetTransport(&mockTransport{base: http.DefaultTransport, scheme: u.Scheme, host: u.Host})
-				got := a.rescueEmptyGeminiWithFolder(context.Background(), filepath.Join(root, tt.title, tt.title+" 1.WEB-DLRip.avi"))
+				got, err := a.rescueEmptyGeminiWithFolder(context.Background(), filepath.Join(root, tt.title, tt.title+" 1.WEB-DLRip.avi"))
 				want := 0
 				if scenario == "exact" {
 					want = tt.id
 				}
+				// R9-B: exact → FOUND (err == nil); wrong/ambiguous → UNVERIFIED
+				// (err == nil, ID 0); identity mismatch у details → TMDB_ERROR.
+				if scenario == "identity mismatch" && err == nil {
+					t.Fatalf("R9-B: identity mismatch must surface TMDB_ERROR, got nil error, rescue=%+v", got)
+				}
+				if scenario != "identity mismatch" && err != nil {
+					t.Fatalf("R9-B: scenario %s must not return an error, got %v", scenario, err)
+				}
 				if got.TmdbID != want || (want > 0 && got.MediaType != "tv") {
-					t.Fatalf("rescue=%+v want ID=%d", got, want)
+					t.Fatalf("rescue=%+v err=%v want ID=%d", got, err, want)
 				}
 			})
 		}
