@@ -172,7 +172,7 @@ func TestR3DetailsCallers(t *testing.T) {
 				var err error
 				switch mode {
 				case "ranked":
-					got, err = c.searchAndFetch(ctx, "Signal", 0, 2024, kind, "fixture.mkv")
+					got, err = c.searchAndFetch(ctx, "Signal", 0, 2024, kind, "fixture.mkv", ParsedFile{})
 				case "exact":
 					got, err = c.SearchExactTitle(ctx, "Signal", 2024, kind, true, "fixture.mkv")
 				case "imdb_movie", "imdb_tv":

@@ -69,7 +69,7 @@ func TestR3AliasCollision(t *testing.T) {
 						var got *MovieInfo
 						var err error
 						if ranked {
-							got, err = c.searchAndFetch(context.Background(), check.query, 0, 2024, check.e.kind, "")
+							got, err = c.searchAndFetch(context.Background(), check.query, 0, 2024, check.e.kind, "", ParsedFile{})
 						} else {
 							got, err = c.SearchExactTitle(context.Background(), check.query, 2024, check.e.kind, true, "")
 						}

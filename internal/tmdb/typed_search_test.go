@@ -92,7 +92,7 @@ func TestTypedSearchBaselineAutomatic(t *testing.T) {
 				return 404, ""
 			}
 		})
-		got, err := c.searchAndFetch(context.Background(), "Ідея", 2024, 2024, MediaTypeTV, "")
+		got, err := c.searchAndFetch(context.Background(), "Ідея", 2024, 2024, MediaTypeTV, "", ParsedFile{})
 		assertSearchFixture(t, *calls, []string{search, fixtureTVDetailsCall}, got, err)
 		if err != nil || got == nil || got.TMDBID != 42 || got.MediaType != MediaTypeTV {
 			t.Fatalf("expected tv:42, got %+v, %v", got, err)
@@ -102,7 +102,7 @@ func TestTypedSearchBaselineAutomatic(t *testing.T) {
 	t.Run("unknown_type_and_cyrillic_url", func(t *testing.T) {
 		const query = "&query=%D0%81%D0%B6+%2B+A%26B%3F%2F%23"
 		c, calls := newSearchFixture(t, func(string) (int, string) { return 200, `{"results":[]}` })
-		got, err := c.searchAndFetch(context.Background(), "Ёж + A&B?/#", 2024, 2024, "", "")
+		got, err := c.searchAndFetch(context.Background(), "Ёж + A&B?/#", 2024, 2024, "", "", ParsedFile{})
 		assertSearchFixture(t, *calls, []string{
 			"/search/movie?api_key=REDACTED&language=uk-UA" + query + "&year=2024",
 			"/search/tv?api_key=REDACTED&first_air_date_year=2024&language=uk-UA" + query,
@@ -241,7 +241,7 @@ func TestTypedSearchBaselineHTTP(t *testing.T) {
 			c, calls := newSearchFixture(t, func(string) (int, string) { return 500, "fixture failure" })
 			got, err := c.SearchCandidates(context.Background(), "Signal", 2024, "movie")
 			assertSearchFixture(t, *calls, []string{search, search, search}, got, err)
-			if got != nil || err == nil || err.Error() != "TMDB HTTP 500: fixture failure" {
+			if got != nil || err == nil || err.Error() != "TMDB HTTP 500" {
 				t.Fatalf("expected HTTP 500 after retry exhaustion, got %+v, %v", got, err)
 			}
 		})

@@ -1,6 +1,7 @@
 package tmdb
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -123,6 +124,7 @@ func (c *Client) loadTVDetails(ctx context.Context, url string, id int) (tmdbTVD
 func (c *Client) getMovieDetails(ctx context.Context, id int, originalFilename string) (*MovieInfo, error) {
 	langs := []string{"uk-UA", "ru-RU", "en-US"}
 	var finalInfo *MovieInfo
+	var firstErr error
 	titles := make(map[string]string, len(langs))
 	plots := make(map[string]string, len(langs))
 
@@ -133,12 +135,14 @@ func (c *Client) getMovieDetails(ctx context.Context, id int, originalFilename s
 		url := fmt.Sprintf("%s/movie/%d?api_key=%s&language=%s&append_to_response=credits", baseURL, id, c.apiKey, lang)
 		d, err := c.loadMovieDetails(ctx, url, id)
 		if err != nil {
-			if ctx.Err() != nil {
-				return nil, ctx.Err()
+			if canceled := searchCancellation(ctx, err); canceled != nil {
+				return nil, canceled
 			}
 			if errors.Is(err, errDetailsIdentity) {
 				return nil, err
 			}
+			firstErr = cmp.Or(firstErr, err)
+			utils.LoggerWithTrace(ctx).Warn("tmdb_details_language_failed", slog.String("language", lang), slog.Any("error", err))
 			continue
 		}
 		title := detailsTitle(d.Title)
@@ -191,7 +195,7 @@ func (c *Client) getMovieDetails(ctx context.Context, id int, originalFilename s
 	}
 
 	if finalInfo == nil {
-		return nil, fmt.Errorf("не вдалося отримати деталі фільму %d", id)
+		return nil, fmt.Errorf("не вдалося отримати деталі фільму %d: %w", id, firstErr)
 	}
 	finalInfo.TitleUA = preferredLocalizedText(titles["uk-UA"], titles["en-US"], titles["ru-RU"])
 	finalInfo.Plot = preferredLocalizedText(plots["uk-UA"], plots["ru-RU"], plots["en-US"])
@@ -207,6 +211,9 @@ func (c *Client) getMovieDetails(ctx context.Context, id int, originalFilename s
 		finalInfo.LocalPosterPath = lp
 	}
 
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	return finalInfo, nil
 }
 
@@ -214,6 +221,7 @@ func (c *Client) getMovieDetails(ctx context.Context, id int, originalFilename s
 func (c *Client) getTVDetails(ctx context.Context, id int, originalFilename string) (*MovieInfo, error) {
 	langs := []string{"uk-UA", "ru-RU", "en-US"}
 	var finalInfo *MovieInfo
+	var firstErr error
 	titles := make(map[string]string, len(langs))
 	plots := make(map[string]string, len(langs))
 
@@ -224,12 +232,14 @@ func (c *Client) getTVDetails(ctx context.Context, id int, originalFilename stri
 		url := fmt.Sprintf("%s/tv/%d?api_key=%s&language=%s&append_to_response=credits", baseURL, id, c.apiKey, lang)
 		d, err := c.loadTVDetails(ctx, url, id)
 		if err != nil {
-			if ctx.Err() != nil {
-				return nil, ctx.Err()
+			if canceled := searchCancellation(ctx, err); canceled != nil {
+				return nil, canceled
 			}
 			if errors.Is(err, errDetailsIdentity) {
 				return nil, err
 			}
+			firstErr = cmp.Or(firstErr, err)
+			utils.LoggerWithTrace(ctx).Warn("tmdb_details_language_failed", slog.String("language", lang), slog.Any("error", err))
 			continue
 		}
 		title := detailsTitle(d.Name)
@@ -277,7 +287,7 @@ func (c *Client) getTVDetails(ctx context.Context, id int, originalFilename stri
 	}
 
 	if finalInfo == nil {
-		return nil, fmt.Errorf("не вдалося отримати деталі серіалу %d", id)
+		return nil, fmt.Errorf("не вдалося отримати деталі серіалу %d: %w", id, firstErr)
 	}
 	finalInfo.TitleUA = preferredLocalizedText(titles["uk-UA"], titles["en-US"], titles["ru-RU"])
 	finalInfo.Plot = preferredLocalizedText(plots["uk-UA"], plots["ru-RU"], plots["en-US"])
@@ -293,6 +303,9 @@ func (c *Client) getTVDetails(ctx context.Context, id int, originalFilename stri
 		finalInfo.LocalPosterPath = lp
 	}
 
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	return finalInfo, nil
 }
 
@@ -358,6 +371,9 @@ func (c *Client) GetDetails(ctx context.Context, mediaType MediaType, id int, or
 			info = &copy
 		}
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if info.PosterURL != "" && originalFilename != "" {
 		lp, err := c.DownloadPoster(ctx, info.PosterURL, fmt.Sprintf("%d_%s", info.TMDBID, originalFilename))
 		if err != nil {
@@ -367,6 +383,9 @@ func (c *Client) GetDetails(ctx context.Context, mediaType MediaType, id int, or
 			utils.LoggerWithTrace(ctx).Warn("poster_download_failed", slog.Int("tmdb_id", info.TMDBID), slog.Any("error", err))
 		}
 		info.LocalPosterPath = lp
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 	return info, nil
 }

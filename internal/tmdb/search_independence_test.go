@@ -242,7 +242,13 @@ func TestR2IndependentSearchAfterMissOrError(t *testing.T) {
 				}
 				if tc.attempts > 0 {
 					got, err := c.FetchFromParsed(context.Background(), r2Parsed(2024), "Signal.mkv")
-					r2Check(t, "Signal.mkv", got, err, firstIdentity, *calls)
+					if tc.status >= 400 || tc.name == "invalid_json" {
+						if got != nil || err == nil {
+							t.Fatalf("failed TMDB lookup = %v, %v", got, err)
+						}
+					} else {
+						r2Check(t, "Signal.mkv", got, err, firstIdentity, *calls)
+					}
 					r2CheckCalls(t, *calls, wantCalls)
 				}
 				start := len(*calls)

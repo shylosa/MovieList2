@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -75,7 +76,7 @@ type scanResult struct {
 	path         string
 	fname        string
 	info         *tmdb.MovieInfo
-	needsGemini  bool
+	tmdbFailed   bool
 	needsReview  bool
 	reviewReason string
 }
@@ -882,22 +883,29 @@ func (a *App) RunScan() {
 
 		// 🛡️ Єдиний Writer для SQLite: збирає батч і пише транзакцією
 		moviesToSave, geminiQueue, translationQueue := a.processScanResults(scanCtx, resultsChan)
-		tmdbAccepted = len(moviesToSave)
-
 		// Зберігаємо всіх знайдених одним запитом
 		if len(moviesToSave) > 0 {
 			if err := a.saveRecognitionBatch(scanCtx, moviesToSave, "tmdb_scan"); err != nil {
 				utils.LoggerWithTrace(scanCtx).Error("batch_save_failed", slog.Any("error", err))
+				translationQueue = nil
+			} else {
+				for _, movie := range moviesToSave {
+					if movie.TmdbID > 0 {
+						tmdbAccepted++
+					} else {
+						unresolved++
+					}
+				}
 			}
 		}
 
 		// Спроба 2: Gemini для тих що TMDB не знайшов
-		if len(geminiQueue) > 0 {
+		if scanCtx.Err() == nil && len(geminiQueue) > 0 {
 			a.logFront(fmt.Sprintf("🤖 Черга Gemini: %d файлів", len(geminiQueue)))
 
 			recognizedByGemini := a.processGeminiQueue(scanCtx, geminiQueue, a.aiClient)
 			aiAccepted = len(recognizedByGemini)
-			unresolved = len(geminiQueue) - aiAccepted
+			unresolved += len(geminiQueue) - aiAccepted
 			translationQueue = append(translationQueue, recognizedByGemini...)
 		}
 
@@ -1042,10 +1050,10 @@ func (a *App) runTMDBScan(ctx context.Context, paths []string) <-chan scanResult
 				logger.Info("grouped_tv_applied", slog.String("reason", groupDecision.reason), slog.String("title", parsed.CleanTitle))
 			}
 			info, err := a.tmdbClient.FetchFromParsed(fileCtx, parsed, path)
+			if ctx.Err() != nil || errors.Is(err, context.Canceled) {
+				return
+			}
 			if err != nil {
-				if errors.Is(err, context.Canceled) || ctx.Err() != nil {
-					return
-				}
 				logger.Warn("tmdb_search_error",
 					slog.String("file", fname),
 					slog.Any("error", err),
@@ -1053,13 +1061,10 @@ func (a *App) runTMDBScan(ctx context.Context, paths []string) <-chan scanResult
 				a.logFront(fmt.Sprintf("⚠️ TMDB помилка для '%s': %v", fname, err))
 			}
 
-			result := scanResult{path: path, fname: fname, info: info, needsGemini: true}
+			result := scanResult{path: path, fname: fname, info: info, tmdbFailed: err != nil}
 			if grouped && originalMediaType == tmdb.MediaTypeMovie {
 				result.needsReview = true
 				result.reviewReason = groupedTVReviewReason
-			}
-			if info != nil && info.TMDBID > 0 {
-				result.needsGemini = false
 			}
 
 			select {
@@ -1173,13 +1178,14 @@ func isMeaningfulSeriesParent(parent string) bool {
 func (a *App) processScanResults(ctx context.Context, results <-chan scanResult) (toSave []storage.Movie, geminiQueue []string, translationQueue []string) {
 	for res := range results {
 		if ctx.Err() != nil {
-			go func() {
-				for range results {
-				}
-			}()
-			break
+			continue
 		}
-		if !res.needsGemini {
+		if res.tmdbFailed {
+			// The merge upsert protects confirmed rows, including concurrent updates.
+			toSave = append(toSave, buildUnresolvedMovie(res.fname, res.path))
+			continue
+		}
+		if res.info != nil && res.info.TMDBID > 0 {
 			movie := movieFromTMDB(res.fname, res.info)
 			if res.needsReview {
 				movie.NeedsReview = true
@@ -1204,7 +1210,16 @@ func (a *App) processScanResults(ctx context.Context, results <-chan scanResult)
 
 				// Використовуємо кешовану назву для пошуку в TMDB
 				info, err := a.tmdbClient.FetchByCleanTitle(ctx, cached.ResolvedTitle, strconv.Itoa(cached.Year), tmdb.MediaType(cached.MediaType))
-				if err == nil && info != nil && info.TMDBID > 0 {
+				if ctx.Err() != nil || errors.Is(err, context.Canceled) {
+					continue
+				}
+				if err != nil {
+					utils.LoggerWithTrace(ctx).Warn("tmdb_l2_verification_failed", slog.String("file", res.fname), slog.Any("error", err))
+					a.logFront(fmt.Sprintf("⚠️ TMDB помилка перевірки L2 для '%s': %v", res.fname, err))
+					toSave = append(toSave, buildUnresolvedMovie(res.fname, res.path))
+					continue
+				}
+				if info != nil && info.TMDBID > 0 {
 					jw := tmdb.TitleSimilarity(cached.ResolvedTitle, info.TitleEN)
 					if info.MatchedAlias != "" {
 						if jwAlias := tmdb.TitleSimilarity(cached.ResolvedTitle, info.MatchedAlias); jwAlias > jw {
@@ -1223,7 +1238,9 @@ func (a *App) processScanResults(ctx context.Context, results <-chan scanResult)
 					}
 				}
 			}
-			geminiQueue = append(geminiQueue, res.path)
+			if ctx.Err() == nil {
+				geminiQueue = append(geminiQueue, res.path)
+			}
 		}
 	}
 
@@ -1284,7 +1301,7 @@ func (a *App) processGeminiQueue(ctx context.Context, paths []string, aiClient *
 		batch := paths[i:end]
 		currentBatchIdx := i/batchSize + 1
 
-		a.logFront(fmt.Sprintf("📦 Gemini пачка %d/%d (%d файлів) відправлена...", currentBatchIdx, totalBatches, len(batch)))
+		a.logFront(fmt.Sprintf("📦 Gemini пачка %d/%d (%d файлів)", currentBatchIdx, totalBatches, len(batch)))
 
 		// Pre-fetch all existing movies in this batch from DB to eliminate O(N) queries
 		batchFnames := make([]string, len(batch))
@@ -1304,7 +1321,13 @@ func (a *App) processGeminiQueue(ctx context.Context, paths []string, aiClient *
 			contexts[j] = ctxObj
 		}
 
+		if ctx.Err() != nil {
+			break
+		}
 		results, err := aiClient.RecognizeBulk(ctx, contexts)
+		if ctx.Err() != nil || errors.Is(err, context.Canceled) {
+			break
+		}
 		if err != nil {
 			a.logFront(fmt.Sprintf("⚠️ Gemini помилка пачки %d: %v", currentBatchIdx, err))
 			utils.LoggerWithTrace(ctx).Warn("gemini_batch_failed", slog.Int("batch", currentBatchIdx), slog.Any("error", err))
@@ -1328,7 +1351,12 @@ func (a *App) processGeminiQueue(ctx context.Context, paths []string, aiClient *
 		}
 
 		var moviesToSave []storage.Movie
+		var batchRecognized []string
+		var resolutions []storage.AIResolution
 		for j, path := range batch {
+			if ctx.Err() != nil {
+				return recognizedFiles
+			}
 			processed++
 			fname := a.getFileIdentifier(path)
 			rec, ok := recognizedMap[j]
@@ -1375,9 +1403,12 @@ func (a *App) processGeminiQueue(ctx context.Context, paths []string, aiClient *
 				a.emitProgress(processed, total, "❓ Не розпізнано: "+fname)
 
 				movie := a.rescueEmptyGeminiWithFolder(ctx, path)
+				if ctx.Err() != nil {
+					return recognizedFiles
+				}
 				if movie.TmdbID > 0 {
 					moviesToSave = append(moviesToSave, movie)
-					recognizedFiles = append(recognizedFiles, fname)
+					batchRecognized = append(batchRecognized, fname)
 					continue
 				}
 
@@ -1389,34 +1420,42 @@ func (a *App) processGeminiQueue(ctx context.Context, paths []string, aiClient *
 			a.emitProgress(processed, total, "🤖 Gemini: "+rec.ENTitle)
 
 			movie := a.mergeGeminiWithTMDB(ctx, path, rec)
+			if ctx.Err() != nil {
+				return recognizedFiles
+			}
 			if movie.TmdbID == 0 {
 				a.appendUnresolvedFromMap(ctx, &moviesToSave, path, existingMovies)
 				continue
 			}
 			moviesToSave = append(moviesToSave, movie)
-			if movie.TmdbID > 0 {
-				if err := a.db.SaveAIResolution(ctx, storage.AIResolution{
-					OriginalFilename: fname,
-					ResolvedTitle:    rec.ENTitle,
-					Year:             yearVal,
-					MediaType:        rec.MediaType,
-					Confidence:       rec.Confidence,
-					PipelineVersion:  recognitionPipelineVersion,
-					Provider:         rec.Provider,
-					Model:            rec.Model,
-				}); err != nil {
-					utils.LoggerWithTrace(ctx).Warn("save_ai_resolution_failed",
-						slog.String("file", fname), slog.Any("error", err))
-				} else {
-					utils.LoggerWithTrace(ctx).Info("ai_cache_updated", slog.String("file", fname), slog.Int("pipeline_version", recognitionPipelineVersion))
-				}
-				recognizedFiles = append(recognizedFiles, fname)
-			}
+			batchRecognized = append(batchRecognized, fname)
+			resolutions = append(resolutions, storage.AIResolution{
+				OriginalFilename: fname,
+				ResolvedTitle:    rec.ENTitle,
+				Year:             yearVal,
+				MediaType:        rec.MediaType,
+				Confidence:       rec.Confidence,
+				PipelineVersion:  recognitionPipelineVersion,
+				Provider:         rec.Provider,
+				Model:            rec.Model,
+			})
 		}
 
 		if len(moviesToSave) > 0 {
 			if err := a.saveRecognitionBatch(ctx, moviesToSave, "gemini_queue"); err != nil {
 				utils.LoggerWithTrace(ctx).Error("batch_save_failed", slog.Any("error", err))
+				continue
+			}
+			recognizedFiles = append(recognizedFiles, batchRecognized...)
+			for _, resolution := range resolutions {
+				if ctx.Err() != nil {
+					return recognizedFiles
+				}
+				if err := a.db.SaveAIResolution(ctx, resolution); err != nil {
+					utils.LoggerWithTrace(ctx).Warn("save_ai_resolution_failed", slog.String("file", resolution.OriginalFilename), slog.Any("error", err))
+				} else {
+					utils.LoggerWithTrace(ctx).Info("ai_cache_updated", slog.String("file", resolution.OriginalFilename), slog.Int("pipeline_version", recognitionPipelineVersion))
+				}
 			}
 		}
 	}
@@ -1519,27 +1558,28 @@ func (a *App) mergeGeminiWithTMDBForType(ctx context.Context, filePath string, r
 	}
 	if tmdbInfo == nil && err == nil && !strictMediaType {
 		tmdbInfo, err = a.tmdbClient.FetchByCleanTitle(ctx, rec.ENTitle, yearStr, mt)
+		if tmdbInfo == nil && mt == tmdb.MediaTypeMovie && ctx.Err() == nil && !errors.Is(err, context.Canceled) {
+			logger.Info("gemini_merge_tv_retry")
+			tvInfo, tvErr := a.tmdbClient.FetchByCleanTitle(ctx, rec.ENTitle, yearStr, tmdb.MediaTypeTV)
+			if tvInfo != nil {
+				tmdbInfo, err = tvInfo, nil
+			} else {
+				err = cmp.Or(tvErr, err)
+			}
+		}
+	}
+
+	if ctx.Err() != nil || errors.Is(err, context.Canceled) {
+		logger.Debug("gemini_merge_cancelled_after_tmdb")
+		return storage.Movie{Filename: fname}
 	}
 	if err != nil {
 		logger.Warn("gemini_merge_tmdb_error", slog.Any("error", err))
 		a.logFront(fmt.Sprintf("⚠️ TMDB помилка для '%s': %v", rec.ENTitle, err))
+		return storage.Movie{Filename: fname}
 	}
-
-	if tmdbInfo == nil && err == nil && !strictMediaType && mt == tmdb.MediaTypeMovie && ctx.Err() == nil {
-		logger.Info("gemini_merge_tv_retry")
-		tmdbInfo, err = a.tmdbClient.FetchByCleanTitle(ctx, rec.ENTitle, yearStr, tmdb.MediaTypeTV)
-		if err != nil {
-			logger.Warn("gemini_merge_tv_retry_error", slog.Any("error", err))
-			a.logFront(fmt.Sprintf("⚠️ TMDB помилка TV-пошуку для '%s': %v", rec.ENTitle, err))
-		}
-	}
-
 	if tmdbInfo == nil {
-		if ctx.Err() != nil {
-			logger.Debug("gemini_merge_cancelled_after_tmdb", slog.Any("error", ctx.Err()))
-		} else {
-			logger.Warn("gemini_merge_tmdb_not_found")
-		}
+		logger.Warn("gemini_merge_tmdb_not_found")
 		a.logFront(fmt.Sprintf("❌ TMDB не знайшов '%s' — запис залишається нерозпізнаним", rec.ENTitle))
 		return storage.Movie{Filename: fname}
 	}

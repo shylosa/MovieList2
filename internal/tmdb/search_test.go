@@ -25,7 +25,7 @@ func TestRankResultsInfoLogHasSummaryWithoutCandidateDebugSpam(t *testing.T) {
 		{ID: 1, Title: "Dune", OriginalTitle: "Dune", ReleaseDate: "2021-01-01", MediaType: "movie"},
 		{ID: 2, Title: "Dune", OriginalTitle: "Dune", ReleaseDate: "2024-01-01", MediaType: "movie"},
 	}
-	best := c.rankResults(context.Background(), results, "Dune", 2021, MediaTypeMovie)
+	best, _ := c.rankResults(context.Background(), results, "Dune", 2021, MediaTypeMovie)
 	if best == nil {
 		t.Fatal("expected winner")
 	}
@@ -75,7 +75,7 @@ func TestScoreResult_DiamondMatch(t *testing.T) {
 	}
 
 	// 1. Перевіряємо Діамантовий Збіг (назва + точний рік)
-	scored := c.scoreResult(ctx, res, 0, "inception", 2010, MediaTypeMovie)
+	scored, _ := c.scoreResult(ctx, res, 0, "inception", 2010, MediaTypeMovie)
 
 	// ExactMatch(200) + Diamond(300) + YearExact(150) + TypeMatch(30) = 680
 	if scored.score < 500 {
@@ -83,7 +83,7 @@ func TestScoreResult_DiamondMatch(t *testing.T) {
 	}
 
 	// 2. Перевіряємо жорстке відхилення сміття
-	scoredTrash := c.scoreResult(ctx, res, 0, "batman", 2010, MediaTypeMovie)
+	scoredTrash, _ := c.scoreResult(ctx, res, 0, "batman", 2010, MediaTypeMovie)
 	if scoredTrash.score != -1000 {
 		t.Errorf("Сміттєвий результат не був жорстко відхилений. Score: %d", scoredTrash.score)
 	}
@@ -568,7 +568,7 @@ func TestRankResultsFallbackStillUsesTargetYear(t *testing.T) {
 		{ID: 1, Title: "Master i Margarita", OriginalTitle: "Master i Margarita", ReleaseDate: "2025-01-01", MediaType: "movie", OriginalLanguage: "uk"},
 		{ID: 2, Title: "Master i Margarita", OriginalTitle: "Master i Margarita", ReleaseDate: "2024-01-01", MediaType: "movie", OriginalLanguage: "en"},
 	}
-	best := c.rankResults(context.Background(), results, "Master i Margarita", 2023, MediaTypeMovie)
+	best, _ := c.rankResults(context.Background(), results, "Master i Margarita", 2023, MediaTypeMovie)
 	if best == nil || best.result.ID != 2 {
 		t.Fatalf("expected year-compatible candidate 2, got %+v", best)
 	}
@@ -582,7 +582,7 @@ func TestRankResultsLanguageIsOnlyTieBreaker(t *testing.T) {
 		{ID: 1, Title: "Enemy", OriginalTitle: "Enemy", ReleaseDate: "2014-01-01", MediaType: "movie", OriginalLanguage: "ru"},
 		{ID: 2, Title: "Enemy", OriginalTitle: "Enemy", ReleaseDate: "2020-01-01", MediaType: "movie", OriginalLanguage: "uk", Popularity: 1000},
 	}
-	best := c.rankResults(context.Background(), results, "Enemy", 2013, MediaTypeMovie)
+	best, _ := c.rankResults(context.Background(), results, "Enemy", 2013, MediaTypeMovie)
 	if best == nil || best.result.ID != 1 {
 		t.Fatalf("identity winner was overridden by language/popularity: %+v", best)
 	}
@@ -592,7 +592,7 @@ func TestRankResultsLanguageIsOnlyTieBreaker(t *testing.T) {
 		{ID: 3, Title: "Dune", OriginalTitle: "Dune", ReleaseDate: "2021-01-01", MediaType: "movie", OriginalLanguage: "en"},
 		{ID: 4, Title: "Dune", OriginalTitle: "Dune", ReleaseDate: "2021-01-01", MediaType: "movie", OriginalLanguage: "uk"},
 	}
-	best = c.rankResults(context.Background(), tied, "Dune", 2021, MediaTypeMovie)
+	best, _ = c.rankResults(context.Background(), tied, "Dune", 2021, MediaTypeMovie)
 	if best == nil || best.result.ID != 4 {
 		t.Fatalf("language did not break equal identity tie: %+v", best)
 	}

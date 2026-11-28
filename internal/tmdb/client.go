@@ -1,6 +1,7 @@
 package tmdb
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -32,7 +33,7 @@ const (
 )
 
 var (
-	ErrNotFound            = fmt.Errorf("resource not found")
+	ErrNotFound            = errors.New("TMDB HTTP 404: resource not found")
 	reLatinOnly            = regexp.MustCompile(`^[a-zA-Z0-9\s\-\:\.,!?']+$`)
 	reInvalidFilenameChars = regexp.MustCompile(`[^\w\-]`)
 	reIMDBIDExact          = regexp.MustCompile(`(?i)^tt\d{7,10}$`)
@@ -180,23 +181,36 @@ func (c *Client) waitForRateLimit(ctx context.Context) error {
 	return c.rateLimiter.Wait(ctx)
 }
 
+func searchCancellation(ctx context.Context, err error) error {
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	if errors.Is(err, context.Canceled) {
+		return context.Canceled
+	}
+	return nil
+}
+
 func (c *Client) doRequestWithRetry(ctx context.Context, url string, target any) error {
 	const maxRetries = 3
 	backoff := 1 * time.Second
 
 	for attempt := 0; attempt < maxRetries; attempt++ {
 		err := c.doRequest(ctx, url, target)
+		if canceled := searchCancellation(ctx, err); canceled != nil {
+			return canceled
+		}
 		if err == nil {
 			return nil
 		}
 
 		// 🔴 ХІРУРГІЧНЕ ВТРУЧАННЯ: Якщо ресурс не знайдено (404), не робимо ретраї
-		if err == ErrNotFound {
+		if errors.Is(err, ErrNotFound) {
 			return err
 		}
 
 		// Якщо це остання спроба або контекст скасований, повертаємо помилку
-		if attempt == maxRetries-1 || ctx.Err() != nil {
+		if attempt == maxRetries-1 {
 			return err
 		}
 
@@ -248,34 +262,60 @@ func (c *Client) FetchFromParsed(ctx context.Context, parsed ParsedFile, filenam
 
 	// IMDb ID має пріоритет над пошуком за назвою. Два однойменні твори
 	// можуть мати однаковий title/year/type, але різні IMDb identities.
+	var imdbErr error
 	if parsed.IMDBID != "" {
 		info, err := c.tryFindByIMDB(ctx, parsed.IMDBID, filename)
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
+		if canceled := searchCancellation(ctx, err); canceled != nil {
+			return nil, canceled
 		}
 		if err == nil && info != nil {
 			utils.LoggerWithTrace(ctx).Info("imdb_match_found", slog.String("imdb_id", parsed.IMDBID), slog.String("title", info.TitleUA))
 			return info, nil
 		}
+		if err != nil {
+			imdbErr = fmt.Errorf("TMDB /find: %w", err)
+			utils.LoggerWithTrace(ctx).Warn("imdb_lookup_failed", slog.Any("error", imdbErr))
+		}
 	}
 
 	if parsed.CleanTitle == "" {
 		utils.LoggerWithTrace(ctx).Warn("empty_title_after_parsing", slog.String("filename", filename))
-		return nil, nil
+		return nil, imdbErr
 	}
 
-	return c.runPipeline(ctx, parsed, filename)
+	info, err := c.runPipeline(ctx, parsed, filename)
+	if canceled := searchCancellation(ctx, err); canceled != nil {
+		return nil, canceled
+	}
+	if info != nil {
+		return info, nil
+	}
+	return nil, cmp.Or(imdbErr, err)
+}
+
+type imdbFindResponse struct {
+	MovieResults []tmdbSearchResult `json:"movie_results"`
+	TvResults    []tmdbSearchResult `json:"tv_results"`
+}
+
+func (r *imdbFindResponse) UnmarshalJSON(data []byte) error {
+	type payload imdbFindResponse
+	var fresh payload
+	if err := json.Unmarshal(data, &fresh); err != nil {
+		return err
+	}
+	if fresh.MovieResults == nil && fresh.TvResults == nil {
+		return errors.New("missing IMDb result lists")
+	}
+	*r = imdbFindResponse(fresh)
+	return nil
 }
 
 func (c *Client) tryFindByIMDB(ctx context.Context, imdbID, originalFilename string) (*MovieInfo, error) {
 	// 🟡 ХІРУРГІЧНЕ ВТРУЧАННЯ: Додаємо language=uk-UA для отримання офіційної української назви
 	url := fmt.Sprintf("%s/find/%s?api_key=%s&external_source=imdb_id&language=uk-UA", baseURL, imdbID, c.apiKey)
 
-	var resp struct {
-		MovieResults []tmdbSearchResult `json:"movie_results"`
-		TvResults    []tmdbSearchResult `json:"tv_results"`
-	}
-
+	var resp imdbFindResponse
 	if err := c.doRequestWithRetry(ctx, url, &resp); err != nil {
 		return nil, err
 	}
@@ -305,6 +345,9 @@ func (c *Client) FetchByIMDB(ctx context.Context, imdbID, originalFilename strin
 // FetchByCleanTitle — точка входу після Gemini.
 // Назва вже чиста (EN), парсинг не потрібен.
 func (c *Client) FetchByCleanTitle(ctx context.Context, title, year string, mediaType MediaType) (*MovieInfo, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if strings.TrimSpace(title) == "" {
 		return nil, nil
 	}
@@ -353,15 +396,19 @@ func (c *Client) runPipeline(ctx context.Context, parsed ParsedFile, originalFil
 // 4. Сигнал "потрібен Gemini" (nil, nil)
 func (c *Client) pipelineLatin(ctx context.Context, parsed ParsedFile, originalFilename string) (*MovieInfo, error) {
 	// Спроби 1-2: пряма EN назва
-	if info, err := c.trySearch(ctx, parsed, originalFilename); err != nil || info != nil {
-		return info, err
+	info, firstErr := c.SearchWithFallbacks(ctx, parsed, originalFilename)
+	if canceled := searchCancellation(ctx, firstErr); canceled != nil {
+		return nil, canceled
+	}
+	if info != nil {
+		return info, nil
 	}
 
 	// Спроба 3: lat→cyr лише за достатніх фонетичних ознак слов'янського
 	// трансліту. Звичайні англійські назви не витрачають додаткові запити.
 	variants, score, markers := transliterationVariantsForFile(parsed, originalFilename)
 	if score < transliterationMinScore {
-		return nil, nil
+		return nil, cmp.Or(ctx.Err(), firstErr)
 	}
 	utils.LoggerWithTrace(ctx).Info("transliteration_detected", slog.Int("score", score), slog.Any("markers", markers))
 	for variantIndex, cyrillicTitle := range variants {
@@ -371,16 +418,19 @@ func (c *Client) pipelineLatin(ctx context.Context, parsed ParsedFile, originalF
 		cyrParsed := parsed
 		cyrParsed.CleanTitle = cyrillicTitle
 		cyrParsed.TitleLang = TitleLangCyrillic
-		if info, err := c.trySearch(ctx, cyrParsed, originalFilename); err != nil || info != nil {
-			if info != nil {
-				utils.LoggerWithTrace(ctx).Info("transliteration_resolved", slog.String("original_query", parsed.CleanTitle), slog.String("variant", cyrillicTitle), slog.Int("variant_attempts", variantIndex+1), slog.Int("score", score), slog.Int("tmdb_id", info.TMDBID), slog.String("media_type", string(info.MediaType)), slog.String("year", info.Year))
-			}
-			return info, err
+		info, err := c.SearchWithFallbacks(ctx, cyrParsed, originalFilename)
+		if canceled := searchCancellation(ctx, err); canceled != nil {
+			return nil, canceled
 		}
+		if info != nil {
+			utils.LoggerWithTrace(ctx).Info("transliteration_resolved", slog.String("original_query", parsed.CleanTitle), slog.String("variant", cyrillicTitle), slog.Int("variant_attempts", variantIndex+1), slog.Int("score", score), slog.Int("tmdb_id", info.TMDBID), slog.String("media_type", string(info.MediaType)), slog.String("year", info.Year))
+			return info, nil
+		}
+		firstErr = cmp.Or(firstErr, err)
 	}
 
 	// Спроби вичерпано — Gemini на рівні вище
-	return nil, nil
+	return nil, cmp.Or(ctx.Err(), firstErr)
 }
 
 // pipelineCyrillic — стратегія для кириличних назв:
@@ -389,8 +439,12 @@ func (c *Client) pipelineLatin(ctx context.Context, parsed ParsedFile, originalF
 // 3. Транслітерація кирилиця → латиниця → TMDB (en-US індекс)
 // 4. Сигнал "потрібен Gemini" (nil, nil)
 func (c *Client) pipelineCyrillic(ctx context.Context, parsed ParsedFile, originalFilename string) (*MovieInfo, error) {
-	if info, err := c.trySearch(ctx, parsed, originalFilename); err != nil || info != nil {
-		return info, err
+	info, firstErr := c.SearchWithFallbacks(ctx, parsed, originalFilename)
+	if canceled := searchCancellation(ctx, firstErr); canceled != nil {
+		return nil, canceled
+	}
+	if info != nil {
+		return info, nil
 	}
 
 	latinTitle := cyrillicToLatin(parsed.CleanTitle)
@@ -404,59 +458,39 @@ func (c *Client) pipelineCyrillic(ctx context.Context, parsed ParsedFile, origin
 		latinParsed.CleanTitle = latinTitle
 		latinParsed.TitleLang = TitleLangLatin
 
-		if info, err := c.trySearch(ctx, latinParsed, originalFilename); err != nil || info != nil {
-			return info, err
+		info, err := c.SearchWithFallbacks(ctx, latinParsed, originalFilename)
+		if canceled := searchCancellation(ctx, err); canceled != nil {
+			return nil, canceled
 		}
+		if info != nil {
+			return info, nil
+		}
+		firstErr = cmp.Or(firstErr, err)
 	}
 
-	return nil, nil
+	return nil, cmp.Or(ctx.Err(), firstErr)
 }
 
 // searchDirectly was removed — runPipeline is used to ensure transliteration paths are exercised.
 
-// trySearch — виконує пошук і жорстко контролює результат
-func (c *Client) trySearch(ctx context.Context, parsed ParsedFile, originalFilename string) (*MovieInfo, error) {
-	// SearchWithFallbacks сама робить спроби "з роком", "без року" та "інший тип"
-	info, err := c.SearchWithFallbacks(ctx, parsed, originalFilename)
-	if err != nil {
-		return nil, err
+func verifySearchYear(ctx context.Context, info *MovieInfo, parsed ParsedFile) bool {
+	if parsed.Year <= 0 {
+		return true
 	}
-	if err := ctx.Err(); err != nil {
-		return nil, err
+	if info.Year == "" {
+		info.Year = strconv.Itoa(parsed.Year)
 	}
-
-	if info != nil {
-		// 🟠 ФОЛЛБЕК РОКУ: Якщо TMDB повернув порожній рік — підхоплюємо з парсера
-		if info.Year == "" && parsed.Year > 0 {
-			info.Year = fmt.Sprintf("%d", parsed.Year)
-		}
-
-		// 🛡️ БЕТОННА СТІНА ДЛЯ ВСІХ РЕЗУЛЬТАТІВ:
-		if parsed.Year > 0 {
-			foundYear := mustAtoi(info.Year)
-			if foundYear > 0 {
-				// 🔴 ВИНЯТОК ДЛЯ СЕРІАЛІВ: TMDB зберігає рік старту шоу (напр. 2013 для Рік і Морті),
-				// а в файлі — рік релізу сезону (напр. 2023). Пропускаємо якщо TMDB старший або рівний.
-				if parsed.MediaType == MediaTypeTV && foundYear <= parsed.Year {
-					return info, nil
-				}
-
-				diff := foundYear - parsed.Year
-				// 🟢 ВИПРАВЛЕННЯ: Допускаємо похибку ±2 роки (фестивальні прем'єри vs широкий прокат)
-				if diff < -2 || diff > 2 {
-					utils.LoggerWithTrace(ctx).Warn("year_mismatch_blocking",
-						slog.String("title", info.TitleEN),
-						slog.Int("found_year", foundYear),
-						slog.Int("expected_year", parsed.Year),
-					)
-					return nil, nil // Жорстко відхиляємо, віддаємо файл ШІ!
-				}
-			}
-		}
-		return info, nil // Рік збігається — приймаємо
+	foundYear := mustAtoi(info.Year)
+	// Для серіалу рік у файлі може належати сезону, випущеному після старту шоу.
+	if foundYear <= 0 || (parsed.MediaType == MediaTypeTV && foundYear <= parsed.Year) || abs(foundYear-parsed.Year) <= 2 {
+		return true
 	}
-
-	return nil, nil
+	utils.LoggerWithTrace(ctx).Warn("year_mismatch_blocking",
+		slog.String("title", info.TitleEN),
+		slog.Int("found_year", foundYear),
+		slog.Int("expected_year", parsed.Year),
+	)
+	return false
 }
 
 // --- Транслітерація латиниця → кирилиця (рос) ---
@@ -764,6 +798,9 @@ func (c *Client) doRequest(ctx context.Context, url string, target any) error {
 	if err := c.waitForRateLimit(ctx); err != nil {
 		return err
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
@@ -786,15 +823,15 @@ func (c *Client) doRequest(ctx context.Context, url string, target any) error {
 		if resp.StatusCode == http.StatusNotFound {
 			return ErrNotFound
 		}
-		body, readErr := io.ReadAll(resp.Body)
-		if readErr != nil {
-			utils.LoggerWithTrace(ctx).Warn("tmdb_error_body_read_failed", slog.Any("error", readErr))
-		}
-		return fmt.Errorf("TMDB HTTP %d: %s", resp.StatusCode, string(body))
+		return fmt.Errorf("TMDB HTTP %d", resp.StatusCode)
 	}
 
-	if err := json.NewDecoder(resp.Body).Decode(target); err != nil {
-		return err
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("read TMDB response: %w", err)
+	}
+	if err := json.Unmarshal(body, target); err != nil {
+		return fmt.Errorf("invalid TMDB response: %w", err)
 	}
 	return nil
 }
@@ -809,6 +846,9 @@ func isDetailsRequestPath(path string) bool {
 }
 
 func (c *Client) DownloadPoster(ctx context.Context, posterURL, filename string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	flatName := strings.NewReplacer("\\", "_", "/", "_").Replace(filename)
 	// Безпечне ім'я файлу — прибираємо все крім букв, цифр і дефісу
 	safeName := reInvalidFilenameChars.ReplaceAllString(filepath.Base(flatName), "_")
@@ -901,43 +941,42 @@ func resolveHomoglyphs(s string) string {
 	return s
 }
 
-type tmdbMovieAltTitles struct {
-	Titles []struct {
-		Title string `json:"title"`
-	} `json:"titles"`
+type tmdbAliasResponse struct {
+	mediaType MediaType
+	titles    []string
 }
 
-type tmdbTVAltTitles struct {
-	Results []struct {
+func (r *tmdbAliasResponse) UnmarshalJSON(data []byte) error {
+	type alias struct {
 		Title string `json:"title"`
-	} `json:"results"`
+	}
+	var payload struct {
+		Titles  []alias `json:"titles"`
+		Results []alias `json:"results"`
+	}
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return err
+	}
+	items := payload.Titles
+	if r.mediaType == MediaTypeTV {
+		items = payload.Results
+	}
+	if items == nil {
+		return errors.New("missing TMDB alternative title list")
+	}
+	r.titles = make([]string, 0, len(items))
+	for _, item := range items {
+		r.titles = append(r.titles, item.Title)
+	}
+	return nil
 }
 
 // getAlternativeTitles робить швидкий запит для отримання всіх аліасів
 func (c *Client) getAlternativeTitles(ctx context.Context, id int, mediaType MediaType) ([]string, error) {
-	var titles []string
-
-	if mediaType == MediaTypeMovie {
-		url := fmt.Sprintf("%s/movie/%d/alternative_titles?api_key=%s", baseURL, id, c.apiKey)
-		var resp tmdbMovieAltTitles
-		if err := c.doRequestWithRetry(ctx, url, &resp); err == nil {
-			for _, t := range resp.Titles {
-				titles = append(titles, t.Title)
-			}
-		} else {
-			return nil, err
-		}
-	} else {
-		url := fmt.Sprintf("%s/tv/%d/alternative_titles?api_key=%s", baseURL, id, c.apiKey)
-		var resp tmdbTVAltTitles
-		if err := c.doRequestWithRetry(ctx, url, &resp); err == nil {
-			for _, t := range resp.Results {
-				titles = append(titles, t.Title)
-			}
-		} else {
-			return nil, err
-		}
+	url := fmt.Sprintf("%s/%s/%d/alternative_titles?api_key=%s", baseURL, mediaType, id, c.apiKey)
+	resp := tmdbAliasResponse{mediaType: mediaType}
+	if err := c.doRequestWithRetry(ctx, url, &resp); err != nil {
+		return nil, err
 	}
-
-	return titles, nil
+	return resp.titles, nil
 }

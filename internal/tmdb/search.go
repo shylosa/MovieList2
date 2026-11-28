@@ -1,7 +1,10 @@
 package tmdb
 
 import (
+	"cmp"
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/url"
@@ -144,6 +147,24 @@ type tmdbSearchResult struct {
 // tmdbSearchResponse is shared by typed /search/movie and /search/tv responses.
 type tmdbSearchResponse struct {
 	Results []tmdbSearchResult `json:"results"`
+}
+
+func (r *tmdbSearchResponse) UnmarshalJSON(data []byte) error {
+	type payload tmdbSearchResponse
+	var fresh payload
+	if err := json.Unmarshal(data, &fresh); err != nil {
+		return err
+	}
+	if fresh.Results == nil {
+		return errors.New("missing TMDB search result list")
+	}
+	for _, result := range fresh.Results {
+		if result.ID <= 0 {
+			return errors.New("invalid TMDB search result ID")
+		}
+	}
+	*r = tmdbSearchResponse(fresh)
+	return nil
 }
 
 func (c *Client) searchTyped(ctx context.Context, mediaType MediaType, query, language string, queryYear int) ([]tmdbSearchResult, error) {
@@ -404,6 +425,7 @@ func (c *Client) SearchWithFallbacks(
 	}
 	ctx = withSearchAttempts(ctx)
 	attempts := buildAttempts(parsed, originalFilename, c.mediaRootForFile(originalFilename))
+	var firstErr error
 
 	for _, a := range attempts {
 		if err := ctx.Err(); err != nil {
@@ -420,13 +442,17 @@ func (c *Client) SearchWithFallbacks(
 			slog.Int("target_year", a.targetYear),
 		)
 
-		info, err := c.searchAndFetch(ctx, a.query, a.queryYear, a.targetYear, a.mediaType, originalFilename)
+		info, err := c.searchAndFetch(ctx, a.query, a.queryYear, a.targetYear, a.mediaType, originalFilename, parsed)
+		if canceled := searchCancellation(ctx, err); canceled != nil {
+			return nil, canceled
+		}
+		var rejected *searchYearRejection
+		if errors.As(err, &rejected) {
+			return nil, cmp.Or(firstErr, rejected.priorFailure)
+		}
 		if err != nil {
-			if ctx.Err() != nil {
-				return nil, ctx.Err()
-			}
 			logger.Warn("search_failed", slog.String("label", a.label), slog.Any("error", err))
-			continue
+			firstErr = cmp.Or(firstErr, err)
 		}
 		if info != nil {
 			logger.Info("search_success", slog.String("label", a.label), slog.String("title", info.TitleEN))
@@ -444,13 +470,16 @@ func (c *Client) SearchWithFallbacks(
 					slog.String("cyrillic", a.query),
 					slog.String("latin", latinQuery),
 				)
-				info, err = c.searchAndFetch(ctx, latinQuery, a.queryYear, a.targetYear, a.mediaType, originalFilename)
+				info, err = c.searchAndFetch(ctx, latinQuery, a.queryYear, a.targetYear, a.mediaType, originalFilename, parsed)
+				if canceled := searchCancellation(ctx, err); canceled != nil {
+					return nil, canceled
+				}
+				if errors.As(err, &rejected) {
+					return nil, cmp.Or(firstErr, rejected.priorFailure)
+				}
 				if err != nil {
-					if ctx.Err() != nil {
-						return nil, ctx.Err()
-					}
 					logger.Warn("folder_en_fallback_failed", slog.Any("error", err))
-					continue
+					firstErr = cmp.Or(firstErr, err)
 				}
 				if info != nil {
 					logger.Info("search_success", slog.String("label", a.label+" EN"), slog.String("title", info.TitleEN))
@@ -460,7 +489,7 @@ func (c *Client) SearchWithFallbacks(
 		}
 	}
 
-	return nil, nil
+	return nil, cmp.Or(ctx.Err(), firstErr)
 }
 
 // searchAttempt — одна спроба пошуку
@@ -546,6 +575,14 @@ func isScanRootParent(filename, mediaRoot string) bool {
 	return rel == "."
 }
 
+// A fully loaded winner with the wrong file year ends this title cascade, as
+// before. Keep any earlier failed lookup when the winner cannot be accepted.
+type searchYearRejection struct {
+	priorFailure error
+}
+
+func (*searchYearRejection) Error() string { return "TMDB candidate did not pass the file year check" }
+
 // searchAndFetch виконує каскад пошукових запитів до TMDB, ранжує результати,
 // і якщо знайшов переможця — витягує повні деталі.
 // 🔴 КАСКАД ПОШУКУ: Шукаємо в обох індексах (UA + RU) для кириличних запитів
@@ -556,6 +593,7 @@ func (c *Client) searchAndFetch(
 	targetYear int,
 	preferredType MediaType,
 	originalFilename string,
+	parsed ParsedFile,
 ) (*MovieInfo, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -579,10 +617,45 @@ func (c *Client) searchAndFetch(
 		types = types[1:]
 	}
 
-	var bestGlobal *scoredResult
+	var firstErr error
+	var winners []*scoredResult
+	triedDetails := make(map[struct {
+		mediaType string
+		id        int
+	}]bool)
 	logger := utils.LoggerWithTrace(ctx).With(slog.String("component", "tmdb_search_cascade"))
 
-LANG_LOOP:
+	fetchWinners := func() (*MovieInfo, error) {
+		sort.SliceStable(winners, func(i, j int) bool { return winners[i].score > winners[j].score })
+		for _, best := range winners {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			key := struct {
+				mediaType string
+				id        int
+			}{best.result.MediaType, best.result.ID}
+			if triedDetails[key] {
+				continue
+			}
+			triedDetails[key] = true
+			info, err := c.fetchRankedDetails(ctx, best, query, targetYear, preferredType, originalFilename)
+			if canceled := searchCancellation(ctx, err); canceled != nil {
+				return nil, canceled
+			}
+			if err != nil {
+				logger.Warn("search_candidate_details_failed", slog.Any("error", err))
+				firstErr = cmp.Or(firstErr, err)
+				continue
+			}
+			if !verifySearchYear(ctx, info, parsed) {
+				return nil, &searchYearRejection{priorFailure: firstErr}
+			}
+			return info, nil
+		}
+		return nil, nil
+	}
+
 	for _, langParam := range langs {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -592,11 +665,13 @@ LANG_LOOP:
 				return nil, err
 			}
 			results, err := c.searchTyped(ctx, mediaType, query, langParam, queryYear)
+			if canceled := searchCancellation(ctx, err); canceled != nil {
+				return nil, canceled
+			}
 			if err != nil {
-				if ctx.Err() != nil {
-					return nil, ctx.Err()
-				}
-				logger.Debug("search_failed_for_lang", slog.String("lang", langParam), slog.Any("error", err))
+				err = fmt.Errorf("TMDB /search/%s (%s): %w", mediaType, langParam, err)
+				logger.Warn("search_failed_for_lang", slog.Any("error", err))
+				firstErr = cmp.Or(firstErr, err)
 				continue
 			}
 
@@ -615,10 +690,11 @@ LANG_LOOP:
 				continue
 			}
 
-			bestForLang := c.rankResults(ctx, results, query, targetYear, preferredType)
-			if err := ctx.Err(); err != nil {
-				return nil, err
+			bestForLang, err := c.rankResults(ctx, results, query, targetYear, preferredType)
+			if canceled := searchCancellation(ctx, err); canceled != nil {
+				return nil, canceled
 			}
+			firstErr = cmp.Or(firstErr, err)
 			if bestForLang != nil {
 				logger.Debug("best_for_lang",
 					slog.String("lang", langParam),
@@ -627,26 +703,32 @@ LANG_LOOP:
 					slog.Int("score", bestForLang.score),
 				)
 
-				if bestGlobal == nil || bestForLang.score > bestGlobal.score {
-					bestGlobal = bestForLang
-				}
-				// Якщо український індекс дав достатній результат — зупиняємо каскад (руський індекс не запитувати)
+				winners = append(winners, bestForLang)
+				// Зупиняємо мовний каскад після підтвердження сильного українського збігу.
 				if langParam == "uk-UA" && bestForLang.score >= 140 {
 					logger.Info("uk_win_threshold_reached",
 						slog.String("lang", langParam),
 						slog.Int("score", bestForLang.score),
 					)
-					break LANG_LOOP
+					if info, err := fetchWinners(); info != nil || err != nil {
+						return info, err
+					}
 				}
 			}
 		}
 	}
 
-	if bestGlobal == nil {
+	if len(winners) == 0 {
 		logger.Debug("no_best_candidate_found")
-		return nil, nil
 	}
+	if info, err := fetchWinners(); info != nil || err != nil {
+		return info, err
+	}
+	return nil, cmp.Or(ctx.Err(), firstErr)
+}
 
+func (c *Client) fetchRankedDetails(ctx context.Context, bestGlobal *scoredResult, query string, targetYear int, preferredType MediaType, originalFilename string) (*MovieInfo, error) {
+	logger := utils.LoggerWithTrace(ctx).With(slog.String("component", "tmdb_search_cascade"))
 	logger.Info("candidate_ranking_summary",
 		slog.String("title", coalesce(bestGlobal.result.Title, bestGlobal.result.Name)),
 		slog.Int("score", bestGlobal.score),
@@ -660,27 +742,31 @@ LANG_LOOP:
 	}
 
 	info, err := c.GetDetails(ctx, detailType, bestGlobal.result.ID, originalFilename)
-
-	if err == nil && info != nil {
-		info.VerificationScore = deterministicVerificationScore(bestGlobal.score)
-		if detailType != preferredType {
-			info.NeedsReview, info.ReviewReason = true, "media_type_conflict"
-		} else if targetYear > 0 && bestGlobal.year > 0 && abs(bestGlobal.year-targetYear) > 1 {
-			info.NeedsReview, info.ReviewReason = true, "year_conflict"
-		} else if info.VerificationScore < ReviewVerificationThreshold {
-			info.NeedsReview, info.ReviewReason = true, "low_verification_score"
-		}
-		// Keep the returned title, never the query. Cyrillic titles are trusted
-		// as verification aliases only after an exact TMDB response match.
-		if !utils.HasCyrillic(query) || normalizeForCompare(query) == normalizeForCompare(coalesce(bestGlobal.result.Title, bestGlobal.result.Name)) {
-			info.SearchTitle = coalesce(bestGlobal.result.Title, bestGlobal.result.Name)
-		}
-		info.AmbiguousExact = bestGlobal.ambiguous
-		if bestGlobal.matchedAlias != "" {
-			info.MatchedAlias = bestGlobal.matchedAlias
-		}
+	if err != nil {
+		return nil, fmt.Errorf("TMDB details %s:%d: %w", detailType, bestGlobal.result.ID, err)
 	}
-	return info, err
+	if info == nil {
+		return nil, fmt.Errorf("missing TMDB details %s:%d", detailType, bestGlobal.result.ID)
+	}
+
+	info.VerificationScore = deterministicVerificationScore(bestGlobal.score)
+	if detailType != preferredType {
+		info.NeedsReview, info.ReviewReason = true, "media_type_conflict"
+	} else if targetYear > 0 && bestGlobal.year > 0 && abs(bestGlobal.year-targetYear) > 1 {
+		info.NeedsReview, info.ReviewReason = true, "year_conflict"
+	} else if info.VerificationScore < ReviewVerificationThreshold {
+		info.NeedsReview, info.ReviewReason = true, "low_verification_score"
+	}
+	// Keep the returned title, never the query. Cyrillic titles are trusted
+	// as verification aliases only after an exact TMDB response match.
+	if !utils.HasCyrillic(query) || normalizeForCompare(query) == normalizeForCompare(coalesce(bestGlobal.result.Title, bestGlobal.result.Name)) {
+		info.SearchTitle = coalesce(bestGlobal.result.Title, bestGlobal.result.Name)
+	}
+	info.AmbiguousExact = bestGlobal.ambiguous
+	if bestGlobal.matchedAlias != "" {
+		info.MatchedAlias = bestGlobal.matchedAlias
+	}
+	return info, nil
 }
 
 // rankResults ранжує результати пошуку і повертає найкращого кандидата.
@@ -691,27 +777,29 @@ func (c *Client) rankResults(
 	query string,
 	targetYear int,
 	preferredType MediaType,
-) *scoredResult {
+) (*scoredResult, error) {
 	normQuery := normalizeForCompare(query)
 
 	var best *scoredResult
 	var ranked []scoredResult
+	var firstErr error
 
 	for i, res := range results {
-		if ctx.Err() != nil {
-			return nil
+		if err := ctx.Err(); err != nil {
+			return nil, err
 		}
 		// Людей ігноруємо завжди
 		if res.MediaType == "person" {
 			continue
 		}
 
-		scored := c.scoreResult(ctx, res, i, normQuery, targetYear, preferredType)
+		scored, err := c.scoreResult(ctx, res, i, normQuery, targetYear, preferredType)
+		if canceled := searchCancellation(ctx, err); canceled != nil {
+			return nil, canceled
+		}
+		firstErr = cmp.Or(firstErr, err)
 		if scored.score > -1000 {
 			ranked = append(ranked, scored)
-		}
-		if ctx.Err() != nil {
-			return nil
 		}
 
 		utils.LoggerWithTrace(ctx).Debug("candidate_evaluated",
@@ -731,7 +819,7 @@ func (c *Client) rankResults(
 	}
 
 	if best == nil {
-		return nil
+		return nil, firstErr
 	}
 
 	// Динамічний поріг: пом'якшуємо вимоги, особливо для транслітерації
@@ -756,7 +844,7 @@ func (c *Client) rankResults(
 			slog.Int("score", best.score),
 			slog.Int("threshold", threshold),
 		)
-		return nil
+		return nil, firstErr
 	}
 	sort.SliceStable(ranked, func(i, j int) bool {
 		if ranked[i].score != ranked[j].score {
@@ -777,7 +865,7 @@ func (c *Client) rankResults(
 		}
 	}
 
-	return best
+	return best, firstErr
 }
 
 func deterministicVerificationScore(score int) float64 {
@@ -798,7 +886,7 @@ func (c *Client) scoreResult(
 	normQuery string,
 	targetYear int,
 	preferredType MediaType,
-) scoredResult {
+) (scoredResult, error) {
 	score := 0
 	yearScore := 0
 	langScore := 0
@@ -829,6 +917,7 @@ func (c *Client) scoreResult(
 	// --- ПЕРЕВІРКА АЛІАСІВ (ПУНКТ 1) ---
 	// Якщо базовий збіг низький, але це топовий результат TMDB — перевіряємо аліаси
 	var matchedAlias string
+	var aliasErr error
 	if titleScore < 100 && index < 3 {
 		mediaType := MediaTypeMovie
 		if res.MediaType == "tv" {
@@ -836,6 +925,10 @@ func (c *Client) scoreResult(
 		}
 
 		alts, err := c.getAlternativeTitles(ctx, res.ID, mediaType)
+		if err != nil {
+			aliasErr = fmt.Errorf("TMDB alternative titles %s:%d: %w", mediaType, res.ID, err)
+			utils.LoggerWithTrace(ctx).Warn("search_candidate_aliases_failed", slog.Any("error", aliasErr))
+		}
 		if err == nil {
 			for _, alt := range alts {
 				altNorm := normalizeForCompare(alt)
@@ -860,7 +953,7 @@ func (c *Client) scoreResult(
 			slog.Int("year", resYear),
 			slog.String("reason", "titleScore==0"),
 		)
-		return scoredResult{result: res, score: -1000, year: resYear}
+		return scoredResult{result: res, score: -1000, year: resYear}, aliasErr
 	}
 
 	score += titleScore
@@ -930,7 +1023,7 @@ func (c *Client) scoreResult(
 		slog.Int("finalScore", score),
 	)
 
-	return scoredResult{result: res, score: score, identityScore: identityScore, year: resYear, matchedAlias: matchedAlias}
+	return scoredResult{result: res, score: score, identityScore: identityScore, year: resYear, matchedAlias: matchedAlias}, aliasErr
 }
 
 // matchScore повертає бал за збіг запиту з назвами результату.

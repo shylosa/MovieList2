@@ -106,7 +106,6 @@ func TestGroupedTVConflictSurvivesTMDBConversion(t *testing.T) {
 	results <- scanResult{
 		fname:        "Superkopy.80.2026.mkv",
 		info:         &tmdb.MovieInfo{TMDBID: 1002109, TitleEN: "Super Troopers 80", MediaType: tmdb.MediaTypeMovie},
-		needsGemini:  false,
 		needsReview:  true,
 		reviewReason: groupedTVReviewReason,
 	}
