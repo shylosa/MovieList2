@@ -84,12 +84,11 @@ type Client struct {
 	mediaRootMu sync.RWMutex
 	rateLimiter *rate.Limiter
 
-	detailsCache          sync.Map
-	candidateDetailsCache sync.Map
-	detailsGroup          singleflight.Group
-	searchCalls           atomic.Int64
-	detailsCalls          atomic.Int64
-	cacheHits             atomic.Int64
+	// detailsGroup об'єднує лише одночасні запити тієї самої identity; це не
+	// кеш між операціями, результат ніде не зберігається.
+	detailsGroup singleflight.Group
+	searchCalls  atomic.Int64
+	detailsCalls atomic.Int64
 }
 
 func NewClient(cfg *config.Config) *Client {
@@ -161,20 +160,18 @@ func (c *Client) mediaRootPath() string {
 	return c.mediaRoot
 }
 
-// ClearCaches — безпечне очищення кешу між скануваннями
-func (c *Client) ClearCaches() {
-	c.detailsCache.Range(func(key, value any) bool { c.detailsCache.Delete(key); return true })
-	c.candidateDetailsCache.Range(func(key, value any) bool { c.candidateDetailsCache.Delete(key); return true })
+// ResetRequestMetrics — скидає лічильники HTTP-запитів між операціями.
+// Результатів TMDB клієнт не кешує, тому очищати нема чого.
+func (c *Client) ResetRequestMetrics() {
 	c.searchCalls.Store(0)
 	c.detailsCalls.Store(0)
-	c.cacheHits.Store(0)
-	slog.Info("tmdb_caches_cleared")
+	slog.Info("tmdb_metrics_reset")
 }
 
-type RequestMetrics struct{ SearchCalls, DetailsCalls, CacheHits int64 }
+type RequestMetrics struct{ SearchCalls, DetailsCalls int64 }
 
 func (c *Client) RequestMetrics() RequestMetrics {
-	return RequestMetrics{c.searchCalls.Load(), c.detailsCalls.Load(), c.cacheHits.Load()}
+	return RequestMetrics{c.searchCalls.Load(), c.detailsCalls.Load()}
 }
 
 func (c *Client) waitForRateLimit(ctx context.Context) error {

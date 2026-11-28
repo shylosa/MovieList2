@@ -387,3 +387,68 @@ HTTP 404 завершує конкретний URL за одну спробу і
 | Race detector | `CGO_ENABLED=0`, `gcc` відсутній — пропущено, як у R1–R5. Live API, production БД, реальна медіатека, export/sync/push — не використовувалися. |
 
 **Рішення R6 — ACCEPT за офлайн-критеріями.** Автоматичне розпізнавання не читає й не пише `ai_resolutions` (0 читань/записів у B за wire- і row-проксі), редактор не залежить від L2, ручні підказки збережені, identity R1–R5 не змінилися, нових false positive немає, confirmed-записи захищені, STOP і rollback працюють. Ціна — +1 AI inference на кожен файл, що раніше брався з L2 (+4 batch на 12 синтетичних сценаріїв), виміряно й не компенсовано новим кешем. Схема SQLite не змінена, історична таблиця й рядки на місці. Якість на реальній медіатеці та фактичний бюджет AI поза вимірюванням.
+
+## R7. Remove TMDB Details Caches
+
+Базова лінія A — HEAD R6 (`3a6318f4338443a3f04854060ade401a3e83f798`, окремий git worktree). B — робоче дерево після R7. Однакові офлайн-фікстури (`internal/tmdb/r7_ab_test.go` скопійовано у worktree A; файл свідомо використовує лише публічний API, тому компілюється й проходить на обох сторонах). Оракул: `(filename, MediaType, TMDB ID)` для повних деталей і `(requested MediaType, requested ID, expected details)` для preview; A/B звіряються з ним окремо.
+
+### R7-A. Вилучення `detailsCache`
+
+Вилучено поле `Client.detailsCache`, усі `Load`/`Store`/інвалідацію в `GetDetails`/`RefreshDetails`. `GetDetails` лишився диспетчерем через `singleflight` (`detailsGroup.DoChan`, ключ `type:id`) — він об'єднує лише одночасні запити й нічого не зберігає; кожен читач отримує власну копію `MovieInfo`, тому `LocalPosterPath` залишається per-file. `RefreshDetails` і `GetDetails` використовують спільний `loadTypedDetails` (typed movie/tv loaders, без дубля). R3 identity validation, R4 error semantics, водоспад `uk-UA → ru-RU → en-US` із раннім виходом, rate limiter і retry не змінено. [client.go](../../internal/tmdb/client.go), [details.go](../../internal/tmdb/details.go)
+
+### R7-B. Вилучення `candidateDetailsCache`
+
+Вилучено поле `Client.candidateDetailsCache`, `Load`/`Store` в `GetCandidateDetails`. Preview — простий typed запит `uk-UA` без credits, aliases і локального постера; `ShortFilm`, JSON-поля й typed identity validation збережено. `SearchCandidates` не змінено: список до п’яти кандидатів не завантажує details.
+
+### Метрики й ClearCaches
+
+Зовнішніх споживачів немає: `tmdb_cache_hits` був лише slog-рядком `scan_completed` (подія `scan-finished` шле тільки msg; у `frontend/wailsjs` згадок немає), `ClearCaches` — лише два call site в `app.go`. Вилучено `cacheHits`/`RequestMetrics.CacheHits` і рядок `tmdb_cache_hits`; `ClearCaches` перейменовано на `ResetRequestMetrics` (скидає лише `searchCalls`/`detailsCalls`). Жодного фіктивного лічильника чи шару сумісності не додано. Wails API, події та DOM ID не змінено.
+
+### Singleflight і cancellation (перевірено бар'єрами й каналами, без sleep)
+
+| Сценарій | Результат у B |
+| --- | --- |
+| 20 одночасних читачів `movie:42` | 1 waterfall HTTP (singleflight); наступне незалежне читання після завершення групи — ще 1 HTTP (всього 2) |
+| Одночасні `movie:42` і `tv:42` | 2 різні ключі, 2 HTTP, типізовані відповіді не змішуються |
+| Скасування одного waiter | waiter отримує `context.Canceled`, перший caller завершується успішно (чинний тест) |
+| Скасування першого caller, який розпочав HTTP | **Відома межа, зафіксована, не прихована**: singleflight ділить один запуск із ctx першого caller, тому незалежний waiter тієї самої пари теж отримує `context.Canceled` (`TestR7SingleflightFirstCallerCancelAffectsWaiters`). Після завершення групи наступний виклик із живим ctx успішний (всього 2 HTTP). На практиці scan/repair ділять спільний ctx операції, тому STOP не страждає; фікс (detach ctx через `context.WithoutCancel` або відмова від singleflight) — окреме рішення наступного етапу, у R7 не латано |
+| HTTP 500 для спільного запиту | Група: 9 HTTP (3 мови × 3 retries), усі waiters отримують помилку; наступна спроба — успішна (+1 HTTP) |
+| Повторний виклик після завершення групи | Новий HTTP, свіжа відповідь |
+
+### A/B HTTP (однакові фікстури, оракул identity зійшовся на A і B в усіх сценаріях)
+
+| Сценарій | HTTP A (R6, кеш) | HTTP B (R7) | fresh після зміни відповіді TMDB |
+| --- | ---: | ---: | --- |
+| повторний GetDetails тієї самої identity (той самий файл) | 2 (details 1 + poster) | 3 (details 2 + poster) | A: stale, B: свіжа |
+| GetDetails після зміни відповіді TMDB | 2 | 3 | A: `fresh=false`, B: `fresh=true` |
+| `movie:42` і `tv:42` з однаковим числовим ID | 2 | 2 | типи розділені в обох |
+| два файли з однаковою identity | 3 (details 1 + 2 posters) | 4 (details 2 + 2 posters) | окремі `42_a_mkv.jpg` / `42_b_mkv.jpg` в обох |
+| RefreshDetails після GetDetails | 2 | 2 | паритет |
+| повторне відкриття preview | 1 | 2 | A: stale, B: свіжа |
+| preview → confirm | 3 | 3 | паритет |
+| список 5 кандидатів без preview | 1 (лише search) | 1 | паритет, details не вантажаться |
+
+Очікувана різниця: повторні незалежні звернення виконують додаткові HTTP; одночасні об'єднуються singleflight; повторний preview не отримує застарілий результат. Незалежні файли не обмінюються файловим станом. Кожна операція має скінченну кількість запитів (retries 3 на URL, без нових безмежних повторів), rate limiting збережено.
+
+### Перевірки
+
+| Команда | Результат |
+| --- | --- |
+| `go test ./internal/tmdb -run '^TestR7' -count=1 -v` ×10 прогонів | PASS стабільно (включно з singleflight-сценаріями на бар'єрах); R7_AB-рядки журналу дають A/B-таблицю вище |
+| `go test ./internal/tmdb -run '^TestR7ABScenarios' -count=1 -v` у worktree A (HEAD R6) | PASS, оракул identity зійшовся; HTTP-лічильники A — у таблиці |
+| `go test ./internal/tmdb -count=3` | ok (22 s) |
+| `go test . ./internal/tmdb -run '^(TestR[1-7].*)' -count=1` | ok — регресії R1–R6 пройшли на B (typed search, незалежність файлів, R3 identity, R4 errors, R5 correlation, R6 без L2), плюс R7 |
+| `go test ./... -count=1` | Усі 10 пакетів ok (root 89 s) |
+| `go vet ./...`, `gofmt -l`, `git diff --check` | exit 0, зауважень немає |
+| Race detector | `gcc` відсутній (`CGO_ENABLED=0`) — пропущено, як у R1–R6; конкурентні R7-тести прогнано 10 разів без флейків |
+| Оновлені тести | `TestR3DetailsResponse` (повторне читання йде в TMDB), `TestR3DetailsCancellation` (після cancel — свіжий успішний HTTP), `TestR3AliasCollision`, `TestR2PositiveFileContext`, `TestR2IndependentSearchAfterMissOrError`, `TestR2IMDbPrecedenceAndMissFallback` (другий файл/запит тієї ж identity — свіжий details), `TestRefreshDetailsOnlyStoredEntityAndFreshData`, `TestGetCandidateDetailsShortFilmAndFreshReads` (2 preview = 2 HTTP, свіжі дані); нові `r7_ab_test.go`, `r7_singleflight_test.go` |
+| Live API, production БД, реальна медіатека, export/sync/push | Не використовувалися |
+
+### Ризики та межі
+
+- +1 details HTTP на кожне повторне незалежне звернення до тої самої identity (другий файл, повторний preview, Refresh після GetDetails у межах операції поза singleflight) — виміряно, свідомо прийнято ціною відсутності застарілих даних.
+- Відома межа singleflight: скасування першого caller провалює waiters тої самої пари (shared ctx). Задокументовано тестом; не є регресією R7 (та сама поведінка була в A), рішення — наступний етап.
+- Відома межа R6 (`l2_hit_divergent_ai: 555 → unresolved`, L2-only назва в редакторі) не змінена й не належить R7.
+- Якість на реальній медіатеці та фактичний HTTP-бюджет поза офлайн-вимірюванням.
+
+**Рішення R7 — ACCEPT за офлайн-критеріями.** `detailsCache` і `candidateDetailsCache` вилучено без заміни; читань/записів цих кешів немає; нових кешів немає; identity R1–R6 збережено (оракул A/B); R3 identity validation, локалізаційний водоспад, preview, confirm, Repair, per-file постери, cancellation і STOP працюють; метрики не містять фіктивного cache-hit; додаткові HTTP виміряно. Wails API, події, SQLite schema, frontend не змінено.

@@ -15,15 +15,18 @@ import (
 	"golang.org/x/time/rate"
 )
 
-func TestGetCandidateDetailsShortFilmAndCache(t *testing.T) {
+func TestGetCandidateDetailsShortFilmAndFreshReads(t *testing.T) {
 	var calls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		calls.Add(1)
+		n := calls.Add(1)
 		if strings.Contains(r.URL.RawQuery, "append_to_response") {
 			t.Error("candidate details requested appended data")
 		}
+		if r.URL.Query().Get("language") != "uk-UA" {
+			t.Error("candidate details must use a single uk-UA request")
+		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"id":385938,"title":"Oculus","original_title":"Oculus","release_date":"2013-01-18","runtime":14,"vote_average":4.2,"vote_count":8,"poster_path":"/oculus.jpg","genres":[{"name":"Horror"}],"overview":"Short."}`))
+		_, _ = w.Write([]byte(fmt.Sprintf(`{"id":385938,"title":"Oculus %d","original_title":"Oculus","release_date":"2013-01-18","runtime":14,"vote_average":4.2,"vote_count":%d,"poster_path":"/oculus.jpg","genres":[{"name":"Horror"}],"overview":"Short."}`, n, n)))
 	}))
 	defer server.Close()
 	c := &Client{client: &http.Client{Transport: &candidateDetailsTransport{server.URL}}, rateLimiter: rate.NewLimiter(rate.Inf, 1)}
@@ -35,11 +38,15 @@ func TestGetCandidateDetailsShortFilmAndCache(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !first.ShortFilm || first.Runtime != 14 || first.VoteCount != 8 || second.TMDBID != first.TMDBID {
+	if !first.ShortFilm || first.Runtime != 14 || first.VoteCount != 1 || second.TMDBID != first.TMDBID {
 		t.Fatalf("details: first=%+v second=%+v", first, second)
 	}
-	if calls.Load() != 1 {
-		t.Fatalf("requests=%d, want 1", calls.Load())
+	// R7: кешу preview немає — повторне відкриття отримує актуальну відповідь TMDB.
+	if second.Title == first.Title || second.VoteCount != 2 {
+		t.Fatalf("second preview was not fresh: first=%+v second=%+v", first, second)
+	}
+	if calls.Load() != 2 {
+		t.Fatalf("requests=%d, want 2 (one per preview open)", calls.Load())
 	}
 }
 

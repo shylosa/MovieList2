@@ -324,8 +324,19 @@ func needsInternetTranslation(text string) bool {
 	return language == utils.LanguageUnknown || language == utils.LanguageEnglish || language == utils.LanguageRussian
 }
 
+// loadTypedDetails — єдине завантаження повних деталей через typed movie/tv
+// loaders. Кожен виклик звертається до TMDB; результат ніде не кешується.
+func (c *Client) loadTypedDetails(ctx context.Context, mediaType MediaType, id int) (*MovieInfo, error) {
+	if mediaType == MediaTypeTV {
+		return c.getTVDetails(ctx, id, "")
+	}
+	return c.getMovieDetails(ctx, id, "")
+}
+
 // GetDetails — публічний диспетчер: викликає movie або tv залежно від типу.
 // originalFilename використовується тільки для іменування файлу постера.
+// Одночасні запити тієї самої identity об'єднує singleflight; повторний
+// незалежний виклик завжди отримує свіжу відповідь TMDB.
 func (c *Client) GetDetails(ctx context.Context, mediaType MediaType, id int, originalFilename string) (*MovieInfo, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -334,42 +345,20 @@ func (c *Client) GetDetails(ctx context.Context, mediaType MediaType, id int, or
 		return nil, fmt.Errorf("valid TMDB identity required")
 	}
 	key := fmt.Sprintf("%s:%d", mediaType, id)
+	result := c.detailsGroup.DoChan(key, func() (any, error) {
+		return c.loadTypedDetails(ctx, mediaType, id)
+	})
 	var info *MovieInfo
-	if cached, ok := c.detailsCache.Load(key); ok {
-		copy := *(cached.(*MovieInfo))
-		info = &copy
-		c.cacheHits.Add(1)
-	} else {
-		result := c.detailsGroup.DoChan(key, func() (any, error) {
-			if cached, ok := c.detailsCache.Load(key); ok {
-				c.cacheHits.Add(1)
-				return cached, nil
-			}
-			var loaded *MovieInfo
-			var err error
-			if mediaType == MediaTypeTV {
-				loaded, err = c.getTVDetails(ctx, id, "")
-			} else {
-				loaded, err = c.getMovieDetails(ctx, id, "")
-			}
-			if err != nil || loaded == nil {
-				return loaded, err
-			}
-			copy := *loaded
-			copy.LocalPosterPath = ""
-			c.detailsCache.Store(key, &copy)
-			return &copy, nil
-		})
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case loaded := <-result:
-			if loaded.Err != nil || loaded.Val == nil {
-				return nil, loaded.Err
-			}
-			copy := *(loaded.Val.(*MovieInfo))
-			info = &copy
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case loaded := <-result:
+		if loaded.Err != nil || loaded.Val == nil {
+			return nil, loaded.Err
 		}
+		// Кожен читач отримує власну копію: LocalPosterPath залежить від файла.
+		copy := *(loaded.Val.(*MovieInfo))
+		info = &copy
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
@@ -390,7 +379,7 @@ func (c *Client) GetDetails(ctx context.Context, mediaType MediaType, id int, or
 	return info, nil
 }
 
-// RefreshDetails bypasses the recognition cache and only fetches the stored entity.
+// RefreshDetails only fetches the stored typed identity from TMDB.
 // No filename parsing, search or type inference is allowed on this path.
 func (c *Client) RefreshDetails(ctx context.Context, mediaType MediaType, id int) (*MovieInfo, error) {
 	if id <= 0 || (mediaType != MediaTypeMovie && mediaType != MediaTypeTV) {
@@ -399,34 +388,17 @@ func (c *Client) RefreshDetails(ctx context.Context, mediaType MediaType, id int
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	var info *MovieInfo
-	var err error
-	if mediaType == MediaTypeTV {
-		info, err = c.getTVDetails(ctx, id, "")
-	} else {
-		info, err = c.getMovieDetails(ctx, id, "")
-	}
-	if err != nil {
-		return nil, err
-	}
-	c.detailsCache.Delete(fmt.Sprintf("%s:%d", mediaType, id))
-	return info, nil
+	return c.loadTypedDetails(ctx, mediaType, id)
 }
 
 // GetCandidateDetails returns on-demand preview data without credits, aliases,
-// or a local poster download.
+// or a local poster download. Кожне відкриття preview — свіжий запит до TMDB.
 func (c *Client) GetCandidateDetails(ctx context.Context, mediaType MediaType, id int) (*CandidateDetails, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	if id <= 0 || (mediaType != MediaTypeMovie && mediaType != MediaTypeTV) {
 		return nil, fmt.Errorf("invalid candidate identity")
-	}
-	key := fmt.Sprintf("candidate:%s:%d", mediaType, id)
-	if cached, ok := c.candidateDetailsCache.Load(key); ok {
-		copy := *(cached.(*CandidateDetails))
-		c.cacheHits.Add(1)
-		return &copy, nil
 	}
 	requestURL := fmt.Sprintf("%s/%s/%d?api_key=%s&language=uk-UA", baseURL, mediaType, id, c.apiKey)
 	result := &CandidateDetails{MediaType: mediaType}
@@ -457,8 +429,6 @@ func (c *Client) GetCandidateDetails(ctx context.Context, mediaType MediaType, i
 			result.PosterURL = imageBaseURL + d.PosterPath
 		}
 	}
-	copy := *result
-	c.candidateDetailsCache.Store(key, &copy)
 	return result, nil
 }
 

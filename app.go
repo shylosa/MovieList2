@@ -782,7 +782,6 @@ func (a *App) RunScan() {
 				slog.Int64("groq_calls", metrics.Groq),
 				slog.Int64("tmdb_search_calls", tmdbMetrics.SearchCalls),
 				slog.Int64("tmdb_details_calls", tmdbMetrics.DetailsCalls),
-				slog.Int64("tmdb_cache_hits", tmdbMetrics.CacheHits),
 				slog.Bool("cancelled", stoppedByUser),
 			)
 			if stoppedByUser {
@@ -819,9 +818,9 @@ func (a *App) RunScan() {
 			}
 		}()
 
-		// 🟢 Очищуємо кеш від попереднього сканування
+		// 🟢 Скидаємо лічильники TMDB-запитів від попереднього сканування
 		if a.tmdbClient != nil {
-			a.tmdbClient.ClearCaches()
+			a.tmdbClient.ResetRequestMetrics()
 		}
 
 		// Reset Gemini quota lock so recovered quotas are retried in this session.
@@ -2160,7 +2159,7 @@ func (a *App) FixSelected(selected []FixRequest) {
 
 	a.emitEvent(a.ctx, "scan-started")
 	if a.tmdbClient != nil {
-		a.tmdbClient.ClearCaches()
+		a.tmdbClient.ResetRequestMetrics()
 	}
 
 	var withHint []FixRequest

@@ -58,12 +58,11 @@ func TestR3AliasCollision(t *testing.T) {
 						e     entity
 						query string
 						hit   bool
-						cold  bool
 					}{
-						{first, first.alias, strings.Contains(first.alts, first.alias), true},
-						{second, second.alias, strings.Contains(second.alts, second.alias), true},
-						{second, first.alias, false, false},
-						{first, first.alias, strings.Contains(first.alts, first.alias), false},
+						{first, first.alias, strings.Contains(first.alts, first.alias)},
+						{second, second.alias, strings.Contains(second.alts, second.alias)},
+						{second, first.alias, false},
+						{first, first.alias, strings.Contains(first.alts, first.alias)},
 					} {
 						start := len(*calls)
 						var got *MovieInfo
@@ -85,7 +84,9 @@ func TestR3AliasCollision(t *testing.T) {
 							fmt.Sprintf("/search/%s?language=en-US&query=%s", check.e.kind, strings.ReplaceAll(check.query, " ", "+")),
 							fmt.Sprintf("/%s/42/alternative_titles?", check.e.kind),
 						}
-						if check.hit && check.cold {
+						// R7: кешу деталей немає — кожен успішний пошук отримує свіжі details,
+						// зокрема повторний для тої самої identity.
+						if check.hit {
 							wantCalls = append(wantCalls, fmt.Sprintf("/%s/42?append_to_response=credits&language=uk-UA", check.e.kind))
 						}
 						r2CheckCalls(t, (*calls)[start:], wantCalls)

@@ -8,6 +8,8 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 )
@@ -123,11 +125,9 @@ func TestR3DetailsResponse(t *testing.T) {
 						if actual != want || err != nil {
 							t.Errorf("second read used wrong identity: %+v, %v", actual, err)
 						}
-						if tc.name == "valid" {
-							r2CheckCalls(t, (*calls)[start:], nil)
-						} else {
-							r2CheckCalls(t, (*calls)[start:], wantCalls[:1])
-						}
+						// R7: кешу деталей немає — повторне читання завжди йде в TMDB.
+						// Після fixed=true відповідь валідна, тому водоспад зупиняється на uk-UA.
+						r2CheckCalls(t, (*calls)[start:], wantCalls[:1])
 					})
 				})
 			}
@@ -213,10 +213,16 @@ func TestR3DetailsCancellation(t *testing.T) {
 		ctx, cancel := context.WithCancel(t.Context())
 		defer cancel()
 		entered := make(chan struct{})
+		var once sync.Once
+		var blocking atomic.Bool
+		blocking.Store(true)
 		c, calls := r2Fixture(func(req *http.Request) (*http.Response, error) {
-			close(entered)
-			<-req.Context().Done()
-			return nil, req.Context().Err()
+			if blocking.Load() {
+				once.Do(func() { close(entered) })
+				<-req.Context().Done()
+				return nil, req.Context().Err()
+			}
+			return r2Response(200, fixtureMovieDetails)
 		})
 		done := make(chan error, 1)
 		go func() {
@@ -233,9 +239,13 @@ func TestR3DetailsCancellation(t *testing.T) {
 		}
 		synctest.Wait()
 		r2CheckCalls(t, *calls, []string{"/movie/42?append_to_response=credits&language=uk-UA"})
-		if _, ok := c.detailsCache.Load("movie:42"); ok {
-			t.Error("canceled details entered the cache")
+		// R7: скасований запит ніде не зберігається — наступний виклик робить свіжий HTTP.
+		blocking.Store(false)
+		fresh, err := c.GetDetails(t.Context(), MediaTypeMovie, 42, "")
+		if err != nil || fresh == nil || fresh.TMDBID != 42 {
+			t.Errorf("read after cancellation: %+v, %v", fresh, err)
 		}
+		r2CheckCalls(t, (*calls)[1:], []string{"/movie/42?append_to_response=credits&language=uk-UA"})
 	})
 }
 

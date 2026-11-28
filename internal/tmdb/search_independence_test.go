@@ -150,9 +150,9 @@ func TestR2PositiveFileContext(t *testing.T) {
 				want := r2Identity{MediaTypeMovie, 42}
 				year, searchTitle, poster, review := "2024", "Signal", "42_Alpha_Signal_mkv.jpg", ""
 				wantCalls := []string{"/search/movie?language=en-US&query=Signal&year=2024"}
-				if i == 0 {
-					wantCalls = append(wantCalls, "/movie/42?append_to_response=credits&language=uk-UA")
-				} else {
+				// R7: кешу деталей немає — кожен файл з тією самою identity отримує свіжі details.
+				wantCalls = append(wantCalls, "/movie/42?append_to_response=credits&language=uk-UA")
+				if i == 1 {
 					poster = "42_Beta_Signal_mkv.jpg"
 				}
 				switch {
@@ -238,7 +238,8 @@ func TestR2IndependentSearchAfterMissOrError(t *testing.T) {
 				if tc.name == "success" {
 					firstIdentity = r2Identity{MediaTypeMovie, 42}
 					wantCalls = []string{dated, details}
-					secondCalls = []string{dated}
+					// R7: другий файл з тією ж identity не читає кеш — свіжий details HTTP.
+					secondCalls = []string{dated, details}
 				}
 				if tc.attempts > 0 {
 					got, err := c.FetchFromParsed(context.Background(), r2Parsed(2024), "Signal.mkv")
@@ -315,7 +316,8 @@ func TestR2IMDbPrecedenceAndMissFallback(t *testing.T) {
 	}{
 		{"Signal.mkv", "", r2Identity{MediaTypeMovie, 42}, []string{dated, movieDetails}},
 		{"Signal.tt1234567.mkv", "tt1234567", r2Identity{MediaTypeTV, 73}, []string{"/find/tt1234567?external_source=imdb_id&language=uk-UA", tvDetails}},
-		{"Signal.tt7654321.mkv", "tt7654321", r2Identity{MediaTypeMovie, 42}, []string{"/find/tt7654321?external_source=imdb_id&language=uk-UA", dated}},
+		// R7: після miss fallback на пошук йде свіжий details HTTP, а не кеш першої identity.
+		{"Signal.tt7654321.mkv", "tt7654321", r2Identity{MediaTypeMovie, 42}, []string{"/find/tt7654321?external_source=imdb_id&language=uk-UA", dated, movieDetails}},
 	} {
 		start := len(*calls)
 		parsed := r2Parsed(2024)

@@ -34,7 +34,6 @@ func TestRefreshDetailsOnlyStoredEntityAndFreshData(t *testing.T) {
 			}))
 			defer server.Close()
 			client := &Client{client: &http.Client{Transport: &candidateDetailsTransport{server.URL}}, rateLimiter: rate.NewLimiter(rate.Inf, 10)}
-			client.detailsCache.Store(fmt.Sprintf("%s:42", kind), &MovieInfo{TMDBID: 42, MediaType: kind, TitleUA: "Stale"})
 			first, err := client.RefreshDetails(context.Background(), kind, 42)
 			if err != nil {
 				t.Fatal(err)
