@@ -45,6 +45,9 @@ type FileRecognitionContext struct {
 	MediaType          string `json:"parsed_media_type"`
 	ParentDir          string `json:"parent_folder,omitempty"`
 	IMDBID             string `json:"imdb_id,omitempty"`
+	PreviousRejection  string `json:"previous_rejection,omitempty"`
+	PreviousENTitle    string `json:"previous_en_title,omitempty"`
+	PreviousModel      string `json:"-"`
 }
 
 // FileRecognitionContextFromPath будує контекст із повного шляху або basename.
@@ -313,6 +316,88 @@ func (c *Client) RecognizeBulk(ctx context.Context, contexts []FileRecognitionCo
 	return c.retryMissingRecognitions(ctx, prepared, results)
 }
 
+// RetryRecognition makes one model call for the unresolved subset. The caller
+// supplies unique request IDs and receives correlated slots without singleton retries.
+func (c *Client) RetryRecognition(ctx context.Context, inputs []FileRecognitionContext) ([]*RecognizedTitle, error) {
+	if err := ctx.Err(); err != nil || len(inputs) == 0 {
+		return nil, err
+	}
+	prompt, err := buildPrompt(inputs)
+	if err != nil {
+		return nil, err
+	}
+	prompt += "\nThe previous pass found no verified identity for these files. Treat previous_en_title as a rejected hypothesis. Use previous_rejection to reconsider each file and propose a verifiable alternative. Leave it unresolved if the file evidence is insufficient."
+
+	var provider, model string
+	choose := func(candidate string) bool {
+		if model == "" {
+			model = candidate
+		}
+		if slices.ContainsFunc(inputs, func(input FileRecognitionContext) bool {
+			return input.PreviousModel == candidate
+		}) {
+			return false
+		}
+		model = candidate
+		return true
+	}
+	if !c.quotaLocked.Load() && c.cfg.GeminiAPIKey != "" {
+		for _, candidate := range c.modelsForContext(ctx) {
+			if _, unavailable := c.unavailableModels.Load(candidate); !unavailable && choose(candidate) {
+				break
+			}
+		}
+	}
+	switch {
+	case model != "":
+		provider = "gemini"
+	case c.cfg.GroqAPIKey != "":
+		provider = "groq"
+		for _, candidate := range c.groqModelsForContext(ctx) {
+			if choose(candidate) {
+				break
+			}
+		}
+	case c.cfg.GrokAPIKey != "":
+		provider = "grok"
+		for _, candidate := range c.grokModelsForContext(ctx) {
+			if choose(candidate) {
+				break
+			}
+		}
+	}
+	if model == "" {
+		return nil, nil
+	}
+
+	utils.LoggerWithTrace(ctx).Info("ai_semantic_retry",
+		slog.String("provider", provider), slog.String("model", model), slog.Int("file_count", len(inputs)))
+	var results []RecognizedTitle
+	switch provider {
+	case "gemini":
+		// A nil SDK RetryOptions uses a single HTTP attempt.
+		results, err = c.makeRequest(ctx, prompt, model)
+	case "groq":
+		results, err = c.groqRecognizeFallback(WithGroqModelSelection(ctx, []string{model}), prompt)
+	case "grok":
+		results, err = c.grokRecognizeFallback(WithModelSelection(ctx, nil, []string{model}), prompt)
+	}
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	if err != nil {
+		return nil, err
+	}
+	for i := range results {
+		results[i].Provider, results[i].Model = provider, model
+	}
+	ordered := make([]*RecognizedTitle, len(inputs))
+	for i, input := range inputs {
+		ordered[i], _ = matchRecognition(input, results, true)
+	}
+	return ordered, nil
+}
+
 func (c *Client) retryMissingRecognitions(ctx context.Context, contexts []FileRecognitionContext, results []RecognizedTitle) ([]*RecognizedTitle, error) {
 	idCounts := make(map[int]int, len(contexts))
 	for _, input := range contexts {
@@ -503,7 +588,8 @@ func (c *Client) makeRequest(ctx context.Context, prompt, modelName string) ([]R
 		return nil, fmt.Errorf("помилка API Gemini: %w", err)
 	}
 
-	if len(resp.Candidates) == 0 || len(resp.Candidates[0].Content.Parts) == 0 {
+	if resp == nil || len(resp.Candidates) == 0 || resp.Candidates[0] == nil ||
+		resp.Candidates[0].Content == nil || len(resp.Candidates[0].Content.Parts) == 0 {
 		return nil, fmt.Errorf("модель повернула порожню відповідь")
 	}
 

@@ -387,7 +387,14 @@ func normalizedNeedsReview(m Movie) bool { return m.TmdbID == 0 || m.NeedsReview
 
 // SaveMoviesBatch — масовий запис через єдину транзакцію
 func (db *DB) SaveMoviesBatch(ctx context.Context, movies []Movie) error {
-	return db.saveMoviesBatch(ctx, movies, nil)
+	_, err := db.saveMoviesBatch(ctx, movies, nil, nil)
+	return err
+}
+
+// SaveRecognitionRetries commits a mixed batch, applying semantic retry results
+// only if their file still has no confirmed identity. It returns the rows written.
+func (db *DB) SaveRecognitionRetries(ctx context.Context, movies []Movie, retried map[string]bool) ([]Movie, error) {
+	return db.saveMoviesBatch(ctx, movies, nil, retried)
 }
 
 // SaveRepairedMovie uses the batch transaction and rejects concurrent changes.
@@ -401,7 +408,7 @@ func (db *DB) SaveRepairedMovie(ctx context.Context, before, after Movie) error 
 	after.VerificationScore = before.VerificationScore
 	after.NeedsReview = before.NeedsReview
 	after.ReviewReason = before.ReviewReason
-	return db.saveMoviesBatch(ctx, []Movie{after}, func(tx *sql.Tx) error {
+	_, err := db.saveMoviesBatch(ctx, []Movie{after}, func(tx *sql.Tx) error {
 		current, err := getMovieByFilename(ctx, tx, before.Filename)
 		if err != nil {
 			return err
@@ -410,39 +417,54 @@ func (db *DB) SaveRepairedMovie(ctx context.Context, before, after Movie) error 
 			return fmt.Errorf("запис змінився під час оновлення; повторіть дію")
 		}
 		return nil
-	})
+	}, nil)
+	return err
 }
 
-func (db *DB) saveMoviesBatch(ctx context.Context, movies []Movie, guard func(*sql.Tx) error) error {
+func (db *DB) saveMoviesBatch(ctx context.Context, movies []Movie, guard func(*sql.Tx) error, retried map[string]bool) ([]Movie, error) {
 	if len(movies) == 0 {
-		return nil
+		return nil, nil
 	}
 
 	// Begin transaction
 	tx, err := db.db.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("begin tx failed: %w", err)
+		return nil, fmt.Errorf("begin tx failed: %w", err)
 	}
 	defer tx.Rollback() // safe no-op if Commit succeeds
 	if guard != nil {
 		if err := guard(tx); err != nil {
-			return err
+			return nil, err
 		}
 	}
 
 	// Prepare statement for performance
 	stmt, err := tx.PrepareContext(ctx, movieUpsertQuery)
 	if err != nil {
-		return fmt.Errorf("prepare stmt failed: %w", err)
+		return nil, fmt.Errorf("prepare stmt failed: %w", err)
 	}
 	defer stmt.Close()
 
+	written := movies
+	if len(retried) > 0 {
+		written = make([]Movie, 0, len(movies))
+	}
 	for _, m := range movies {
 		if err := ctx.Err(); err != nil {
 			utils.LoggerWithTrace(ctx).Debug("batch_insert_cancelled", slog.Any("error", err))
-			return err
+			return nil, err
 		}
 
+		if retried[m.Filename] {
+			var confirmed bool
+			err := tx.QueryRowContext(ctx, "SELECT EXISTS (SELECT 1 FROM movies WHERE filename = ? AND tmdb_id > 0)", m.Filename).Scan(&confirmed)
+			if err != nil {
+				return nil, fmt.Errorf("recognition guard failed: %w", err)
+			}
+			if confirmed {
+				continue
+			}
+		}
 		_, err := stmt.ExecContext(ctx,
 			m.Filename, m.TmdbID, m.TitleUA, m.TitleEN, m.Year,
 			m.Genres, m.Cast, m.Plot, m.PosterURL, m.LocalPosterPath, m.MediaType,
@@ -450,14 +472,17 @@ func (db *DB) saveMoviesBatch(ctx context.Context, movies []Movie, guard func(*s
 			m.VoteAverage, m.VoteCount,
 		)
 		if err != nil {
-			return fmt.Errorf("batch insert %q: %w", m.Filename, err)
+			return nil, fmt.Errorf("batch insert %q: %w", m.Filename, err)
+		}
+		if len(retried) > 0 {
+			written = append(written, m)
 		}
 	}
 
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("batch commit failed: %w", err)
+		return nil, fmt.Errorf("batch commit failed: %w", err)
 	}
-	return nil
+	return written, nil
 }
 
 func (db *DB) GetMovieByFilename(ctx context.Context, filename string) (*Movie, error) {
