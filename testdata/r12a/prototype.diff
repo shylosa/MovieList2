@@ -1,0 +1,61 @@
+diff --git a/internal/tmdb/client.go b/internal/tmdb/client.go
+--- a/internal/tmdb/client.go
++++ b/internal/tmdb/client.go
+@@ -278,0 +279 @@ func (c *Client) FetchFromParsed(ctx context.Context, parsed ParsedFile, filenam
++	ctx = withSearchAttempts(ctx)
+@@ -286 +287,13 @@ func (c *Client) FetchFromParsed(ctx context.Context, parsed ParsedFile, filenam
+-	return nil, cmp.Or(imdbErr, err)
++	firstErr := cmp.Or(imdbErr, err)
++	attempts := yoSearchAttempts(parsed, filename)
++	if len(attempts) == 0 {
++		return nil, firstErr
++	}
++	info, err = c.searchAttempts(ctx, parsed, filename, attempts)
++	if canceled := searchCancellation(ctx, err); canceled != nil {
++		return nil, canceled
++	}
++	if info != nil {
++		return info, nil
++	}
++	return nil, cmp.Or(firstErr, err)
+diff --git a/internal/tmdb/search.go b/internal/tmdb/search.go
+--- a/internal/tmdb/search.go
++++ b/internal/tmdb/search.go
+@@ -427,0 +428,4 @@ func (c *Client) SearchWithFallbacks(
++	return c.searchAttempts(ctx, parsed, originalFilename, attempts)
++}
++
++func (c *Client) searchAttempts(ctx context.Context, parsed ParsedFile, originalFilename string, attempts []searchAttempt) (*MovieInfo, error) {
+@@ -507 +511 @@ func buildAttempts(parsed ParsedFile, originalFilename, mediaRoot string) []sear
+-	mt := parsed.MediaType
++	mt := searchMediaType(parsed, originalFilename)
+@@ -509,2 +513 @@ func buildAttempts(parsed ParsedFile, originalFilename, mediaRoot string) []sear
+-	if mt == MediaTypeMovie && isCyrillicSeries(originalFilename) {
+-		mt = MediaTypeTV
++	if mt != parsed.MediaType {
+@@ -558,0 +562,25 @@ func buildAttempts(parsed ParsedFile, originalFilename, mediaRoot string) []sear
++func searchMediaType(parsed ParsedFile, filename string) MediaType {
++	if parsed.MediaType == MediaTypeMovie && isCyrillicSeries(filename) {
++		return MediaTypeTV
++	}
++	return parsed.MediaType
++}
++
++var yoToYe = strings.NewReplacer("ё", "е", "Ё", "Е")
++
++func yoSearchAttempts(parsed ParsedFile, filename string) []searchAttempt {
++	if !strings.ContainsAny(parsed.CleanTitle, "ёЁ") ||
++		resolveHomoglyphs(ParseFilename(filename).CleanTitle) != parsed.CleanTitle {
++		return nil
++	}
++	query := yoToYe.Replace(parsed.CleanTitle)
++	mediaType := searchMediaType(parsed, filename)
++	if parsed.Year > 0 {
++		return []searchAttempt{
++			{query, parsed.Year, parsed.Year, mediaType, "ё→е+рік"},
++			{query, 0, parsed.Year, mediaType, "ё→е без року"},
++		}
++	}
++	return []searchAttempt{{query, 0, 0, mediaType, "ё→е без року"}}
++}
++
