@@ -9,8 +9,11 @@ import (
 
 type searchAttemptsKey struct{}
 type attemptIdentity struct {
-	SearchCacheKey
-	locales string
+	query      string
+	queryYear  int
+	targetYear int
+	mediaType  MediaType
+	locales    string
 }
 
 // The recognition pipeline is sequential. This map belongs to one pipeline,
@@ -28,7 +31,13 @@ func claimSearchAttempt(ctx context.Context, query string, queryYear, targetYear
 	if utils.HasCyrillic(query) {
 		locales = "uk-UA,ru-RU"
 	}
-	key := attemptIdentity{SearchCacheKey{strings.ToLower(strings.TrimSpace(query)), queryYear, targetYear, mediaType}, locales}
+	key := attemptIdentity{
+		query:      strings.ToLower(strings.TrimSpace(query)),
+		queryYear:  queryYear,
+		targetYear: targetYear,
+		mediaType:  mediaType,
+		locales:    locales,
+	}
 	if seen[key] {
 		return false
 	}

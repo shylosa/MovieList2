@@ -89,7 +89,7 @@ License: MIT License
 - **SQLite WAL:** `journal_mode=WAL`, `busy_timeout=5000`, `SetMaxOpenConns(1)`.
 - **Batch DB:** `SaveMoviesBatch` — єдина транзакція на batch, `filenameChunkSize=500` для `IN` запитів.
 - **Structured logging:** `log/slog` у форматі JSON із Trace ID на кожен файл.
-- **Кешування (L1/L2):** L1 — TMDB-результати в пам’яті; L2 — перевірені AI-підказки в SQLite `ai_resolutions`.
+- **Кешування:** у пам’яті зберігаються деталі й аліаси TMDB, у SQLite `ai_resolutions` — AI-підказки для повторної верифікації. Пошук за назвою виконується для кожного файла окремо.
 
 ---
 

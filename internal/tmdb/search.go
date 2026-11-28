@@ -434,7 +434,6 @@ func (c *Client) SearchWithFallbacks(
 		}
 
 		// Після провалу CYR-пошуку для варіанта "Папка" — EN cascade через латинську транслітерацію.
-		// Інакше cached null по кириличному запиту блокує EN-пошук (напр. "Скарпетта" → "Scarpetta").
 		if a.label == "Папка" && utils.HasCyrillic(a.query) {
 			if err := ctx.Err(); err != nil {
 				return nil, err
@@ -565,20 +564,6 @@ func (c *Client) searchAndFetch(
 		return nil, nil
 	}
 
-	// 🟢 Спочатку перевіряємо кеш пошуку (уніфікований формат з client.go)
-	cacheKey := SearchCacheKey{
-		query:      strings.ToLower(query),
-		queryYear:  queryYear,
-		targetYear: targetYear,
-		mediaType:  preferredType,
-	}
-	if val, ok := c.searchCache.Load(cacheKey); ok {
-		// safe to ignore: only *MovieInfo values are stored in searchCache.
-		info, _ := val.(*MovieInfo)
-		utils.LoggerWithTrace(ctx).Debug("search_cache_hit", slog.String("query", query))
-		return info, nil
-	}
-
 	// 🔴 КАСКАД ПОШУКУ: Шукаємо в обох індексах для кириличних запитів
 	langs := []string{"en-US"}
 	if utils.HasCyrillic(query) {
@@ -659,7 +644,6 @@ LANG_LOOP:
 
 	if bestGlobal == nil {
 		logger.Debug("no_best_candidate_found")
-		c.searchCache.Store(cacheKey, (*MovieInfo)(nil)) // Кешуємо негативний результат
 		return nil, nil
 	}
 
@@ -698,7 +682,6 @@ LANG_LOOP:
 		if bestGlobal.matchedAlias != "" {
 			info.MatchedAlias = bestGlobal.matchedAlias
 		}
-		c.searchCache.Store(cacheKey, info)
 	}
 	return info, err
 }

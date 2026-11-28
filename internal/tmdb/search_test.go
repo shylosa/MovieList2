@@ -120,14 +120,6 @@ func TestBuildAttemptsFallbackPreservesTargetYear(t *testing.T) {
 	}
 }
 
-func TestSearchCacheSeparatesQueryYearFromTargetYear(t *testing.T) {
-	withAPIYear := SearchCacheKey{query: "enemy", queryYear: 2013, targetYear: 2013, mediaType: MediaTypeMovie}
-	withoutAPIYear := SearchCacheKey{query: "enemy", queryYear: 0, targetYear: 2013, mediaType: MediaTypeMovie}
-	if withAPIYear == withoutAPIYear {
-		t.Fatal("year-filtered and no-year fallback must not share a cache entry")
-	}
-}
-
 func TestManualCandidateUsesPopularityToResolveExactTitleCollision(t *testing.T) {
 	norm := normalizeForCompare("Enemy")
 	correct, _, ok := manualCandidateScore(tmdbSearchResult{
@@ -170,33 +162,6 @@ func TestSearchExactTitleStrictTVSkipsMovieEndpoint(t *testing.T) {
 	}
 	if movieCalled || info == nil || info.TMDBID != 62476 || info.MediaType != MediaTypeTV {
 		t.Fatalf("movieCalled=%v info=%+v", movieCalled, info)
-	}
-}
-
-func TestFetchFromParsedIMDbBypassesTitleCache(t *testing.T) {
-	findCalled := false
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		switch {
-		case strings.HasSuffix(r.URL.Path, "/find/tt1234567"):
-			findCalled = true
-			w.Write([]byte(`{"movie_results":[{"id":2}],"tv_results":[]}`))
-		case strings.HasSuffix(r.URL.Path, "/movie/2"):
-			w.Write([]byte(`{"id":2,"title":"Правильний фільм","original_title":"Correct Movie","release_date":"2020-01-01"}`))
-		default:
-			http.NotFound(w, r)
-		}
-	}))
-	defer server.Close()
-	c := &Client{client: &http.Client{Transport: &searchRewriteTransport{serverURL: server.URL}}, rateLimiter: rate.NewLimiter(rate.Inf, 1), postersDir: t.TempDir(), apiKey: "test"}
-	key := SearchCacheKey{query: "collision", queryYear: 2020, targetYear: 2020, mediaType: MediaTypeMovie}
-	c.searchCache.Store(key, &MovieInfo{TMDBID: 1, TitleEN: "Wrong Cached Movie", MediaType: MediaTypeMovie})
-	got, err := c.FetchFromParsed(context.Background(), ParsedFile{CleanTitle: "Collision", Year: 2020, MediaType: MediaTypeMovie, TitleLang: TitleLangLatin, IMDBID: "tt1234567"}, "Collision.tt1234567.2020.mkv")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !findCalled || got == nil || got.TMDBID != 2 {
-		t.Fatalf("IMDb lookup did not bypass title cache: findCalled=%v info=%+v", findCalled, got)
 	}
 }
 

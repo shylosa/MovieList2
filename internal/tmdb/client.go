@@ -31,14 +31,6 @@ const (
 	imageBaseURL = "https://image.tmdb.org/t/p/w500"
 )
 
-// SearchCacheKey — ключ для кешування результатів пошуку (запобігає подвійним запитам).
-type SearchCacheKey struct {
-	query      string
-	queryYear  int
-	targetYear int
-	mediaType  MediaType
-}
-
 var (
 	ErrNotFound            = fmt.Errorf("resource not found")
 	reLatinOnly            = regexp.MustCompile(`^[a-zA-Z0-9\s\-\:\.,!?']+$`)
@@ -94,8 +86,6 @@ type Client struct {
 	// altTitlesCache — кеш для аліасів, щоб не смикати API для однакових ID
 	altTitlesCache sync.Map
 
-	// searchCache — кеш результатів пошуку (query+year+type)
-	searchCache           sync.Map
 	detailsCache          sync.Map
 	candidateDetailsCache sync.Map
 	detailsGroup          singleflight.Group
@@ -175,10 +165,6 @@ func (c *Client) mediaRootPath() string {
 
 // ClearCaches — безпечне очищення кешу між скануваннями
 func (c *Client) ClearCaches() {
-	c.searchCache.Range(func(key, value any) bool {
-		c.searchCache.Delete(key)
-		return true
-	})
 	c.altTitlesCache.Range(func(key, value any) bool {
 		c.altTitlesCache.Delete(key)
 		return true
@@ -267,7 +253,7 @@ func (c *Client) FetchFromParsed(ctx context.Context, parsed ParsedFile, filenam
 		slog.String("imdb_id", parsed.IMDBID),
 	)
 
-	// IMDb ID є авторитетнішим за кеш пошуку за назвою. Два однойменні твори
+	// IMDb ID має пріоритет над пошуком за назвою. Два однойменні твори
 	// можуть мати однаковий title/year/type, але різні IMDb identities.
 	if parsed.IMDBID != "" {
 		info, err := c.tryFindByIMDB(ctx, parsed.IMDBID, filename)
@@ -278,20 +264,6 @@ func (c *Client) FetchFromParsed(ctx context.Context, parsed ParsedFile, filenam
 			utils.LoggerWithTrace(ctx).Info("imdb_match_found", slog.String("imdb_id", parsed.IMDBID), slog.String("title", info.TitleUA))
 			return info, nil
 		}
-	}
-
-	// 🟢 ПЕРЕВІРКА КЕШУ: struct-ключ не потребує алокацій strings.ToLower або fmt.Sprintf
-	cacheKey := SearchCacheKey{
-		query:      strings.ToLower(parsed.CleanTitle),
-		queryYear:  parsed.Year,
-		targetYear: parsed.Year,
-		mediaType:  parsed.MediaType,
-	}
-	if val, ok := c.searchCache.Load(cacheKey); ok {
-		// safe to ignore: only *MovieInfo values are stored in searchCache.
-		info, _ := val.(*MovieInfo)
-		utils.LoggerWithTrace(ctx).Info("tmdb_l1_cache_hit", slog.String("title", parsed.CleanTitle))
-		return info, nil
 	}
 
 	if parsed.CleanTitle == "" {
