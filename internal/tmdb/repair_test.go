@@ -26,7 +26,11 @@ func TestRefreshDetailsOnlyStoredEntityAndFreshData(t *testing.T) {
 				if r.URL.Query().Get("append_to_response") != "credits" {
 					t.Error("cast not refreshed")
 				}
-				fmt.Fprintf(w, `{"id":42,"title":"Український фільм %d","name":"Український серіал %d","overview":"Це український опис.","genres":[{"name":"Drama"}],"credits":{"cast":[{"name":"Tom Hardy"}]},"vote_count":10,"vote_average":7}`, calls, calls)
+				titleField := "title"
+				if kind == MediaTypeTV {
+					titleField = "name"
+				}
+				fmt.Fprintf(w, `{"id":42,"%s":"Українська назва %d","overview":"Це український опис.","genres":[{"name":"Drama"}],"credits":{"cast":[{"name":"Tom Hardy"}]},"vote_count":10,"vote_average":7}`, titleField, calls)
 			}))
 			defer server.Close()
 			client := &Client{client: &http.Client{Transport: &candidateDetailsTransport{server.URL}}, rateLimiter: rate.NewLimiter(rate.Inf, 10)}

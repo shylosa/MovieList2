@@ -660,9 +660,6 @@ LANG_LOOP:
 	}
 
 	info, err := c.GetDetails(ctx, detailType, bestGlobal.result.ID, originalFilename)
-	if err == nil && info != nil && (info.TMDBID != bestGlobal.result.ID || info.MediaType != detailType) {
-		return nil, fmt.Errorf("TMDB details identity differs from selected %s:%d", detailType, bestGlobal.result.ID)
-	}
 
 	if err == nil && info != nil {
 		info.VerificationScore = deterministicVerificationScore(bestGlobal.score)

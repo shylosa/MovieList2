@@ -2,6 +2,8 @@ package tmdb
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -11,6 +13,41 @@ import (
 
 const maxCastMembers = 5
 
+var errDetailsIdentity = errors.New("TMDB details identity mismatch")
+
+type detailsIdentity struct {
+	ID            int       `json:"id"`
+	MediaType     MediaType `json:"media_type"`
+	Title         *string   `json:"title"`
+	OriginalTitle *string   `json:"original_title"`
+	Name          *string   `json:"name"`
+	OriginalName  *string   `json:"original_name"`
+}
+
+func (d detailsIdentity) verify(kind MediaType, id int) error {
+	if d.ID != id || d.ID <= 0 {
+		return fmt.Errorf("%w: requested %s:%d, received id %d", errDetailsIdentity, kind, id, d.ID)
+	}
+	if d.MediaType != "" && d.MediaType != kind {
+		return fmt.Errorf("%w: requested %s:%d, received a different media_type", errDetailsIdentity, kind, id)
+	}
+	// Details usually omit media_type. Use the typed title fields as evidence
+	// of the response shape, including fields present with empty strings.
+	movie := d.Title != nil || d.OriginalTitle != nil
+	tv := d.Name != nil || d.OriginalName != nil
+	if (kind == MediaTypeMovie && (!movie || tv)) || (kind == MediaTypeTV && (!tv || movie)) {
+		return fmt.Errorf("%w: requested %s:%d, response has incompatible title fields", errDetailsIdentity, kind, id)
+	}
+	return nil
+}
+
+func detailsTitle(title *string) string {
+	if title == nil {
+		return ""
+	}
+	return *title
+}
+
 // Спільний тип для жанрів та акторів (вирішує проблему суворої типізації масивів)
 type tmdbNamedItem struct {
 	Name string `json:"name"`
@@ -18,26 +55,22 @@ type tmdbNamedItem struct {
 
 // tmdbMovieDetails — відповідь TMDB для /movie/{id}
 type tmdbMovieDetails struct {
-	ID            int             `json:"id"`
-	Title         string          `json:"title"`
-	OriginalTitle string          `json:"original_title"`
-	ReleaseDate   string          `json:"release_date"`
-	Overview      string          `json:"overview"`
-	PosterPath    string          `json:"poster_path"`
-	Genres        []tmdbNamedItem `json:"genres"`
-	VoteAverage   float64         `json:"vote_average"`
-	VoteCount     int             `json:"vote_count"`
-	Runtime       int             `json:"runtime"`
-	Credits       struct {
+	detailsIdentity
+	ReleaseDate string          `json:"release_date"`
+	Overview    string          `json:"overview"`
+	PosterPath  string          `json:"poster_path"`
+	Genres      []tmdbNamedItem `json:"genres"`
+	VoteAverage float64         `json:"vote_average"`
+	VoteCount   int             `json:"vote_count"`
+	Runtime     int             `json:"runtime"`
+	Credits     struct {
 		Cast []tmdbNamedItem `json:"cast"`
 	} `json:"credits"`
 }
 
 // tmdbTVDetails — відповідь TMDB для /tv/{id}
 type tmdbTVDetails struct {
-	ID             int             `json:"id"`
-	Name           string          `json:"name"`
-	OriginalName   string          `json:"original_name"`
+	detailsIdentity
 	FirstAirDate   string          `json:"first_air_date"`
 	Overview       string          `json:"overview"`
 	PosterPath     string          `json:"poster_path"`
@@ -48,6 +81,42 @@ type tmdbTVDetails struct {
 	Credits        struct {
 		Cast []tmdbNamedItem `json:"cast"`
 	} `json:"credits"`
+}
+
+// A failed decode can populate some fields. Each HTTP retry must supply its
+// own identity and metadata, even if a previous body was partially decoded.
+func (d *tmdbMovieDetails) UnmarshalJSON(data []byte) error {
+	type payload tmdbMovieDetails
+	*d = tmdbMovieDetails{}
+	return json.Unmarshal(data, (*payload)(d))
+}
+
+func (d *tmdbTVDetails) UnmarshalJSON(data []byte) error {
+	type payload tmdbTVDetails
+	*d = tmdbTVDetails{}
+	return json.Unmarshal(data, (*payload)(d))
+}
+
+func (c *Client) loadMovieDetails(ctx context.Context, url string, id int) (tmdbMovieDetails, error) {
+	var d tmdbMovieDetails
+	if err := c.doRequestWithRetry(ctx, url, &d); err != nil {
+		return d, err
+	}
+	if err := ctx.Err(); err != nil {
+		return d, err
+	}
+	return d, d.verify(MediaTypeMovie, id)
+}
+
+func (c *Client) loadTVDetails(ctx context.Context, url string, id int) (tmdbTVDetails, error) {
+	var d tmdbTVDetails
+	if err := c.doRequestWithRetry(ctx, url, &d); err != nil {
+		return d, err
+	}
+	if err := ctx.Err(); err != nil {
+		return d, err
+	}
+	return d, d.verify(MediaTypeTV, id)
 }
 
 // getMovieDetails отримує повні деталі фільму з TMDB (Каскад: UA -> RU -> EN)
@@ -62,22 +131,25 @@ func (c *Client) getMovieDetails(ctx context.Context, id int, originalFilename s
 			return nil, err
 		}
 		url := fmt.Sprintf("%s/movie/%d?api_key=%s&language=%s&append_to_response=credits", baseURL, id, c.apiKey, lang)
-		var d tmdbMovieDetails
-
-		if err := c.doRequestWithRetry(ctx, url, &d); err != nil {
+		d, err := c.loadMovieDetails(ctx, url, id)
+		if err != nil {
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
 			}
+			if errors.Is(err, errDetailsIdentity) {
+				return nil, err
+			}
 			continue
 		}
-		titles[lang] = strings.TrimSpace(d.Title)
+		title := detailsTitle(d.Title)
+		titles[lang] = strings.TrimSpace(title)
 		plots[lang] = strings.TrimSpace(d.Overview)
 
 		if finalInfo == nil {
 			finalInfo = &MovieInfo{
 				TMDBID:      d.ID,
-				TitleUA:     d.Title,
-				TitleEN:     d.OriginalTitle,
+				TitleUA:     title,
+				TitleEN:     detailsTitle(d.OriginalTitle),
 				Year:        extractYearFromDate(d.ReleaseDate),
 				Plot:        d.Overview,
 				Genres:      joinGenres(d.Genres),
@@ -96,9 +168,9 @@ func (c *Client) getMovieDetails(ctx context.Context, id int, originalFilename s
 			}
 
 			// Те саме робимо для назви
-			if finalInfo.TitleUA == "" || finalInfo.TitleUA == finalInfo.TitleEN || (!utils.HasCyrillic(finalInfo.TitleUA) && utils.HasCyrillic(d.Title)) {
-				if d.Title != "" {
-					finalInfo.TitleUA = d.Title
+			if finalInfo.TitleUA == "" || finalInfo.TitleUA == finalInfo.TitleEN || (!utils.HasCyrillic(finalInfo.TitleUA) && utils.HasCyrillic(title)) {
+				if title != "" {
+					finalInfo.TitleUA = title
 				}
 			}
 
@@ -150,22 +222,25 @@ func (c *Client) getTVDetails(ctx context.Context, id int, originalFilename stri
 			return nil, err
 		}
 		url := fmt.Sprintf("%s/tv/%d?api_key=%s&language=%s&append_to_response=credits", baseURL, id, c.apiKey, lang)
-		var d tmdbTVDetails
-
-		if err := c.doRequestWithRetry(ctx, url, &d); err != nil {
+		d, err := c.loadTVDetails(ctx, url, id)
+		if err != nil {
 			if ctx.Err() != nil {
 				return nil, ctx.Err()
 			}
+			if errors.Is(err, errDetailsIdentity) {
+				return nil, err
+			}
 			continue
 		}
-		titles[lang] = strings.TrimSpace(d.Name)
+		title := detailsTitle(d.Name)
+		titles[lang] = strings.TrimSpace(title)
 		plots[lang] = strings.TrimSpace(d.Overview)
 
 		if finalInfo == nil {
 			finalInfo = &MovieInfo{
 				TMDBID:      d.ID,
-				TitleUA:     d.Name,
-				TitleEN:     d.OriginalName,
+				TitleUA:     title,
+				TitleEN:     detailsTitle(d.OriginalName),
 				Year:        extractYearFromDate(d.FirstAirDate),
 				Plot:        d.Overview,
 				Genres:      joinGenres(d.Genres),
@@ -181,9 +256,9 @@ func (c *Client) getTVDetails(ctx context.Context, id int, originalFilename stri
 			if finalInfo.Plot == "" || (!utils.HasCyrillic(finalInfo.Plot) && utils.HasCyrillic(d.Overview)) {
 				finalInfo.Plot = d.Overview
 			}
-			if finalInfo.TitleUA == "" || finalInfo.TitleUA == finalInfo.TitleEN || (!utils.HasCyrillic(finalInfo.TitleUA) && utils.HasCyrillic(d.Name)) {
-				if d.Name != "" {
-					finalInfo.TitleUA = d.Name
+			if finalInfo.TitleUA == "" || finalInfo.TitleUA == finalInfo.TitleEN || (!utils.HasCyrillic(finalInfo.TitleUA) && utils.HasCyrillic(title)) {
+				if title != "" {
+					finalInfo.TitleUA = title
 				}
 			}
 			if finalInfo.Genres == "" && len(d.Genres) > 0 {
@@ -242,8 +317,8 @@ func (c *Client) GetDetails(ctx context.Context, mediaType MediaType, id int, or
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	if mediaType != MediaTypeTV {
-		mediaType = MediaTypeMovie
+	if id <= 0 || (mediaType != MediaTypeMovie && mediaType != MediaTypeTV) {
+		return nil, fmt.Errorf("valid TMDB identity required")
 	}
 	key := fmt.Sprintf("%s:%d", mediaType, id)
 	var info *MovieInfo
@@ -315,9 +390,6 @@ func (c *Client) RefreshDetails(ctx context.Context, mediaType MediaType, id int
 	if err != nil {
 		return nil, err
 	}
-	if info == nil || info.TMDBID != id || info.MediaType != mediaType {
-		return nil, fmt.Errorf("TMDB returned a different identity")
-	}
 	c.detailsCache.Delete(fmt.Sprintf("%s:%d", mediaType, id))
 	return info, nil
 }
@@ -338,30 +410,26 @@ func (c *Client) GetCandidateDetails(ctx context.Context, mediaType MediaType, i
 		return &copy, nil
 	}
 	requestURL := fmt.Sprintf("%s/%s/%d?api_key=%s&language=uk-UA", baseURL, mediaType, id, c.apiKey)
-	result := &CandidateDetails{TMDBID: id, MediaType: mediaType}
+	result := &CandidateDetails{MediaType: mediaType}
 	if mediaType == MediaTypeMovie {
-		var d tmdbMovieDetails
-		if err := c.doRequestWithRetry(ctx, requestURL, &d); err != nil {
+		d, err := c.loadMovieDetails(ctx, requestURL, id)
+		if err != nil {
 			return nil, err
 		}
-		if d.ID <= 0 {
-			return nil, ErrNotFound
-		}
-		result.Title, result.OriginalTitle, result.ReleaseDate, result.Runtime = d.Title, d.OriginalTitle, d.ReleaseDate, d.Runtime
+		result.TMDBID = d.ID
+		result.Title, result.OriginalTitle, result.ReleaseDate, result.Runtime = detailsTitle(d.Title), detailsTitle(d.OriginalTitle), d.ReleaseDate, d.Runtime
 		result.Genres, result.Overview, result.VoteAverage, result.VoteCount = joinGenres(d.Genres), d.Overview, d.VoteAverage, d.VoteCount
 		if d.PosterPath != "" {
 			result.PosterURL = imageBaseURL + d.PosterPath
 		}
 		result.ShortFilm = result.Runtime > 0 && result.Runtime <= 40
 	} else {
-		var d tmdbTVDetails
-		if err := c.doRequestWithRetry(ctx, requestURL, &d); err != nil {
+		d, err := c.loadTVDetails(ctx, requestURL, id)
+		if err != nil {
 			return nil, err
 		}
-		if d.ID <= 0 {
-			return nil, ErrNotFound
-		}
-		result.Title, result.OriginalTitle, result.ReleaseDate = d.Name, d.OriginalName, d.FirstAirDate
+		result.TMDBID = d.ID
+		result.Title, result.OriginalTitle, result.ReleaseDate = detailsTitle(d.Name), detailsTitle(d.OriginalName), d.FirstAirDate
 		if len(d.EpisodeRuntime) > 0 {
 			result.Runtime = d.EpisodeRuntime[0]
 		}

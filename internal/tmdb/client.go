@@ -83,9 +83,6 @@ type Client struct {
 	mediaRootMu sync.RWMutex
 	rateLimiter *rate.Limiter
 
-	// altTitlesCache — кеш для аліасів, щоб не смикати API для однакових ID
-	altTitlesCache sync.Map
-
 	detailsCache          sync.Map
 	candidateDetailsCache sync.Map
 	detailsGroup          singleflight.Group
@@ -165,10 +162,6 @@ func (c *Client) mediaRootPath() string {
 
 // ClearCaches — безпечне очищення кешу між скануваннями
 func (c *Client) ClearCaches() {
-	c.altTitlesCache.Range(func(key, value any) bool {
-		c.altTitlesCache.Delete(key)
-		return true
-	})
 	c.detailsCache.Range(func(key, value any) bool { c.detailsCache.Delete(key); return true })
 	c.candidateDetailsCache.Range(func(key, value any) bool { c.candidateDetailsCache.Delete(key); return true })
 	c.searchCalls.Store(0)
@@ -922,11 +915,6 @@ type tmdbTVAltTitles struct {
 
 // getAlternativeTitles робить швидкий запит для отримання всіх аліасів
 func (c *Client) getAlternativeTitles(ctx context.Context, id int, mediaType MediaType) ([]string, error) {
-	// Спочатку перевіряємо кеш
-	if val, ok := c.altTitlesCache.Load(id); ok {
-		return val.([]string), nil
-	}
-
 	var titles []string
 
 	if mediaType == MediaTypeMovie {
@@ -951,7 +939,5 @@ func (c *Client) getAlternativeTitles(ctx context.Context, id int, mediaType Med
 		}
 	}
 
-	// Зберігаємо в кеш перед поверненням
-	c.altTitlesCache.Store(id, titles)
 	return titles, nil
 }
